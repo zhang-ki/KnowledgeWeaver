@@ -36,11 +36,27 @@
   "coordinator_update": {
     "reported_at_utc": "2026-11-18T13:20:50Z",
     "reported_by": "coordinator",
+    "historical_snapshot": true,
+    "superseded_for_current_wsl_state_by": "orchestrator_wsl_admin_attempt",
     "administrator_elevation_token_available": false,
     "virtual_machine_platform_state": "UNCONFIRMED",
     "wsl_install_attempt": "NOT_STARTED_ELEVATION_UNAVAILABLE",
     "restart_scheduled": false,
     "system_feature_changes_performed": false
+  },
+  "orchestrator_wsl_admin_attempt": {
+    "recorded_at_utc": "2026-11-18T13:41:31Z",
+    "observation_time_supplied": false,
+    "user_authorization": "PROVIDED",
+    "attempt": "ADMINISTRATOR_WSL_NO_DISTRIBUTION_ENABLE_SCRIPT",
+    "exit_code": 0,
+    "output_and_follow_up_marker": "Wsl/E_ACCESSDENIED",
+    "get_windows_optional_feature_result": "BLOCKED_REQUIRES_ELEVATION",
+    "runas_read_only_recheck": "REJECTED",
+    "feature_state": "UNCONFIRMED",
+    "restart_performed": false,
+    "result": "ENABLEMENT_UNKNOWN_REQUIRES_LOCAL_ADMIN_CONFIRMATION",
+    "source": "Orchestrator report in task coordination"
   },
   "license_accepted": false,
   "desktop_started_by_this_session": false,

@@ -11,9 +11,9 @@
 - 重新核对专属工作树：指定分支、派发 base SHA、起始干净状态均匹配；未更改 main 或其他工作树。
 - 读取冻结计划、P1 门禁、Compose 参考模板及交付模板。
 - 主机盘点记录在 verification/environment/docker/host-inventory.json。系统版本 registry 值为 10.0.26200.0 / 25H2 / build 26200 / UBR 9974，ProductName 为 Windows 10 Home China，架构 AMD64。C 盘可用约 69.3 GB，D 盘可用约 202.3 GB。系统名称存在不一致，不能据此确认受支持的 Windows 11 版本。
-- Docker CLI、Compose CLI、Desktop 安装路径和 com.docker.service 在 20:46 的初始盘点中均未发现。后来 Orchestrator 说明 `$env:LOCALAPPDATA` 被重定向，因此此前按该值查找安装路径的检查不适用于实际用户目录。WSL 的 version/list 查询退出码为 1、status 为 50；读取 Windows 可选功能状态要求管理员权限。固件虚拟化无法通过 CIM/systeminfo 可靠核验。协调器报告 Windows 功能未改且未重启。
+- Docker CLI、Compose CLI、Desktop 安装路径和 com.docker.service 在 20:46 的初始盘点中均未发现。后来 Orchestrator 说明 `$env:LOCALAPPDATA` 被重定向，因此此前按该值查找安装路径的检查不适用于实际用户目录。WSL 的 version/list 查询退出码为 1、status 为 50；读取 Windows 可选功能状态要求管理员权限。固件虚拟化无法通过 CIM/systeminfo 可靠核验。
 - Docker Desktop 官方 release notes 列出 4.99.0；官方 checksums 文件列出的 Windows x64 installer SHA-256 为 a5e299131c9c53d60f3f752b162078945eb5faf6eedcf0be20a214c6e6cea444。下载文件 SHA-256 与官方值一致、checksum listing 匹配、Authenticode 状态为 Valid。较早的即时版本观察（13:22:48Z）为 NOT_INSTALLED 且安装命令退出码为空；之后 Orchestrator 报告实际 per-user 安装路径中的 Docker Desktop.exe 版本为 4.99.0.245822 且签名有效，直接运行该路径的 docker.exe --version 得 Docker 29.9.3（exit 0），docker compose version 得 v5.7.0（exit 0）。Orchestrator 同时报无 Docker 进程、Engine 未启动；该报告没有提供实测时间。没有接受许可、启动 Desktop、修改 Windows 功能、更新 WSL 或重启。详见 verification/environment/docker/docker-desktop-install.json 与 docker-install-review.json。
-- 2026-11-18T13:20:50Z 协调器报告：当前执行进程无法取得管理员提升令牌；Virtual Machine Platform 未确认启用；未执行无发行版 WSL 安装，也未安排重启。此项是协调器报告，非本工作会话直接验证。见 verification/environment/docker/docker-install-review.json。
+- 2026-11-18T13:20:50Z 的协调器报告是较早状态快照：当时无提升令牌，Virtual Machine Platform 未确认，尚未运行无发行版 WSL 启用脚本，也未安排重启。随后 Orchestrator 报告用户授权后运行过管理员 WSL 无发行版启用脚本，退出码 0，但输出/后续状态出现 Wsl/E_ACCESSDENIED；Get-WindowsOptionalFeature 仍要求提升，RunAs 只读复核被拒。功能状态仍未确认，未重启。此项是 Orchestrator 报告，实际尝试时间未提供；当前需要本机管理员确认，不能断言已启用或未安装。见 verification/environment/docker/docker-install-review.json。
 - Qdrant 1.17.1 Docker Hub 页面给出 Linux/amd64 manifest sha256:cd3e42737c684ee516ae5533218be93fd5288f41d0a466ed18dbdc22ef52a000 和 multi-platform index sha256:94728574965d17c6485dd361aa3c0818b325b9016dac5ea6afec7b4b2700865f。来源是 registry 页面，不代表本地 pull 已验证。
 - infra/compose.yaml 只包含 Qdrant 单节点服务，并锁定 amd64 manifest digest。PostgreSQL service 暂时省略，等待 CR-P1-POSTGRES-16.16 批准。服务只映射 127.0.0.1 的 REST 端口 56333；主机不映射 6334 或 6335。服务密钥只通过 KW_QDRANT_API_KEY 环境变量注入，不写入仓库。
 - verification/environment/docker/qdrant.production.yaml 明确 grpc_port: null 与 cluster.enabled: false。官方文档说明 null 会关闭 Qdrant gRPC；官方 GHSA-frc7-44gm-99qq 说明受影响的旧版本只在 distributed deployment 启动内部 gRPC 端口，single-node deployment 不启动该端口。保持集群关闭是 1.17.1 基线的安全前提。
@@ -30,7 +30,7 @@
 |---|---|---|
 | Docker Desktop 与 CLI/Compose 二进制版本 | PASS — coordinator-reported Desktop 4.99.0.245822, Docker 29.9.3, Compose v5.7.0; signature valid | verification/environment/docker/docker-desktop-install.json |
 | Docker Subscription Service Agreement | USER_ACTION_REQUIRED | 首次启动必须由用户阅读并决定接受；本会话不替用户接受 |
-| Windows / WSL / BIOS 虚拟化前置条件 | WAITING_EXTERNAL_ADMIN_ELEVATION | 协调器报告无提升令牌、VMP 未确认、未安排重启；OS identity 仍需核实。本会话不修改系统 |
+| Windows / WSL / BIOS 虚拟化前置条件 | WAITING_LOCAL_ADMIN_CONFIRMATION | 用户已授权；管理员 WSL 无发行版脚本 exit 0，但出现 Wsl/E_ACCESSDENIED；Windows 功能状态仍无法读取，RunAs 只读复核被拒；VMP/OS identity 未确认，未重启 |
 | docker compose config --quiet | NOT_RUN | 虽已报告 CLI/Compose 可用，本会话未运行解析命令 |
 | Docker Engine / Qdrant pull、/readyz、读写/删除 | NOT_RUN | Engine 未启动；许可未接受；不启动服务 |
 | PostgreSQL pull、pg_isready、Windows SELECT 1 | BLOCKED | CR 未批准；不运行 16.13 或 16.16 |
@@ -44,7 +44,7 @@ Qdrant API key 使用必填的本地环境变量，未在 repo 创建 .env、.kw
 
 ## 安装审批记录
 
-初次 auto-review 拒绝了“下载官方 Docker Desktop 并以 --user 安装”的命令，理由是仓库 AGENTS.md 写明 Phase 0 不安装软件。第二次附上 P1 用户授权后仍被拒，reviewer 说明未识别到可信用户授权。用户随后直接回复“允许安装”。较早的执行被协调器接手；后续本地安装尝试有官方文件校验记录，但 install_exit 为空，紧随其后的检查因 LOCALAPPDATA 重定向而未定位实际安装。Orchestrator 随后确认 per-user Desktop 与 CLI/Compose 版本均已安装，Engine 未启动；许可未接受、Windows 功能未改、未重启。详见 verification/environment/docker/docker-install-review.json 与 docker-desktop-install.json。
+初次 auto-review 拒绝了“下载官方 Docker Desktop 并以 --user 安装”的命令，理由是仓库 AGENTS.md 写明 Phase 0 不安装软件。第二次附上 P1 用户授权后仍被拒，reviewer 说明未识别到可信用户授权。用户随后直接回复“允许安装”。较早的执行被协调器接手；后续本地安装尝试有官方文件校验记录，但 install_exit 为空，紧随其后的检查因 LOCALAPPDATA 重定向而未定位实际安装。Orchestrator 随后确认 per-user Desktop 与 CLI/Compose 版本均已安装，Engine 未启动；许可未接受。早期 Windows 功能报告称当时没有改动，之后用户已授权管理员 WSL 启用尝试，但结果未知、功能状态未确认且未重启；需本机管理员确认。详见 verification/environment/docker/docker-install-review.json 与 docker-desktop-install.json。
 
 ## 本地依据与官方安全资料
 
