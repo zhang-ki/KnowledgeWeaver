@@ -15,3 +15,11 @@ delivery_status=NOT_STARTED/DRAFT/SUBMITTED/VALIDATED/REJECTED；SUBMITTED不等
 派发意图先记录dispatch_id/node/attempt/base/branch再创建会话；返回threadId或待完成clientThreadId分别存，不把后者传给read/wait。调用超时先按dispatch_id及会话清单对账，不盲重试创建。集成事务写ahead journal；技术细节见AUTO_INTEGRATION。
 
 event字段：id,seq,at,actor,node,old,new,reason,commit,artifact；人工队列字段：id,node,reason,decision_required,owner,created_at,resolution。禁止Key、完整私有原文和未脱敏连接串。每完成事务备份账本快照到.kw/runtime/snapshots，留最近20份加里程碑永久快照；备份不包含secrets。
+
+## 监控报告消费账本
+
+监控器只写 `state/monitoring/reports/<report_id>.json` 和 `state/monitoring/latest.json`；它不得写 `.kw/runtime`、主任务账本、checkpoint 或 events。报告写入后不可改写。唯一 Orchestrator 在每次启动/恢复时读取 `latest.json`，同时扫描所有未消费报告；验证报告的 `report_id`、路径、JSON及SHA-256，并以当前会话/Git/账本事实核对快照后，才继续派发、验收或集成。
+
+Orchestrator把消费状态追加到 `.kw/runtime/monitoring-consumption.json`，每份新记录必含：`report_id`、`path`、`sha256`、`consumed_at`、`ledger_revision`、`outcome`；并追加带有相同report_id/SHA的runtime event。`outcome` 应区分已对账、过期后已对账、无动作和完整性阻塞。记录以report_id唯一；已有相同report_id/path/SHA记录时不得重复处理或重复记event。相同report_id出现不同path或SHA时按完整性冲突阻塞，不覆盖任何历史记录。过期报告仍需对账，不能直接采信为当前事实。SHA或JSON校验失败时不读取其结论、不修改原报告，并记录阻塞与runtime event。
+
+报告记录、event和账本更新都由Orchestrator单写锁保护。消费记录的 `ledger_revision` 表示完成该报告对账时已持久化的账本revision；随后记录的event引用同一report_id与SHA。重启遇到已有消费记录时按上述幂等规则继续，不重做已完成的报告协调。旧消费记录保持原样；本字段要求适用于本增补生效后的新记录。
