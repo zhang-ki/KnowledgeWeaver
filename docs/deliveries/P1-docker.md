@@ -1,7 +1,7 @@
 # P1 Docker services delivery
 
 - task_id/batch_id/attempt_id/instance_id/plan_version/plan_hash：P1.docker_services / P1 / delegated attempt not supplied / 887b0733-5d66-4cfc-b56d-dec7555daeaa / KW-P0-2026-11-18 / 6ef838b43dc6a6a8d1680c8b9503e55fe7a63c6ca9c4238e4942acf8d495d1df
-- 实际 worktree/branch/base_commit/head_commit：assigned Codex worktree / task/p1-docker-services / c8d2744188d089976a0be532da72fbf40b0b9c25 / pending this authorized task-branch commit.
+- 实际 worktree/branch/base_commit/head_commit：assigned Codex worktree / task/p1-docker-services / c8d2744188d089976a0be532da72fbf40b0b9c25 / 329aa3ec97f1ed58012991ed5e7caf5453b922c7 (offline delivery commit; this supplemental Orchestrator report follows in the next task-branch commit).
 - 目标与实现清单：完成主机和官方镜像来源核验；准备受安全约束的 Qdrant-only Compose、配置、Windows 验证脚本；起草 PostgreSQL 16.16 CR。Orchestrator 已报告 Docker Desktop 与 CLI/Compose 二进制版本；Engine 未启动，服务实测及双服务 Compose 尚未完成。
 - 逐文件 allowlist 映射：
   - infra/compose.yaml — Qdrant only; PostgreSQL intentionally omitted pending CR.
@@ -35,7 +35,7 @@
 | JSON parse, PowerShell AST parse, Compose source safety guard, credential/path/whitespace scan, git diff --check | PASS; no secrets or user paths found; git diff --check exit 0 | 2026-11-18 21:15:52 +08 / 13:15:52Z | offline-validation.log, SHA-256 98feaf5666d4c38ee45ba4e48fb62ce5d2126b125cdfcd842766cb0293b882d7 |
 | Qdrant verifier missing-key branch | NOT_RUN by design; script exited 2 and emitted a redacted missing-config result | 2026-11-18 21:10:43 +08 / 13:10:43Z | offline-validation.log |
 | PostgreSQL verifier missing-DSN branch | NOT_RUN by design; script exited 2 and emitted a redacted missing-config result | 2026-11-18 21:10:36 +08 / 13:10:36Z | offline-validation.log |
-| Docker CLI/Compose version and config parse | Version check PASS per Orchestrator report; `docker compose config --quiet` NOT_RUN; the older 21:15 missing-CLI check predates installation | source did not supply observation time | docker-desktop-install.json, offline-validation.log |
+| Docker CLI/Compose version and config parse | Version check PASS per Orchestrator report; static `compose -f infra/compose.yaml config --quiet` PASS, exit 0, using a temporary non-secret validation value that was removed; Engine and containers were not started, so this is not Qdrant runtime validation | source did not supply observation time | docker-desktop-install.json, Orchestrator report |
 | Coordinator Windows feature handoff | WAITING_EXTERNAL_ADMIN_ELEVATION; coordinator reports VMP unconfirmed, Windows features unchanged, no WSL installation or restart | 2026-11-18 21:20 +08 / 13:20Z; later installation report has no observation time | docker-install-review.json |
 | Qdrant readiness/CRUD, PG health/SELECT 1, restart retention, isolated restore | NOT_RUN / blocked as described above | — | — |
 
