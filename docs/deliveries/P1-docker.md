@@ -29,13 +29,13 @@
 | wsl.exe --version / --list / --status | FAIL; exit 1 / 1 / 50; no setup changes | 2026-11-18 20:46 +08 / 12:46Z | host-inventory.json |
 | Get-WindowsOptionalFeature -Online | BLOCKED; requires elevation | 2026-11-18 20:46 +08 / 12:46Z | host-inventory.json |
 | docker.exe detection and Desktop/service presence | NOT_FOUND in initial read-only inventory | 2026-11-18 20:46 +08 / 12:46Z | host-inventory.json |
-| Docker Desktop installation and versions | PASS per Orchestrator report: Desktop 4.99.0.245822, signature valid, Docker 29.9.3 (exit 0), Compose v5.7.0 (exit 0); Engine not started; install_exit remains null | recorded 2026-11-18 13:30:01Z; source did not supply observation time | docker-desktop-install.json |
+| Docker Desktop installation and versions | PASS per Orchestrator post-attempt check: Desktop 4.99.0.245822, Authenticode Valid, Docker 29.9.3 (exit 0), Compose v5.7.0 (exit 0); no Docker processes, Engine not started, license not accepted, VMP unverified; original install_exit remains null | 2026-11-18T21:29:14.4453889+08:00 | docker-desktop-install.json |
 | Docker Hub Qdrant v1.17.1 manifest lookup | PASS as registry-page evidence only; local pull not run | 2026-11-18; web source observation | environment.lock.json |
 | PostgreSQL 16.16 official release/tag/digest lookup | PASS as official source evidence; no pull/run; approval pending | 2026-11-18; web source observation | CR-P1-POSTGRES-16.16.md |
 | JSON parse, PowerShell AST parse, Compose source safety guard, credential/path/whitespace scan, git diff --check | PASS; no secrets or user paths found; git diff --check exit 0 | 2026-11-18 21:15:52 +08 / 13:15:52Z | offline-validation.log, SHA-256 98feaf5666d4c38ee45ba4e48fb62ce5d2126b125cdfcd842766cb0293b882d7 |
 | Qdrant verifier missing-key branch | NOT_RUN by design; script exited 2 and emitted a redacted missing-config result | 2026-11-18 21:10:43 +08 / 13:10:43Z | offline-validation.log |
 | PostgreSQL verifier missing-DSN branch | NOT_RUN by design; script exited 2 and emitted a redacted missing-config result | 2026-11-18 21:10:36 +08 / 13:10:36Z | offline-validation.log |
-| Docker CLI/Compose version and config parse | Version check PASS per Orchestrator report; static `compose -f infra/compose.yaml config --quiet` PASS, exit 0, using a temporary non-secret validation value that was removed; Engine and containers were not started, so this is not Qdrant runtime validation | source did not supply observation time | docker-desktop-install.json, Orchestrator report |
+| Docker CLI/Compose version and config parse | Version check PASS per Orchestrator report; static `compose -f infra/compose.yaml config --quiet` PASS, exit 0, using a temporary non-secret validation value that was removed; Engine and containers were not started, so this is not Qdrant runtime validation | 2026-11-18T21:34:47.7104441+08:00 | docker-desktop-install.json, Orchestrator report |
 | Coordinator Windows feature handoff | WAITING_EXTERNAL_ADMIN_ELEVATION; coordinator reports VMP unconfirmed, Windows features unchanged, no WSL installation or restart | 2026-11-18 21:20 +08 / 13:20Z; later installation report has no observation time | docker-install-review.json |
 | Qdrant readiness/CRUD, PG health/SELECT 1, restart retention, isolated restore | NOT_RUN / blocked as described above | — | — |
 
@@ -51,7 +51,7 @@ No service logs, local image signatures, container digests, SQL result, persiste
 | environment.lock.json | af007f7f3dd76e5d5f1a50c21f6ecb2837b4a6917c455b719f0ef3ca7c199f1d |
 | verification/environment/docker/host-inventory.json | 10bac5ff7e4b371ba5ed760a65749dbfa100bad2c52e993ad3c0e28792b4e198 |
 | verification/environment/docker/docker-install-review.json | d263c00dab0a00ef9b155ff2ae6372a3595033c120123f5723d173af0507b3cd |
-| verification/environment/docker/docker-desktop-install.json | ed06fc1bb2cefb5ffcbe8abcc3a2946bf314444d0b275c6ebfa27b2220de62b4 |
+| verification/environment/docker/docker-desktop-install.json | e6cb2495ee494992839c84f7eca438b3c557d75eb644b6631c1abc31ded5d925 |
 | verification/environment/docker/qdrant.production.yaml | 05c64006d8d0d0f96f305d50184f6e758d8fc5540919b9b74e2e0486322a9eb9 |
 | verification/environment/docker/verify_qdrant.ps1 | 71c455d950dbe208915b122eece9fe23926e342d0693c400a9548d24943b7be5 |
 | verification/environment/docker/verify_postgres.ps1 | 6a8685870c48afccff0a1b3208cf095ff0e4f4e8e9a0ab92dae5460b87c41bf2 |
