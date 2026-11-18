@@ -1,0 +1,957 @@
+{
+  "schema_version": 1,
+  "corpus_id": "a81572b5-2b2b-414d-81d6-3c49c8697700",
+  "generation_id": "63fa08b5-b198-49b8-87f5-5840d856e577",
+  "git_revision": "b15c0d42bc53e5d3644ede5a64b6da1091b3183b",
+  "git_dirty": true,
+  "documents": [
+    {
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "source_kind": "pdf",
+      "relative_path": "documents/p3_contract.pdf",
+      "raw_hash": "5756138c01a40d28a6bb9c8b29dcf8ad6d9f6b18879e2a6ad3123100cd2a99ba",
+      "text": "KnowledgeWeaver P3 synthetic public fixture.\nThe ingestion pipeline stores each source span as a durable EvidenceRecord.\nThe demo lookup cache uses a PersistentStore and survives process restart.",
+      "lines": [
+        "KnowledgeWeaver P3 synthetic public fixture.",
+        "The ingestion pipeline stores each source span as a durable EvidenceRecord.",
+        "The demo lookup cache uses a PersistentStore and survives process restart."
+      ]
+    },
+    {
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "raw_hash": "aee1b56ff8bcf7752dde3b775980150068ac039089956498e9556bbe982aaa2c",
+      "text": "\"\"\"Synthetic public code fixture for the P3 vertical slice.\"\"\"\n\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass SourceSpan:\n    path: str\n    line_start: int\n    line_end: int\n\n\n@dataclass(frozen=True)\nclass EvidenceRecord:\n    span: SourceSpan\n    quote: str\n\n\n# The demo lookup cache uses ProcessMemory and resets on restart.\nclass DemoLookupCache:\n    \"\"\"A deliberately conflicting fixture statement about cache durability.\"\"\"\n\n    pass\n\n\ndef bind_source_span(span: SourceSpan, quote: str) -> EvidenceRecord:\n    return EvidenceRecord(span=span, quote=quote)",
+      "lines": [
+        "\"\"\"Synthetic public code fixture for the P3 vertical slice.\"\"\"",
+        "",
+        "from dataclasses import dataclass",
+        "",
+        "",
+        "@dataclass(frozen=True)",
+        "class SourceSpan:",
+        "    path: str",
+        "    line_start: int",
+        "    line_end: int",
+        "",
+        "",
+        "@dataclass(frozen=True)",
+        "class EvidenceRecord:",
+        "    span: SourceSpan",
+        "    quote: str",
+        "",
+        "",
+        "# The demo lookup cache uses ProcessMemory and resets on restart.",
+        "class DemoLookupCache:",
+        "    \"\"\"A deliberately conflicting fixture statement about cache durability.\"\"\"",
+        "",
+        "    pass",
+        "",
+        "",
+        "def bind_source_span(span: SourceSpan, quote: str) -> EvidenceRecord:",
+        "    return EvidenceRecord(span=span, quote=quote)"
+      ]
+    }
+  ],
+  "chunks": [
+    {
+      "id": "4a4cd262-8e40-5b92-b32e-fa044c136a14",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "source_kind": "pdf",
+      "relative_path": "documents/p3_contract.pdf",
+      "text": "KnowledgeWeaver P3 synthetic public fixture.",
+      "locator": {
+        "kind": "pdf",
+        "page": 1,
+        "block": 1
+      },
+      "text_hash": "c0070b6948019c8d361b1ca4c5e9c1646a65660ef125a8c5787a4a17752636be",
+      "structure_type": "paragraph"
+    },
+    {
+      "id": "71b75931-694e-5394-812d-f725f79161ad",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "source_kind": "pdf",
+      "relative_path": "documents/p3_contract.pdf",
+      "text": "The ingestion pipeline stores each source span as a durable EvidenceRecord.",
+      "locator": {
+        "kind": "pdf",
+        "page": 1,
+        "block": 2
+      },
+      "text_hash": "05b92dd09d86fede9fce2462a351e895402475f66fa5a4f53e21bfb159b88d60",
+      "structure_type": "paragraph"
+    },
+    {
+      "id": "70b4e3a1-bd31-5f13-9d46-483ab6adad93",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "source_kind": "pdf",
+      "relative_path": "documents/p3_contract.pdf",
+      "text": "The demo lookup cache uses a PersistentStore and survives process restart.",
+      "locator": {
+        "kind": "pdf",
+        "page": 1,
+        "block": 3
+      },
+      "text_hash": "e4702015dbc3e909de820bc640944d70a99b236ac48159eedce3220910576f65",
+      "structure_type": "paragraph"
+    },
+    {
+      "id": "71e7e66e-a064-5ff4-a99d-ffab46fd2165",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "\"\"\"Synthetic public code fixture for the P3 vertical slice.\"\"\"",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 1,
+        "line_end": 1
+      },
+      "text_hash": "11abb3e63abb17ef5c5304144fe994a7acd594a95156431fb61f67b2e11bd786",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "93e92dc7-a87d-56d9-8790-96a2e06ce47b",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "from dataclasses import dataclass",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 3,
+        "line_end": 3
+      },
+      "text_hash": "9e63ee62217c139d62ff0aa136c668cdcd631edd06b7f3dcadfdf769e2eb1faa",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "3ecc4ad3-106c-5e89-a43a-fa40c9190c97",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "@dataclass(frozen=True)",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 6,
+        "line_end": 6
+      },
+      "text_hash": "6b38c9a9ed64fcd7602bba1efae5a3586f70a4a4743870b5a2c05e97c0612544",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "ef018baf-c7d6-587e-ac58-146ace954584",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "class SourceSpan:",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 7,
+        "line_end": 7
+      },
+      "text_hash": "2fc6b0616f650a7ef70f280b46e2553c2413f084a94a842a58e097383515c3a2",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "689c190a-20e9-5caa-a1de-b930b98f9025",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "    path: str",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 8,
+        "line_end": 8
+      },
+      "text_hash": "163d5089bf9daec9c3e4b23e1621ffe4491a245369e122a5c3abdf3d497a89fc",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "45fe01ee-7c64-51d7-b44c-d5b606b56480",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "    line_start: int",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 9,
+        "line_end": 9
+      },
+      "text_hash": "4c1f40cdf662708da37f7f56b74d553b05cdb1232aef748342de869da026344c",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "71ae7660-0fe6-518c-9953-634acb0c7b0b",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "    line_end: int",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 10,
+        "line_end": 10
+      },
+      "text_hash": "c22bdee03b12b2b28eb7e5a898bca1d05217ba66332c59b66588888ac925f3ff",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "c950130c-a46c-5415-a2bc-6246b4a57403",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "@dataclass(frozen=True)",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 13,
+        "line_end": 13
+      },
+      "text_hash": "6b38c9a9ed64fcd7602bba1efae5a3586f70a4a4743870b5a2c05e97c0612544",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "7895f33a-fc31-5f5d-9e90-cf7d6c25771c",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "class EvidenceRecord:",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 14,
+        "line_end": 14
+      },
+      "text_hash": "2ba9007404cebf37a767a55645ed83add010bf374f6468382e218f068defdd45",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "7d0d911b-4467-535a-aa60-8cfbc6ca2857",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "    span: SourceSpan",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 15,
+        "line_end": 15
+      },
+      "text_hash": "fcf7d763517db65dc99038681e4874cb9ef85279d212c85284e5da39dfe399d1",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "9881dd14-6e65-5bcf-a333-92be2d0f33be",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "    quote: str",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 16,
+        "line_end": 16
+      },
+      "text_hash": "b1689728aad7227f64505d562409561fe221c0a1ad3a345bc7714eb152ee0832",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "fa1f9e33-acdb-5933-8e0b-92dabc8e4f62",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "# The demo lookup cache uses ProcessMemory and resets on restart.",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 19,
+        "line_end": 19
+      },
+      "text_hash": "f93fc3f9e67afd04378b1b01e71868bb8c874137d9b203c6f0f5b7f4541f0904",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "64762363-c6f0-5ef2-9191-c8b776b48a84",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "class DemoLookupCache:",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 20,
+        "line_end": 20
+      },
+      "text_hash": "f0be171605eebf4dbcd6e1e19e77f86d35086931663fa6d88a85bc365b8e6b0f",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "40754664-40f3-52ad-876d-44cfb16c3773",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "    \"\"\"A deliberately conflicting fixture statement about cache durability.\"\"\"",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 21,
+        "line_end": 21
+      },
+      "text_hash": "10fb35e9d16a09e020467b022139cf3fc7f100b5f081e6b927e7b72746100f9c",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "d9e09115-ce1b-5fad-a460-522680179be2",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "    pass",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 23,
+        "line_end": 23
+      },
+      "text_hash": "e225b388d251d09902488254da501605f76393535a8838121ecc2372c568af31",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "c020175c-9210-5b18-9c34-00f4def8f392",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "def bind_source_span(span: SourceSpan, quote: str) -> EvidenceRecord:",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 26,
+        "line_end": 26
+      },
+      "text_hash": "c612c9d971c81eb6a80b0dbdb7f41c8acb2aff1d764219fbc75ba5b131342090",
+      "structure_type": "code_line"
+    },
+    {
+      "id": "337be616-919c-5ba0-9138-771115c6dafa",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "text": "    return EvidenceRecord(span=span, quote=quote)",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 27,
+        "line_end": 27
+      },
+      "text_hash": "a321fb12eceb3d9f3b72b13e4a62b918a15f5f4e0e95a878e2d27c54463b7711",
+      "structure_type": "code_line"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "827d5f6c-45ee-5fe9-9cc5-94271ba10588",
+      "chunk_id": "4a4cd262-8e40-5b92-b32e-fa044c136a14",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "source_kind": "pdf",
+      "relative_path": "documents/p3_contract.pdf",
+      "start": 0,
+      "end": 44,
+      "quote": "KnowledgeWeaver P3 synthetic public fixture.",
+      "locator": {
+        "kind": "pdf",
+        "page": 1,
+        "block": 1
+      },
+      "provenance_id": "baccc9ab-bd96-56ba-8ec0-edd8248e85aa"
+    },
+    {
+      "id": "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+      "chunk_id": "71b75931-694e-5394-812d-f725f79161ad",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "source_kind": "pdf",
+      "relative_path": "documents/p3_contract.pdf",
+      "start": 0,
+      "end": 75,
+      "quote": "The ingestion pipeline stores each source span as a durable EvidenceRecord.",
+      "locator": {
+        "kind": "pdf",
+        "page": 1,
+        "block": 2
+      },
+      "provenance_id": "baccc9ab-bd96-56ba-8ec0-edd8248e85aa"
+    },
+    {
+      "id": "2d132426-c289-5adc-a4ff-57ed4357ea2c",
+      "chunk_id": "70b4e3a1-bd31-5f13-9d46-483ab6adad93",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "source_kind": "pdf",
+      "relative_path": "documents/p3_contract.pdf",
+      "start": 0,
+      "end": 74,
+      "quote": "The demo lookup cache uses a PersistentStore and survives process restart.",
+      "locator": {
+        "kind": "pdf",
+        "page": 1,
+        "block": 3
+      },
+      "provenance_id": "baccc9ab-bd96-56ba-8ec0-edd8248e85aa"
+    },
+    {
+      "id": "301dc711-aec1-50ec-b329-19c060f91a39",
+      "chunk_id": "71e7e66e-a064-5ff4-a99d-ffab46fd2165",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 62,
+      "quote": "\"\"\"Synthetic public code fixture for the P3 vertical slice.\"\"\"",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 1,
+        "line_end": 1
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "9b74c1bb-f6cf-55fa-b60a-474561288b74",
+      "chunk_id": "93e92dc7-a87d-56d9-8790-96a2e06ce47b",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 33,
+      "quote": "from dataclasses import dataclass",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 3,
+        "line_end": 3
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "b717fe0c-e03a-5eb9-af3e-98b3a3c9f7d1",
+      "chunk_id": "3ecc4ad3-106c-5e89-a43a-fa40c9190c97",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 23,
+      "quote": "@dataclass(frozen=True)",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 6,
+        "line_end": 6
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "b3266e8a-7248-56c6-9cae-9695e76cdece",
+      "chunk_id": "ef018baf-c7d6-587e-ac58-146ace954584",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 17,
+      "quote": "class SourceSpan:",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 7,
+        "line_end": 7
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "0ce3bc3f-9f57-5008-a2a0-6d5a17621d32",
+      "chunk_id": "689c190a-20e9-5caa-a1de-b930b98f9025",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 13,
+      "quote": "    path: str",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 8,
+        "line_end": 8
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "12d83dd3-d09d-5e5d-9e44-cc9252efcbb1",
+      "chunk_id": "45fe01ee-7c64-51d7-b44c-d5b606b56480",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 19,
+      "quote": "    line_start: int",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 9,
+        "line_end": 9
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "bc934afc-1cfc-5e7e-81ca-7758e9998ba0",
+      "chunk_id": "71ae7660-0fe6-518c-9953-634acb0c7b0b",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 17,
+      "quote": "    line_end: int",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 10,
+        "line_end": 10
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "cd27f681-6f99-5a8a-ba3e-59566a5193a9",
+      "chunk_id": "c950130c-a46c-5415-a2bc-6246b4a57403",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 23,
+      "quote": "@dataclass(frozen=True)",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 13,
+        "line_end": 13
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "4878a2c9-509d-5372-bb5b-196fb10dea32",
+      "chunk_id": "7895f33a-fc31-5f5d-9e90-cf7d6c25771c",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 21,
+      "quote": "class EvidenceRecord:",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 14,
+        "line_end": 14
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "1b82f809-5705-587d-8eb8-1a89a7345422",
+      "chunk_id": "7d0d911b-4467-535a-aa60-8cfbc6ca2857",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 20,
+      "quote": "    span: SourceSpan",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 15,
+        "line_end": 15
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "3c7a4e2e-bcd2-5c40-95df-fa6e33e80a2d",
+      "chunk_id": "9881dd14-6e65-5bcf-a333-92be2d0f33be",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 14,
+      "quote": "    quote: str",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 16,
+        "line_end": 16
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "c12ed6d1-3b7b-5859-8cdd-c08129b0e679",
+      "chunk_id": "fa1f9e33-acdb-5933-8e0b-92dabc8e4f62",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 65,
+      "quote": "# The demo lookup cache uses ProcessMemory and resets on restart.",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 19,
+        "line_end": 19
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "aceb9a10-dfee-58fb-8a82-8b2c721a3ad8",
+      "chunk_id": "64762363-c6f0-5ef2-9191-c8b776b48a84",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 22,
+      "quote": "class DemoLookupCache:",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 20,
+        "line_end": 20
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "803afa7f-815b-524a-8df6-90c25c2dda98",
+      "chunk_id": "40754664-40f3-52ad-876d-44cfb16c3773",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 78,
+      "quote": "    \"\"\"A deliberately conflicting fixture statement about cache durability.\"\"\"",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 21,
+        "line_end": 21
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "34b0ceab-b931-57ac-8c81-f2f43cd3e88a",
+      "chunk_id": "d9e09115-ce1b-5fad-a460-522680179be2",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 8,
+      "quote": "    pass",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 23,
+        "line_end": 23
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "a8a4ba40-bb51-5f1e-90b5-dd6db6c768c6",
+      "chunk_id": "c020175c-9210-5b18-9c34-00f4def8f392",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 69,
+      "quote": "def bind_source_span(span: SourceSpan, quote: str) -> EvidenceRecord:",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 26,
+        "line_end": 26
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    },
+    {
+      "id": "4b73f55c-5bd7-5020-a20a-1f77ece49f0f",
+      "chunk_id": "337be616-919c-5ba0-9138-771115c6dafa",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "source_kind": "python_repo",
+      "relative_path": "python_repo/evidence_contract.py",
+      "start": 0,
+      "end": 49,
+      "quote": "    return EvidenceRecord(span=span, quote=quote)",
+      "locator": {
+        "kind": "python",
+        "path": "python_repo/evidence_contract.py",
+        "line_start": 27,
+        "line_end": 27
+      },
+      "provenance_id": "7240a00f-d0f2-576c-b9ef-7bdc37751400"
+    }
+  ],
+  "provenance": [
+    {
+      "id": "baccc9ab-bd96-56ba-8ec0-edd8248e85aa",
+      "method": "PARSER_EXCERPT",
+      "producer_fingerprint": "p3-fixture-pdf-text-layer-v1+python-ast-v1",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "confidence": null,
+      "premise_relation_ids": [],
+      "rule_id": null
+    },
+    {
+      "id": "7240a00f-d0f2-576c-b9ef-7bdc37751400",
+      "method": "PARSER_EXCERPT",
+      "producer_fingerprint": "p3-fixture-pdf-text-layer-v1+python-ast-v1",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "confidence": null,
+      "premise_relation_ids": [],
+      "rule_id": null
+    },
+    {
+      "id": "b57e016d-5032-5119-8d30-2fdcd8e436b0",
+      "method": "MANUAL",
+      "producer_fingerprint": "p3-fixture-pdf-text-layer-v1+python-ast-v1",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5",
+      "confidence": null,
+      "premise_relation_ids": [],
+      "rule_id": "p3-curated-fixture-v1"
+    },
+    {
+      "id": "abefd78d-bb14-5760-ac0b-83fe2f767e00",
+      "method": "STATIC_ANALYSIS",
+      "producer_fingerprint": "p3-fixture-pdf-text-layer-v1+python-ast-v1",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "confidence": null,
+      "premise_relation_ids": [],
+      "rule_id": null
+    },
+    {
+      "id": "9ceaa054-206b-525a-b6f9-a0fd8a9a608c",
+      "method": "PARSER_EXCERPT",
+      "producer_fingerprint": "p3-fixture-pdf-text-layer-v1+python-ast-v1",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693",
+      "confidence": null,
+      "premise_relation_ids": [],
+      "rule_id": null
+    }
+  ],
+  "entities": [
+    {
+      "id": "512e4481-9242-5129-9cf0-df0797edf3c8",
+      "canonical_name": "IngestionPipeline",
+      "aliases": [
+        "IngestionPipeline",
+        "ingestion pipeline"
+      ],
+      "identity_key": "IngestionPipeline"
+    },
+    {
+      "id": "04ffa88b-45f4-558b-857c-a4b1b0e48bea",
+      "canonical_name": "Evidence",
+      "aliases": [
+        "Evidence",
+        "EvidenceRecord"
+      ],
+      "identity_key": "Evidence"
+    },
+    {
+      "id": "c368e4b0-890e-5ac8-a573-f53d4b21cff7",
+      "canonical_name": "DemoLookupCache",
+      "aliases": [
+        "DemoLookupCache",
+        "demo lookup cache"
+      ],
+      "identity_key": "DemoLookupCache"
+    },
+    {
+      "id": "176e3870-1e8d-5826-922c-2f7d91091923",
+      "canonical_name": "PersistentStore",
+      "aliases": [
+        "PersistentStore",
+        "persistent store"
+      ],
+      "identity_key": "PersistentStore"
+    },
+    {
+      "id": "e6be94fc-e9cf-5e73-b0e8-736427b8ddd6",
+      "canonical_name": "SourceSpan",
+      "aliases": [
+        "SourceSpan",
+        "source span"
+      ],
+      "identity_key": "SourceSpan"
+    },
+    {
+      "id": "e7a4dea8-ad4e-5fb9-aba6-45ab201c5cc4",
+      "canonical_name": "ProcessMemory",
+      "aliases": [
+        "ProcessMemory",
+        "process memory"
+      ],
+      "identity_key": "ProcessMemory"
+    }
+  ],
+  "relations": [
+    {
+      "id": "3824d873-82fb-54e0-a07b-f07f5fcef04a",
+      "subject_id": "512e4481-9242-5129-9cf0-df0797edf3c8",
+      "subject": "IngestionPipeline",
+      "predicate": "USES",
+      "object_id": "04ffa88b-45f4-558b-857c-a4b1b0e48bea",
+      "object": "Evidence",
+      "polarity": "positive",
+      "evidence_ids": [
+        "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1"
+      ],
+      "source_kind": "pdf",
+      "provenance_id": "b57e016d-5032-5119-8d30-2fdcd8e436b0",
+      "provenance_method": "MANUAL"
+    },
+    {
+      "id": "7fe5ec45-dab9-5f5e-9f6c-0e8bf86ae337",
+      "subject_id": "c368e4b0-890e-5ac8-a573-f53d4b21cff7",
+      "subject": "DemoLookupCache",
+      "predicate": "USES",
+      "object_id": "176e3870-1e8d-5826-922c-2f7d91091923",
+      "object": "PersistentStore",
+      "polarity": "positive",
+      "evidence_ids": [
+        "2d132426-c289-5adc-a4ff-57ed4357ea2c"
+      ],
+      "source_kind": "pdf",
+      "provenance_id": "b57e016d-5032-5119-8d30-2fdcd8e436b0",
+      "provenance_method": "MANUAL"
+    },
+    {
+      "id": "4721f2e8-bbd6-5334-bdd7-90d589e47a68",
+      "subject_id": "04ffa88b-45f4-558b-857c-a4b1b0e48bea",
+      "subject": "Evidence",
+      "predicate": "CONTAINS",
+      "object_id": "e6be94fc-e9cf-5e73-b0e8-736427b8ddd6",
+      "object": "SourceSpan",
+      "polarity": "positive",
+      "evidence_ids": [
+        "1b82f809-5705-587d-8eb8-1a89a7345422"
+      ],
+      "source_kind": "python_repo",
+      "provenance_id": "abefd78d-bb14-5760-ac0b-83fe2f767e00",
+      "provenance_method": "STATIC_ANALYSIS"
+    },
+    {
+      "id": "c80f2259-797c-58a4-a408-2282ebda26fb",
+      "subject_id": "c368e4b0-890e-5ac8-a573-f53d4b21cff7",
+      "subject": "DemoLookupCache",
+      "predicate": "USES",
+      "object_id": "e7a4dea8-ad4e-5fb9-aba6-45ab201c5cc4",
+      "object": "ProcessMemory",
+      "polarity": "positive",
+      "evidence_ids": [
+        "c12ed6d1-3b7b-5859-8cdd-c08129b0e679"
+      ],
+      "source_kind": "python_repo",
+      "provenance_id": "9ceaa054-206b-525a-b6f9-a0fd8a9a608c",
+      "provenance_method": "PARSER_EXCERPT"
+    }
+  ],
+  "entity_mappings": [
+    {
+      "canonical_name": "IngestionPipeline",
+      "forms": [
+        "IngestionPipeline",
+        "ingestion pipeline"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "Evidence",
+      "forms": [
+        "Evidence",
+        "EvidenceRecord"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "SourceSpan",
+      "forms": [
+        "SourceSpan",
+        "source span"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "DemoLookupCache",
+      "forms": [
+        "DemoLookupCache",
+        "demo lookup cache"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "PersistentStore",
+      "forms": [
+        "PersistentStore",
+        "persistent store"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "ProcessMemory",
+      "forms": [
+        "ProcessMemory",
+        "process memory"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    }
+  ]
+}

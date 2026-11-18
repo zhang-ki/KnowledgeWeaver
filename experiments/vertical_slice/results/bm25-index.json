@@ -1,0 +1,225 @@
+{
+  "tokenizer": "lowercase-camelcase-alnum-stopword-v1",
+  "k1": 1.2,
+  "b": 0.75,
+  "document_count": 20,
+  "documents": [
+    {
+      "chunk_id": "4a4cd262-8e40-5b92-b32e-fa044c136a14",
+      "tokens": [
+        "knowledge",
+        "weaver",
+        "p3",
+        "synthetic",
+        "public",
+        "fixture"
+      ],
+      "length": 6
+    },
+    {
+      "chunk_id": "71b75931-694e-5394-812d-f725f79161ad",
+      "tokens": [
+        "ingestion",
+        "pipeline",
+        "stores",
+        "each",
+        "source",
+        "span",
+        "as",
+        "durable",
+        "evidence",
+        "record"
+      ],
+      "length": 10
+    },
+    {
+      "chunk_id": "70b4e3a1-bd31-5f13-9d46-483ab6adad93",
+      "tokens": [
+        "demo",
+        "lookup",
+        "cache",
+        "uses",
+        "persistent",
+        "store",
+        "survives",
+        "process",
+        "restart"
+      ],
+      "length": 9
+    },
+    {
+      "chunk_id": "71e7e66e-a064-5ff4-a99d-ffab46fd2165",
+      "tokens": [
+        "synthetic",
+        "public",
+        "code",
+        "fixture",
+        "for",
+        "p3",
+        "vertical",
+        "slice"
+      ],
+      "length": 8
+    },
+    {
+      "chunk_id": "93e92dc7-a87d-56d9-8790-96a2e06ce47b",
+      "tokens": [
+        "from",
+        "dataclasses",
+        "import",
+        "dataclass"
+      ],
+      "length": 4
+    },
+    {
+      "chunk_id": "3ecc4ad3-106c-5e89-a43a-fa40c9190c97",
+      "tokens": [
+        "dataclass",
+        "frozen",
+        "true"
+      ],
+      "length": 3
+    },
+    {
+      "chunk_id": "ef018baf-c7d6-587e-ac58-146ace954584",
+      "tokens": [
+        "class",
+        "source",
+        "span"
+      ],
+      "length": 3
+    },
+    {
+      "chunk_id": "689c190a-20e9-5caa-a1de-b930b98f9025",
+      "tokens": [
+        "path",
+        "str"
+      ],
+      "length": 2
+    },
+    {
+      "chunk_id": "45fe01ee-7c64-51d7-b44c-d5b606b56480",
+      "tokens": [
+        "line_start",
+        "int"
+      ],
+      "length": 2
+    },
+    {
+      "chunk_id": "71ae7660-0fe6-518c-9953-634acb0c7b0b",
+      "tokens": [
+        "line_end",
+        "int"
+      ],
+      "length": 2
+    },
+    {
+      "chunk_id": "c950130c-a46c-5415-a2bc-6246b4a57403",
+      "tokens": [
+        "dataclass",
+        "frozen",
+        "true"
+      ],
+      "length": 3
+    },
+    {
+      "chunk_id": "7895f33a-fc31-5f5d-9e90-cf7d6c25771c",
+      "tokens": [
+        "class",
+        "evidence",
+        "record"
+      ],
+      "length": 3
+    },
+    {
+      "chunk_id": "7d0d911b-4467-535a-aa60-8cfbc6ca2857",
+      "tokens": [
+        "span",
+        "source",
+        "span"
+      ],
+      "length": 3
+    },
+    {
+      "chunk_id": "9881dd14-6e65-5bcf-a333-92be2d0f33be",
+      "tokens": [
+        "quote",
+        "str"
+      ],
+      "length": 2
+    },
+    {
+      "chunk_id": "fa1f9e33-acdb-5933-8e0b-92dabc8e4f62",
+      "tokens": [
+        "demo",
+        "lookup",
+        "cache",
+        "uses",
+        "process",
+        "memory",
+        "resets",
+        "on",
+        "restart"
+      ],
+      "length": 9
+    },
+    {
+      "chunk_id": "64762363-c6f0-5ef2-9191-c8b776b48a84",
+      "tokens": [
+        "class",
+        "demo",
+        "lookup",
+        "cache"
+      ],
+      "length": 4
+    },
+    {
+      "chunk_id": "40754664-40f3-52ad-876d-44cfb16c3773",
+      "tokens": [
+        "deliberately",
+        "conflicting",
+        "fixture",
+        "statement",
+        "about",
+        "cache",
+        "durability"
+      ],
+      "length": 7
+    },
+    {
+      "chunk_id": "d9e09115-ce1b-5fad-a460-522680179be2",
+      "tokens": [
+        "pass"
+      ],
+      "length": 1
+    },
+    {
+      "chunk_id": "c020175c-9210-5b18-9c34-00f4def8f392",
+      "tokens": [
+        "def",
+        "bind_source_span",
+        "span",
+        "source",
+        "span",
+        "quote",
+        "str",
+        "evidence",
+        "record"
+      ],
+      "length": 9
+    },
+    {
+      "chunk_id": "337be616-919c-5ba0-9138-771115c6dafa",
+      "tokens": [
+        "return",
+        "evidence",
+        "record",
+        "span",
+        "span",
+        "quote",
+        "quote"
+      ],
+      "length": 7
+    }
+  ]
+}
