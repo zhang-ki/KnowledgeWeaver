@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "plan_version": "KW-P0-2026-11-18",
+  "base_commit": "c8d2744188d089976a0be532da72fbf40b0b9c25",
+  "execution_environment": "Windows PowerShell; project-local uv/Python/cache; HF_HUB_OFFLINE=1 for Docling",
+  "commands": [
+    {
+      "name": "uv version",
+      "command": "uv --version",
+      "start": "2026-11-18T21:31:38.4609545+08:00",
+      "end": "2026-11-18T21:31:38.4988347+08:00",
+      "exit_code": 0,
+      "output": "uv 0.13.9 (6b2d39dcc 2026-11-17 x86_64-pc-windows-msvc)"
+    },
+    {
+      "name": "uv lock",
+      "command": "uv lock --offline --python 3.11.18 --cache-dir verification/environment/python/cache",
+      "start": "2026-11-18T21:31:38.5236288+08:00",
+      "end": "2026-11-18T21:31:38.5828497+08:00",
+      "exit_code": 0,
+      "output": "Resolved 129 packages in 17ms"
+    },
+    {
+      "name": "uv sync frozen",
+      "command": "uv sync --offline --frozen --python 3.11.18 --group dev --cache-dir verification/environment/python/cache",
+      "start": "2026-11-18T21:31:38.5848808+08:00",
+      "end": "2026-11-18T21:31:38.6769539+08:00",
+      "exit_code": 0,
+      "output": "Checked 108 packages in 17ms"
+    },
+    {
+      "name": "project Python",
+      "command": "uv run --offline --frozen --group dev python --version",
+      "start": "2026-11-18T21:31:38.6776284+08:00",
+      "end": "2026-11-18T21:31:38.8472637+08:00",
+      "exit_code": 0,
+      "output": "Python 3.11.18"
+    },
+    {
+      "name": "Ruff",
+      "command": "uv run --offline --frozen --group dev ruff check verification/environment/python/validate_docling.py verification/environment/python/validation_safety.py verification/environment/python/tests",
+      "start": "2026-11-18T21:31:38.8483524+08:00",
+      "end": "2026-11-18T21:31:40.2804408+08:00",
+      "exit_code": 0,
+      "output": "All checks passed!"
+    },
+    {
+      "name": "pytest",
+      "command": "uv run --offline --frozen --group dev pytest -q verification/environment/python/tests",
+      "start": "2026-11-18T21:31:40.2817774+08:00",
+      "end": "2026-11-18T21:32:19.8072637+08:00",
+      "exit_code": 0,
+      "output": "...                                                                      [100%]\r\n3 passed in 34.92s"
+    },
+    {
+      "name": "Docling local PDF probe",
+      "command": "uv run --offline --frozen --group dev python verification/environment/python/validate_docling.py --sample verification/environment/python/fixtures/plain_text_sample.pdf --result verification/environment/python/results/docling_probe.json",
+      "start": "2026-11-18T21:25:54.4215987+08:00",
+      "end": "2026-11-18T21:26:34.7112850+08:00",
+      "exit_code": 0,
+      "output": "status=pass; page_count=1; expected_text_found=True; conversion_seconds=21.132; peak_working_set_delta_mb=798.59"
+    }
+  ]
+}

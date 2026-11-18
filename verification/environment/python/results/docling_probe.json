@@ -1,0 +1,51 @@
+{
+  "status": "pass",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "python_version": "3.11.18",
+  "python_executable": "verification/environment/python/.venv/Scripts/python.exe",
+  "packages": {
+    "docling": "2.150.1",
+    "docling-core": "2.107.1",
+    "docling-parse": "7.26.0",
+    "docling-ibm-models": "4.0.4",
+    "torch": "2.15.0",
+    "pytest": "8.4.2",
+    "ruff": "0.17.5"
+  },
+  "ocr_enabled": false,
+  "remote_services_enabled": false,
+  "table_structure_enabled": false,
+  "pdf_sha256": "e85a24d16587526e5e5b22168186bbf6d9be67297258f683d7a9b5fb40056814",
+  "pdf_bytes": 763,
+  "page_count": 1,
+  "table_count": 0,
+  "expected_text_found": true,
+  "docling_status": "ConversionStatus.SUCCESS",
+  "warnings": [
+    "`force_full_page_ocr` is deprecated; set `mode=OcrMode.FULL_PAGE` instead.",
+    "This field is deprecated. Use `generate_page_images=True` and call `TableItem.get_image()` to extract table images from page images."
+  ],
+  "conversion_seconds": 21.132,
+  "total_seconds": 34.397,
+  "memory_before_mb": {
+    "working_set_mb": 24.77,
+    "peak_working_set_mb": 24.77,
+    "pagefile_mb": 15.02
+  },
+  "memory_after_mb": {
+    "working_set_mb": 784.9,
+    "peak_working_set_mb": 823.36,
+    "pagefile_mb": 2311.66
+  },
+  "peak_working_set_delta_mb": 798.59,
+  "memory_measurement": "psutil process memory_info",
+  "model_revisions": {
+    "layout": "docling-project/docling-layout-heron requested=main resolved=8f39ad3c0b4c58e9c2d2c84a38465abf757272d8",
+    "table": "docling-project/docling-models requested=v2.3.0 resolved=fc0f2d45e2218ea24bce5045f58a389aed16dc23"
+  },
+  "parse_error": null,
+  "probe_limitations": [
+    "Table structure extraction was disabled; table_count is not an extraction result."
+  ],
+  "network_scope": "local PDF parsing only; no user document or model API request"
+}

@@ -1,0 +1,8 @@
+# Local runtimes, dependency payloads, caches, and downloaded model weights.
+.venv/
+cache/
+models/
+runtimes/
+tools/
+__pycache__/
+*.py[cod]
