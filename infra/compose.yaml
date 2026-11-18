@@ -1,0 +1,28 @@
+# Partial P1 configuration: Qdrant only.
+# PostgreSQL is intentionally omitted until CR-P1-POSTGRES-16.16 is approved.
+# This file is not evidence that the dual-service environment is accepted.
+name: knowledgeweaver
+
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.17.1@sha256:cd3e42737c684ee516ae5533218be93fd5288f41d0a466ed18dbdc22ef52a000
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${KW_QDRANT_API_KEY:?Set local API key}
+      QDRANT__CLUSTER__ENABLED: "false"
+    ports:
+      - "127.0.0.1:${KW_QDRANT_PORT:-56333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+      - ../verification/environment/docker/qdrant.production.yaml:/qdrant/config/production.yaml:ro
+    networks:
+      - services
+
+networks:
+  services: {}
+
+volumes:
+  qdrant_data:
+  qdrant_snapshots:

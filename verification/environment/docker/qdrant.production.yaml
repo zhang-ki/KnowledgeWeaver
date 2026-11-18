@@ -1,0 +1,5 @@
+service:
+  grpc_port: null
+
+cluster:
+  enabled: false

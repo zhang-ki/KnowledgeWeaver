@@ -1,0 +1,28 @@
+P1.docker_services offline validation evidence
+OBSERVED_LOCAL=2026-11-18 21:15:52 +08:00
+OBSERVED_UTC=2026-11-18 13:15:52Z
+allowlist=PASS
+credential_scan=PASS
+absolute_user_path_scan=PASS
+trailing_whitespace_scan=PASS
+json_parse=PASS
+powershell_ast_parse=PASS
+compose_structural_guard=PASS
+compose_digest_pinned=True
+compose_postgres_omitted=True
+compose_loopback_rest_only=True
+compose_no_grpc_or_p2p_port_mapping=True
+compose_no_latest=True
+compose_named_volumes=True
+compose_grpc_disabled=True
+compose_cluster_disabled=True
+git_diff_check_exit=0
+qdrant_missing_key_guard_exit=2 at 2026-11-18T21:10:43+08:00 / 2026-11-18T13:10:43Z; output contained no key value
+postgres_missing_dsn_guard_exit=2 at 2026-11-18T21:10:36+08:00 / 2026-11-18T13:10:36Z; output contained no connection details
+docker_cli_at_checkpoint=NOT_FOUND
+docker_compose_config=NOT_RUN because no usable CLI was observed
+engine_or_services=NOT_RUN
+postgres_images=BLOCKED_CR; neither 16.13 nor 16.16 pulled or run
+qdrant_image=NOT_RUN; no Desktop Engine/license verified
+installer_follow_up_owner=COORDINATOR
+No credential values or private user paths are stored in this log.
