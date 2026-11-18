@@ -1,0 +1,35 @@
+# Phase0审查模板，P1授权后验证并生成infra/compose.yaml，未执行。
+name: knowledgeweaver
+services:
+  postgres:
+    image: postgres:16.13-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: knowledgeweaver
+      POSTGRES_USER: kw
+      POSTGRES_PASSWORD: ${KW_POSTGRES_PASSWORD:?Set local password}
+    ports:
+      - "127.0.0.1:${KW_PG_PORT:-55432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+  qdrant:
+    image: qdrant/qdrant:v1.17.1
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${KW_QDRANT_API_KEY:?Set local API key}
+    ports:
+      - "127.0.0.1:${KW_QDRANT_PORT:-56333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+    # P1 Windows健康检查带api-key轮询/readyz并做隔离写读，不能只看running。
+volumes:
+  pg_data:
+  qdrant_data:
+  qdrant_snapshots:

@@ -1,0 +1,1 @@
+本目录尚无架构批准记录。Phase0 READY_FOR_REVIEW后由用户或指定审查者按templates/REVIEW.md批准，才能进入P1。

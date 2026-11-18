@@ -1,0 +1,304 @@
+{
+  "plan_version": "KW-P0-2026-11-18",
+  "project_instance_id": "887b0733-5d66-4cfc-b56d-dec7555daeaa",
+  "plan_hash": "6ef838b43dc6a6a8d1680c8b9503e55fe7a63c6ca9c4238e4942acf8d495d1df",
+  "plan_hash_rule": "sorted path:SHA256 for non-state authored files, excluding PLAN_MANIFEST.json and DELIVERY_REPORT.md; LF joined",
+  "target": "D:/agent/KnowledgeWeaver",
+  "files": [
+    {
+      "path": ".env.example",
+      "sha256": "37bf16bedbcda7d8e178f13bf1b738b33da916ef7bcda6034618f4e4354c5ec1",
+      "bytes": 890
+    },
+    {
+      "path": ".gitattributes",
+      "sha256": "c53ca2adcea22e093f8a87ad0f83b246b24f2c194b2c346dbcaa5696ca0bb558",
+      "bytes": 216
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "32e607cc5599a3aa572002fa5ed3ae06cfd571f42f0da5ce0f3f71099048d18a",
+      "bytes": 153
+    },
+    {
+      "path": "AGENTS.md",
+      "sha256": "56f4bff50066ca6d38df494ec7268e299208602c31db3003498ac1aa002acb72",
+      "bytes": 1971
+    },
+    {
+      "path": "DELIVERY_REPORT.md",
+      "sha256": "1f1b0124c4022ba33fbfc17cf6bf656db0b09de64c73640a681634a9dff34bb7",
+      "bytes": 3238
+    },
+    {
+      "path": "docs/adr/ADR-001.md",
+      "sha256": "8006dc223461f618cdb91c16632af7fb99f22cf8343aaf03541cc5e882ea6c5f",
+      "bytes": 446
+    },
+    {
+      "path": "docs/adr/ADR-002.md",
+      "sha256": "ff70c6f5b51467d85c00b9380eb5e6dd224600effc4b06745dd47f403497bcff",
+      "bytes": 445
+    },
+    {
+      "path": "docs/adr/ADR-003.md",
+      "sha256": "73167610ea138b30a9c01dc97a6b598124a2e1bc43004213dee8d66538088274",
+      "bytes": 454
+    },
+    {
+      "path": "docs/adr/ADR-004.md",
+      "sha256": "860676678544b22072649e4fad12061b9198857d8431eb3ac2879bc49246e255",
+      "bytes": 442
+    },
+    {
+      "path": "docs/adr/ADR-005.md",
+      "sha256": "3b61a7c2bef3d44ea4f977863f24344206aeb125a86ce6024f24b24b92bc12e6",
+      "bytes": 446
+    },
+    {
+      "path": "docs/batches/B00.md",
+      "sha256": "28d18f6d4aa650e53ca44295ac9e031ec8a2f9d1c6f722f8a1a5ab9c4b90bd0d",
+      "bytes": 5887
+    },
+    {
+      "path": "docs/batches/B01.md",
+      "sha256": "cfb41058227332d40b107a64838681098c6514679ff11fb5e88f3df34c3128b8",
+      "bytes": 5679
+    },
+    {
+      "path": "docs/batches/B02.md",
+      "sha256": "4ca9df47f4e429a5e7ba7df401612ae492199cf54c66c456e90e40b20df6b7eb",
+      "bytes": 5467
+    },
+    {
+      "path": "docs/batches/B03.md",
+      "sha256": "f4c2eb47b5956c32143f5201f5257f3ab6d9720b613d8fb573140667935fd72d",
+      "bytes": 5741
+    },
+    {
+      "path": "docs/batches/B04.md",
+      "sha256": "1d14e82717fd0d637cd791bbd8a5324a2e1eebcc13feb63f81efe32a98040578",
+      "bytes": 5095
+    },
+    {
+      "path": "docs/batches/B05.md",
+      "sha256": "d9b0fec9389ab1a34737a6d5fd9822420ba5c69ec4a70444182bacb58ec1b2f2",
+      "bytes": 5267
+    },
+    {
+      "path": "docs/batches/B06.md",
+      "sha256": "566f83b56c94fc3501f26d7007e8f15038ba96d000028bb5ce4c1fdb00d91f3e",
+      "bytes": 5739
+    },
+    {
+      "path": "docs/batches/B07.md",
+      "sha256": "0c29d25b65caeaf1ef424a5fe95bd93aa7504a6620f163871bc6d07c3d39e176",
+      "bytes": 10016
+    },
+    {
+      "path": "docs/batches/B08.md",
+      "sha256": "03e4b8f3bfe6764fd9d09a295da8bd4e291967d1bcd8a626bb8d56b56f54c621",
+      "bytes": 5787
+    },
+    {
+      "path": "docs/changes/README.md",
+      "sha256": "d89582f5f3c2f5b2539499e928ccf1b1e061622a5ab743d43522cce4f172fdca",
+      "bytes": 118
+    },
+    {
+      "path": "docs/deliveries/README.md",
+      "sha256": "1d77185b984bd74db03a6568ef9739df759709072d3a7380c1c3bd727cd21c37",
+      "bytes": 121
+    },
+    {
+      "path": "docs/implementation/README.md",
+      "sha256": "2fc25daa7ffcc6175595af75701bd8dad88b69534be05811b1e191cb79813e32",
+      "bytes": 97
+    },
+    {
+      "path": "docs/phases/P1_ENVIRONMENT.md",
+      "sha256": "bcf6120fa749ac0c1868ba12ff6065f694cd111c6a745cd679a85e26a9a875ba",
+      "bytes": 3126
+    },
+    {
+      "path": "docs/phases/P2_COLLABORATION.md",
+      "sha256": "facafb95aad5482df1c5b5892fbdaf40ecfeba90302f9cfe1775ef5e25dafbda",
+      "bytes": 3656
+    },
+    {
+      "path": "docs/phases/P3_VERTICAL_SLICE.md",
+      "sha256": "0835ed2f5507d5b1993db790072c35771d3333a29c3648bc794a0619c82e55af",
+      "bytes": 2914
+    },
+    {
+      "path": "docs/planning/ACCEPTANCE.md",
+      "sha256": "ab35df6f494f0f162c972b462af3a5c377e28417227908f2dd863808a10ea97a",
+      "bytes": 3627
+    },
+    {
+      "path": "docs/planning/ALGORITHM_DESIGN.md",
+      "sha256": "eccea8702f2201246acdf2d58d51aa3f54d20669b4f89eca39baf8e72724512c",
+      "bytes": 6718
+    },
+    {
+      "path": "docs/planning/ARCHITECTURE.md",
+      "sha256": "4632842e1b37f2e9f60c2cd8095f1e09c6d8a9333670772177e5b64be6389da2",
+      "bytes": 3317
+    },
+    {
+      "path": "docs/planning/AUTO_INTEGRATION.md",
+      "sha256": "b803a343d4dab69ec07e50894da1082b4f9f5de6ed4a3329d53a869986727a95",
+      "bytes": 3804
+    },
+    {
+      "path": "docs/planning/BATCH_PLAN.md",
+      "sha256": "1c69d88eb167b11dbda909f01edd95e56bfb09f52a4e2e224ad378a811d6d019",
+      "bytes": 2019
+    },
+    {
+      "path": "docs/planning/CAPABILITY_AUDIT.md",
+      "sha256": "65fb207f87d902b8150781d05fff4da8749aa787d9e4bc47160b3ca9ce3d2b56",
+      "bytes": 2879
+    },
+    {
+      "path": "docs/planning/DATA_MODEL.md",
+      "sha256": "abd5642956cfa679a26ff7ec6579a7d0a761922ffcd1611694057b7ee863f9aa",
+      "bytes": 6524
+    },
+    {
+      "path": "docs/planning/DEV_ENVIRONMENT.md",
+      "sha256": "8b82f9c33bcaf73da90a5434ecf61b0e57a10a098aa367804047e7e0d22c194a",
+      "bytes": 2610
+    },
+    {
+      "path": "docs/planning/DOCKER_DESKTOP.md",
+      "sha256": "341b598d4b9d747a64f9b2a055337bbab6fd0220f4bb035078d220438b3515b9",
+      "bytes": 3368
+    },
+    {
+      "path": "docs/planning/EVALUATION_PLAN.md",
+      "sha256": "16fada8acbd8f636a7bcb1b63d2d40c1029c85450e9c0c0624eb714fc0fb696c",
+      "bytes": 6701
+    },
+    {
+      "path": "docs/planning/INTERFACES.md",
+      "sha256": "3202f0fada1b3b809af008860d1e78692fbabd2cca3c7d62edc333f35bb2da8d",
+      "bytes": 8540
+    },
+    {
+      "path": "docs/planning/ORCHESTRATOR_PROTOCOL.md",
+      "sha256": "c729ff11c3771dd57ef4fe16cda725f2bebb6f37f52200cfa5d5050bfa66b5c6",
+      "bytes": 3796
+    },
+    {
+      "path": "docs/planning/PROJECT.md",
+      "sha256": "513c6fc829a015d0822c40f48833a9f2fc280a2e0bf61e37471d18362b2305fb",
+      "bytes": 2032
+    },
+    {
+      "path": "docs/planning/REQUIREMENTS.md",
+      "sha256": "b60e36646644a58d87752d2d263f3e1cee99be8638735b94ebdabe4f8fa728dc",
+      "bytes": 2837
+    },
+    {
+      "path": "docs/planning/RESTART_PLAN.md",
+      "sha256": "aa5bc4e81371eeb6d7cc647f2ae9c31aabefd7a6275babae80f3bc3c6c022988",
+      "bytes": 2492
+    },
+    {
+      "path": "docs/planning/RISKS_AND_DECISIONS.md",
+      "sha256": "adf675c2b7bad9d3128641ac77a3b3cde64a68a4f47dce65c489d8fa1c5e9f30",
+      "bytes": 2463
+    },
+    {
+      "path": "docs/planning/TASK_LEDGER.md",
+      "sha256": "23b4e4736ee3f14c75a605d81e61e69bfe62ad73bed80290bb745f9b16432b26",
+      "bytes": 3131
+    },
+    {
+      "path": "docs/planning/TECH_STACK.md",
+      "sha256": "f6d7c82d27249a30af0848efdddac9e12fd1a7f865674e6db5cad19eb0c30488",
+      "bytes": 3739
+    },
+    {
+      "path": "docs/planning/WORKTREE_COLLABORATION.md",
+      "sha256": "af8ff09190889cde0070374e0c7ca2804e618bb274badf51ceb30360dbf40231",
+      "bytes": 3090
+    },
+    {
+      "path": "README.md",
+      "sha256": "beeec0d5f3dc2de1db791dd306c3840f0ca4e4eb77babd739fdd06901299856b",
+      "bytes": 1486
+    },
+    {
+      "path": "state/planning/dependencies.json",
+      "sha256": "63703494fcc7f0fc6f178e01710929e964bc17a96672011fe86439e0a7bc4016",
+      "bytes": 782
+    },
+    {
+      "path": "state/planning/environment-observed.json",
+      "sha256": "3f050d787b052a1bb555b158bffd092ee7cb08b4d5a47d1508567eadbe5da841",
+      "bytes": 746
+    },
+    {
+      "path": "state/planning/reviews/README.md",
+      "sha256": "27312cd11509f68823c5094c48446ec9d610da8ddef52a9df3431b744e16b0a1",
+      "bytes": 138
+    },
+    {
+      "path": "state/planning/tasks.json",
+      "sha256": "a567839916b6b0ffb8d30827486478e433d6c88195447b4e14b83b2eeba71bb9",
+      "bytes": 11670
+    },
+    {
+      "path": "state/planning/validation.json",
+      "sha256": "0d203481a84be7cc88a1576d1a6e3bc177aaee43a8d771745e23c45a33a254f5",
+      "bytes": 1531
+    },
+    {
+      "path": "state/README.md",
+      "sha256": "80a247cc041ae9e9f36682a97da8d815053d98e0278b8456ba88e664da5919bf",
+      "bytes": 592
+    },
+    {
+      "path": "templates/CHANGE_REQUEST.md",
+      "sha256": "901880ed9abe06a1c28792a8794a9e6a97492b5e6bfad50b49b4355705326e29",
+      "bytes": 416
+    },
+    {
+      "path": "templates/compose.reference.yaml",
+      "sha256": "21ac2e3b01bf871fa03632a25267ac5ae65e5a9bc5295ae848575715fd792eaf",
+      "bytes": 1085
+    },
+    {
+      "path": "templates/DELIVERY.md",
+      "sha256": "1ffece9215f48efa4a20f439c10e976b701a25a210b841025cc3e3350911663b",
+      "bytes": 763
+    },
+    {
+      "path": "templates/DELIVERY.schema.json",
+      "sha256": "d2ffa40f4cb2deee9705c30f6995bb7227bcaaa564ff33cf4380d5dbbd95a758",
+      "bytes": 1290
+    },
+    {
+      "path": "templates/ORCHESTRATOR_START.md",
+      "sha256": "64604c25b83b3c319955279ac05b098aa9991cb87cb3c874a7022db5d1f23ad3",
+      "bytes": 2841
+    },
+    {
+      "path": "templates/REVIEW.md",
+      "sha256": "b9ad95794efdfc57d809390b70264712d9c8f349e03ab16ed427b566a5268d2c",
+      "bytes": 551
+    },
+    {
+      "path": "templates/TASK_LEDGER.schema.json",
+      "sha256": "fe0e662b61d26ec29096b58368c133b7401ab4335a0ed0ca1bb8fd0b1e761620",
+      "bytes": 1713
+    },
+    {
+      "path": "templates/WAKE.md",
+      "sha256": "e3fe66672db34d7a3f1b74d96120494c99371db26c3df24ad3ea06e427ed6118",
+      "bytes": 824
+    }
+  ]
+}

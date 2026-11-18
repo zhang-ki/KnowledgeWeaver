@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "plan_version",
+    "project_instance_id",
+    "tasks"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "plan_version": {
+      "const": "KW-P0-2026-11-18"
+    },
+    "project_instance_id": {
+      "type": "string"
+    },
+    "tasks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "batch_id",
+          "status",
+          "dependencies",
+          "assigned_session_id",
+          "worktree",
+          "branch",
+          "base_commit",
+          "head_commit",
+          "retry_count",
+          "last_checkpoint",
+          "created_at",
+          "updated_at",
+          "blocked_reason",
+          "delivery_status"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "PENDING",
+              "READY",
+              "IN_PROGRESS",
+              "BLOCKED",
+              "READY_FOR_REVIEW",
+              "INTEGRATING",
+              "INTEGRATED",
+              "FAILED",
+              "COMPLETED"
+            ]
+          },
+          "retry_count": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "delivery_status": {
+            "enum": [
+              "NOT_STARTED",
+              "DRAFT",
+              "SUBMITTED",
+              "VALIDATED",
+              "REJECTED"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

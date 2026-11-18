@@ -1,0 +1,70 @@
+{
+  "status": "PASS",
+  "scope": "Phase0 documents only; no implementation/service/model/collaboration tests executed",
+  "phase0_status": "READY_FOR_REVIEW",
+  "plan_hash": "6ef838b43dc6a6a8d1680c8b9503e55fe7a63c6ca9c4238e4942acf8d495d1df",
+  "checks": {
+    "required_core_documents": 18,
+    "batch_documents": 9,
+    "dispatch_nodes": 15,
+    "dag_layers": [
+      [
+        "P0"
+      ],
+      [
+        "P1"
+      ],
+      [
+        "P2"
+      ],
+      [
+        "P3"
+      ],
+      [
+        "B00"
+      ],
+      [
+        "B01",
+        "B02",
+        "B07.prep"
+      ],
+      [
+        "B03"
+      ],
+      [
+        "B04",
+        "B05"
+      ],
+      [
+        "B06"
+      ],
+      [
+        "B07.final"
+      ],
+      [
+        "B08"
+      ],
+      [
+        "RELEASE"
+      ]
+    ],
+    "relative_links": "checked",
+    "fences": "checked",
+    "initial_progress": "checked",
+    "image_pins_and_loopback": "checked",
+    "full_prompts": "checked",
+    "max_active_work_sessions": 3,
+    "business_code_present": false
+  },
+  "errors": [],
+  "manual_consistency_review": [
+    "phase gating before B00",
+    "B07 prep/final separation",
+    "B03 graph contract enables B04/B05 parallel",
+    "candidate merge/test/CAS and crash recovery",
+    "no PR/remote requirement",
+    "provider and service verification not fabricated",
+    "Windows app versus infrastructure containers",
+    "research hypotheses, train/dev/test and cost accounting"
+  ]
+}

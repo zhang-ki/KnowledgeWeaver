@@ -1,0 +1,20 @@
+{
+  "observed_date": "2026-11-18",
+  "target": "D:/agent/KnowledgeWeaver",
+  "initial_target_entries": 0,
+  "is_git_repository": false,
+  "python_visible_version": "3.12.7",
+  "python_target": "3.11",
+  "git_visible_version": "2.51.0.windows.1",
+  "powershell_version": "7.6.9",
+  "os_report": "Microsoft Windows NT 10.0.26200.0",
+  "os_caption": "unavailable: CIM access denied",
+  "uv_in_current_path": false,
+  "docker_in_current_path": false,
+  "database_health": "NOT_TESTED",
+  "software_installed_by_this_task": false,
+  "work_session_created": false,
+  "worktree_created": false,
+  "automation_created": false,
+  "capability_inventory": "tool schemas inspected; list_projects/list_threads read-only calls succeeded; E2E deferred to P2"
+}
