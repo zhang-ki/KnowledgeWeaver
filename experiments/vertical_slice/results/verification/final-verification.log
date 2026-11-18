@@ -1,0 +1,107 @@
+=== compileall ===
+command=python -m compileall -q experiments/vertical_slice tests/vertical_slice
+started=2026-11-19T04:55:03.6719386+08:00
+exit_code=0
+ended=2026-11-19T04:55:03.9676589+08:00
+
+=== pytest collect ===
+command=python -m pytest --collect-only -q tests/vertical_slice
+started=2026-11-19T04:55:03.9732100+08:00
+tests/vertical_slice/test_vertical_slice.py::test_pdf_and_python_ingestion_has_exact_page_and_line_evidence
+tests/vertical_slice/test_vertical_slice.py::test_bm25_and_dense_take_different_routes_and_close_two_hop_path
+tests/vertical_slice/test_vertical_slice.py::test_no_evidence_is_insufficient_without_claims
+tests/vertical_slice/test_vertical_slice.py::test_conflict_discloses_both_sources_and_both_citations
+tests/vertical_slice/test_vertical_slice.py::test_timeout_returns_insufficient_without_generated_claims
+tests/vertical_slice/test_vertical_slice.py::test_claim_with_unknown_evidence_id_is_rejected
+tests/vertical_slice/test_vertical_slice.py::test_budget_stop_does_not_answer_before_required_graph_action
+tests/vertical_slice/test_vertical_slice.py::test_fake_embedding_is_deterministic_and_remote_gate_stays_closed
+tests/vertical_slice/test_vertical_slice.py::test_safe_snapshot_and_isolation_names
+tests/vertical_slice/test_vertical_slice.py::test_qdrant_adapter_uses_generation_filter_and_p3_ids
+
+10 tests collected in 0.15s
+exit_code=0
+ended=2026-11-19T04:55:05.2669881+08:00
+
+=== offline unit layer ===
+command=python -m pytest -q tests/vertical_slice -k pdf_and_python_ingestion or fake_embedding or safe_snapshot or qdrant_adapter or claim_with_unknown
+started=2026-11-19T04:55:05.2694510+08:00
+.....                                                                    [100%]
+5 passed, 5 deselected in 0.62s
+exit_code=0
+ended=2026-11-19T04:55:06.8889852+08:00
+
+=== offline e2e layer ===
+command=python -m pytest -q tests/vertical_slice -k bm25_and_dense or no_evidence or conflict_discloses or timeout_returns or budget_stop
+started=2026-11-19T04:55:06.8893569+08:00
+.....                                                                    [100%]
+5 passed, 5 deselected in 0.68s
+exit_code=0
+ended=2026-11-19T04:55:08.6771777+08:00
+
+=== full vertical-slice suite ===
+command=python -m pytest -q tests/vertical_slice
+started=2026-11-19T04:55:08.6774911+08:00
+..........                                                               [100%]
+10 passed in 1.05s
+exit_code=0
+ended=2026-11-19T04:55:10.7586872+08:00
+
+=== offline end-to-end ===
+command=python -m experiments.vertical_slice.run
+started=2026-11-19T04:55:10.7589522+08:00
+offline_e2e=PASS cases=6 evidence=20 relations=4
+live_postgres_qdrant=WAITING_EXTERNAL live_qwen_deepseek=WAITING_EXTERNAL
+offline_result=experiments/vertical_slice/results/offline-e2e.json sha256=efff75aa627e62b6e029d28a9038fecc78ed8473c1db485e977946179ee75559
+exit_code=0
+ended=2026-11-19T04:55:12.0265793+08:00
+
+
+
+=== PDF binary-marker regeneration ===
+command=python -m experiments.vertical_slice.fixture_pdf
+started=2026-11-19T05:02:29.7478713+08:00
+pdf_fixture=created sha256=e412ae34357fd09406e722c454910c5e6860767847b2e9e4ab2434d5dfa5be66 bytes=830
+exit_code=0
+ended=2026-11-19T05:02:30.0112191+08:00
+
+=== post-fix full vertical-slice suite ===
+command=python -m pytest -q tests/vertical_slice
+started=2026-11-19T05:02:30.0131253+08:00
+..........                                                               [100%]
+10 passed in 1.15s
+exit_code=0
+ended=2026-11-19T05:02:32.3228226+08:00
+
+=== post-fix offline end-to-end ===
+command=python -m experiments.vertical_slice.run
+started=2026-11-19T05:02:32.3235009+08:00
+offline_e2e=PASS cases=6 evidence=20 relations=4
+live_postgres_qdrant=WAITING_EXTERNAL live_qwen_deepseek=WAITING_EXTERNAL
+offline_result=experiments/vertical_slice/results/offline-e2e.json sha256=81791d329200a64ef592619454553be0cfaec6f12a5261d04e21ce1f4561c67f
+exit_code=0
+ended=2026-11-19T05:02:33.6082710+08:00
+
+
+=== PDF NUL-whitespace regeneration ===
+command=python -m experiments.vertical_slice.fixture_pdf
+started=2026-11-19T05:05:49.9482322+08:00
+pdf_fixture=created sha256=5756138c01a40d28a6bb9c8b29dcf8ad6d9f6b18879e2a6ad3123100cd2a99ba bytes=831
+exit_code=0
+ended=2026-11-19T05:05:50.2522911+08:00
+
+=== PDF binary detection full suite ===
+command=python -m pytest -q tests/vertical_slice
+started=2026-11-19T05:05:50.2539276+08:00
+..........                                                               [100%]
+10 passed in 1.10s
+exit_code=0
+ended=2026-11-19T05:05:52.5478683+08:00
+
+=== PDF binary detection offline end-to-end ===
+command=python -m experiments.vertical_slice.run
+started=2026-11-19T05:05:52.5485044+08:00
+offline_e2e=PASS cases=6 evidence=20 relations=4
+live_postgres_qdrant=WAITING_EXTERNAL live_qwen_deepseek=WAITING_EXTERNAL
+offline_result=experiments/vertical_slice/results/offline-e2e.json sha256=c29a8c29bc4e650730803823f10e92bb015f760f65053b2455d57d4d92780380
+exit_code=0
+ended=2026-11-19T05:05:53.8612083+08:00
