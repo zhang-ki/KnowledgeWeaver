@@ -1,9 +1,28 @@
-# Partial P1 configuration: Qdrant only.
-# PostgreSQL is intentionally omitted until CR-P1-POSTGRES-16.16 is approved.
-# This file is not evidence that the dual-service environment is accepted.
+# P1 dual-service candidate. Image/runtime gates remain NOT_RUN until Orchestrator verifies.
 name: knowledgeweaver
 
 services:
+  postgres:
+    image: postgres:16.16-bookworm@sha256:f45d631d050c2fe068f384ed6c4faac506e9cd7f4da605ce703648e4b0985848
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: knowledgeweaver
+      POSTGRES_USER: kw
+      POSTGRES_PASSWORD: ${KW_POSTGRES_PASSWORD:?Set local password}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    networks:
+      - services
+
   qdrant:
     image: qdrant/qdrant:v1.17.1@sha256:cd3e42737c684ee516ae5533218be93fd5288f41d0a466ed18dbdc22ef52a000
     platform: linux/amd64
@@ -12,7 +31,7 @@ services:
       QDRANT__SERVICE__API_KEY: ${KW_QDRANT_API_KEY:?Set local API key}
       QDRANT__CLUSTER__ENABLED: "false"
     ports:
-      - "127.0.0.1:${KW_QDRANT_PORT:-56333}:6333"
+      - "127.0.0.1:56333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
       - qdrant_snapshots:/qdrant/snapshots
@@ -24,5 +43,6 @@ networks:
   services: {}
 
 volumes:
+  pg_data:
   qdrant_data:
   qdrant_snapshots:
