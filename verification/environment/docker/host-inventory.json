@@ -1,0 +1,72 @@
+{
+  "task_id": "P1.docker_services",
+  "observed_local": "2026-11-18T20:46:50+08:00",
+  "observed_utc": "2026-11-18T12:46:50Z",
+  "worktree": {
+    "cwd_matches_assigned_worktree": true,
+    "branch": "task/p1-docker-services",
+    "head": "c8d2744188d089976a0be532da72fbf40b0b9c25",
+    "working_tree_clean_at_start": true,
+    "main_worktree_left_unchanged": true
+  },
+  "windows": {
+    "environment_version_string": "10.0.26200.0",
+    "registry_product_name": "Windows 10 Home China",
+    "registry_display_version": "25H2",
+    "registry_current_build": "26200",
+    "registry_ubr": 9974,
+    "architecture": "AMD64",
+    "identity_note": "The product name and version/build do not provide a consistent Windows 11 identification; CIM and systeminfo queries failed, so the OS identity was not independently resolved."
+  },
+  "storage": {
+    "C_free_gb": 69.3,
+    "D_free_gb": 202.3
+  },
+  "docker": {
+    "docker_executable": "NOT_FOUND",
+    "compose_cli_version": "NOT_RUN_DOCKER_MISSING",
+    "engine_version": "NOT_RUN_DOCKER_MISSING",
+    "docker_desktop_program_files_present": false,
+    "docker_desktop_per_user_path_present_at_initial_observation": false,
+    "com_docker_service": "NOT_FOUND"
+  },
+  "wsl": {
+    "wsl_executable": "PRESENT_BUT_QUERIES_FAILED",
+    "wsl_version_exit_code": 1,
+    "wsl_list_exit_code": 1,
+    "wsl_status_exit_code": 50,
+    "feature_state": "NOT_VERIFIED",
+    "reason": "Get-WindowsOptionalFeature -Online required elevation; no Windows feature or WSL changes were made."
+  },
+  "virtualization": {
+    "firmware_virtualization": "NOT_VERIFIED",
+    "reason": "CIM processor query was inaccessible and systeminfo.exe returned exit code 1; BIOS/UEFI was not changed."
+  },
+  "package_sources": {
+    "winget_command": "PRESENT_BUT_UNAVAILABLE",
+    "winget_version_exit_code": 50,
+    "note": "The WindowsApps winget executable could not be started in this session."
+  },
+  "failed_or_blocked_commands": [
+    {
+      "command": "Get-CimInstance Win32_OperatingSystem / Win32_Processor / Win32_LogicalDisk",
+      "result": "FAILED",
+      "reason": "CIM resources inaccessible."
+    },
+    {
+      "command": "systeminfo.exe",
+      "exit_code": 1,
+      "result": "FAILED"
+    },
+    {
+      "command": "Get-WindowsOptionalFeature -Online",
+      "result": "BLOCKED",
+      "reason": "Elevation required."
+    },
+    {
+      "command": "Get-AppxPackage Microsoft.DesktopAppInstaller",
+      "result": "BLOCKED",
+      "reason": "Access denied."
+    }
+  ]
+}

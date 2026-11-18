@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "plan_version": "KW-P0-2026-11-18",
+  "plan_hash": "6ef838b43dc6a6a8d1680c8b9503e55fe7a63c6ca9c4238e4942acf8d495d1df",
+  "status": "PARTIAL_P1_RUNTIME_BLOCKED",
+  "registry_observation_date": "2026-11-18",
+  "platform": "linux/amd64",
+  "cr_approval": {
+    "cr_id": "CR-P1-POSTGRES-16.16",
+    "status": "APPROVED",
+    "decision_source": "Orchestrator runtime event 29",
+    "scope": "postgres:16.16-bookworm linux/amd64 platform manifest only; PostgreSQL major version and frozen two-service architecture unchanged"
+  },
+  "images": [
+    {
+      "service": "postgres",
+      "repository": "postgres",
+      "tag": "16.16-bookworm",
+      "reference": "postgres:16.16-bookworm@sha256:f45d631d050c2fe068f384ed6c4faac506e9cd7f4da605ce703648e4b0985848",
+      "platform": "linux/amd64",
+      "platform_manifest_digest": "sha256:f45d631d050c2fe068f384ed6c4faac506e9cd7f4da605ce703648e4b0985848",
+      "multi_platform_index_digest": "sha256:a49f7438ba03589f9b1ca062f2da82e899b48ea1dc50d2449fa09a70be83ebca",
+      "registry_evidence": "https://hub.docker.com/layers/library/postgres/16.16-bookworm/images/sha256-f45d631d050c2fe068f384ed6c4faac506e9cd7f4da605ce703648e4b0985848",
+      "registry_manifest_observed": true,
+      "cr_id": "CR-P1-POSTGRES-16.16",
+      "local_pull_status": "NOT_RUN",
+      "runtime_validation_status": "NOT_RUN"
+    },
+    {
+      "service": "qdrant",
+      "repository": "qdrant/qdrant",
+      "tag": "v1.17.1",
+      "reference": "qdrant/qdrant:v1.17.1@sha256:cd3e42737c684ee516ae5533218be93fd5288f41d0a466ed18dbdc22ef52a000",
+      "platform": "linux/amd64",
+      "platform_manifest_digest": "sha256:cd3e42737c684ee516ae5533218be93fd5288f41d0a466ed18dbdc22ef52a000",
+      "multi_platform_index_digest": "sha256:94728574965d17c6485dd361aa3c0818b325b9016dac5ea6afec7b4b2700865f",
+      "registry_evidence": "https://hub.docker.com/layers/qdrant/qdrant/v1.17.1/images/sha256-cd3e42737c684ee516ae5533218be93fd5288f41d0a466ed18dbdc22ef52a000",
+      "registry_manifest_observed": true,
+      "local_pull_status": "NOT_RUN",
+      "runtime_validation_status": "NOT_RUN"
+    }
+  ],
+  "docker_desktop_install": {
+    "version_candidate": "4.99.0",
+    "status": "INSTALLED_ENGINE_NOT_STARTED",
+    "installer_checksum_or_signature_locally_verified": true,
+    "official_sha256": "a5e299131c9c53d60f3f752b162078945eb5faf6eedcf0be20a214c6e6cea444",
+    "actual_sha256": "a5e299131c9c53d60f3f752b162078945eb5faf6eedcf0be20a214c6e6cea444",
+    "authenticode_status": "Valid",
+    "desktop_file_version": "4.99.0.245822",
+    "docker_cli_version": "29.9.3",
+    "docker_cli_version_exit": 0,
+    "compose_version": "v5.7.0",
+    "compose_version_exit": 0,
+    "engine_status": "NOT_STARTED",
+    "docker_processes_observed": "NONE",
+    "install_exit": null,
+    "license_accepted_by_this_session": false,
+    "desktop_started_by_this_session": false,
+    "status_source": "ORCHESTRATOR_REPORT",
+    "note": "Installer checksum and signature were verified locally. Orchestrator reports Desktop and CLI/Compose binaries installed; the engine remains stopped and terms have not been accepted."
+  }
+}
