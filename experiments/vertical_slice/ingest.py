@@ -17,13 +17,12 @@ from experiments.vertical_slice.models import (
     Corpus,
     Entity,
     Evidence,
-    Relation,
     Provenance,
+    Relation,
     SourceDocument,
     derived_id,
     sha256_bytes,
 )
-
 
 ROOT = Path(__file__).resolve().parent
 CORPUS_ROOT = ROOT / "corpus"
@@ -315,7 +314,7 @@ def build_corpus(write_manifest: bool = True) -> Corpus:
     _add_relation(corpus, "EvidenceRecord", "CONTAINS", "SourceSpan", code_evidence, "STATIC_ANALYSIS")
 
     conflict_match = next(
-        (i for i, line in enumerate(code_lines, 1) if re.search(r"demo lookup cache uses ProcessMemory", line, re.I)),
+        (i for i, line in enumerate(code_lines, 1) if re.search(r"demo lookup cache uses ProcessMemory", line, re.IGNORECASE)),
         None,
     )
     if conflict_match is None:

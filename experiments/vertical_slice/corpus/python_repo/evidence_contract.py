@@ -20,7 +20,6 @@ class EvidenceRecord:
 class DemoLookupCache:
     """A deliberately conflicting fixture statement about cache durability."""
 
-    pass
 
 
 def bind_source_span(span: SourceSpan, quote: str) -> EvidenceRecord:

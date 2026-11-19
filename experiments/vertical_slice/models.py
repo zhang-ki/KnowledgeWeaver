@@ -8,7 +8,6 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 SCHEMA_VERSION = 1
 ID_NAMESPACE = uuid.UUID("256bf6b7-a9db-5eac-944e-985ef155c9fe")
 

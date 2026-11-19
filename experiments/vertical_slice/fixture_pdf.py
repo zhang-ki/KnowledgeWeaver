@@ -7,7 +7,6 @@ import hashlib
 import re
 from pathlib import Path
 
-
 PDF_LINES = (
     "KnowledgeWeaver P3 synthetic public fixture.",
     "The ingestion pipeline stores each source span as a durable EvidenceRecord.",
@@ -34,8 +33,10 @@ def build_pdf(path: Path) -> str:
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+        ),
         b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"endstream",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]

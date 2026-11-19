@@ -8,7 +8,7 @@ import importlib.metadata
 import json
 import platform
 import shutil
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +18,6 @@ from experiments.vertical_slice.offline_runtime import drive_ready_coroutine
 from experiments.vertical_slice.providers import FakeGenerationProvider, RemoteUseApproval
 from experiments.vertical_slice.retrieval import BM25Index, InMemoryDenseIndex
 from experiments.vertical_slice.storage import write_snapshot
-
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = ROOT / "results"
@@ -79,7 +78,7 @@ async def run_offline(output: Path) -> dict[str, Any]:
     result = {
         "plan_version": "KW-P0-2026-11-18",
         "declared_plan_hash": "6ef838b43dc6a6a8d1680c8b9503e55fe7a63c6ca9c4238e4942acf8d495d1df",
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "created_at_utc": datetime.now(UTC).isoformat(),
         "environment": {
             "python": platform.python_version(),
             "platform": platform.platform(),

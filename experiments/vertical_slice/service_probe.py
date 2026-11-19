@@ -6,15 +6,18 @@ import argparse
 import asyncio
 import json
 import platform
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from experiments.vertical_slice.ingest import build_corpus
 from experiments.vertical_slice.providers import FakeEmbeddingProvider, ProviderUnavailable
 from experiments.vertical_slice.retrieval import QdrantCandidateIndex
-from experiments.vertical_slice.storage import PostgresEvidenceStore, QdrantDenseIndex, QdrantRestClient
-
+from experiments.vertical_slice.storage import (
+    PostgresEvidenceStore,
+    QdrantDenseIndex,
+    QdrantRestClient,
+)
 
 ROOT = Path(__file__).resolve().parent
 
@@ -30,7 +33,7 @@ async def run_probe(schema: str, collection: str, output: Path) -> dict[str, Any
         raise RuntimeError("local service probe returned incomplete task-owned resources")
     result = {
         "plan_version": "KW-P0-2026-11-18",
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "created_at_utc": datetime.now(UTC).isoformat(),
         "environment": {"python": platform.python_version(), "platform": platform.platform()},
         "resources": {"schema": schema, "collection": collection, "corpus_id": corpus.corpus_id, "generation_id": corpus.generation_id},
         "postgresql": {"status": "PASS", "evidence_rows": pg_count},

@@ -15,9 +15,9 @@ from experiments.vertical_slice.fixture_pdf import PDF_LINES, build_pdf, parse_f
 from experiments.vertical_slice.ingest import PDF_PATH, build_corpus
 from experiments.vertical_slice.offline_runtime import drive_ready_coroutine
 from experiments.vertical_slice.providers import (
+    DeepSeekGenerationProvider,
     FakeEmbeddingProvider,
     FakeGenerationProvider,
-    DeepSeekGenerationProvider,
     LLMRequest,
     LLMResult,
     ProviderUnavailable,

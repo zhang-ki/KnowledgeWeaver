@@ -12,8 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
-
+from typing import Any, ClassVar
 
 _EMBED_STOPWORDS = {"a", "an", "and", "are", "does", "how", "is", "of", "or", "the", "to", "what", "which"}
 
@@ -108,7 +107,7 @@ class FakeEmbeddingProvider:
 class QwenEmbeddingProvider:
     """Local-only OpenAI-compatible Qwen adapter; it never uses the cloud gate."""
 
-    _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+    _LOOPBACK_HOSTS: ClassVar[set[str]] = {"localhost", "127.0.0.1", "::1"}
 
     def __init__(self, timeout_seconds: float = 20.0) -> None:
         self.timeout_seconds = timeout_seconds
@@ -188,7 +187,7 @@ class QwenEmbeddingProvider:
         try:
             parsed = urllib.parse.urlsplit(base_url)
             hostname = (parsed.hostname or "").casefold().rstrip(".")
-            parsed.port  # Validate malformed ports before any request can be attempted.
+            _ = parsed.port  # Validate malformed ports before any request can be attempted.
         except ValueError:
             raise ProviderUnavailable("Qwen embedding endpoint URL is invalid") from None
         if (
