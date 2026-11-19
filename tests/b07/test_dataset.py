@@ -13,12 +13,12 @@ from knowledge_weaver.evaluation.contracts import (
     DatasetStatus,
     GoldPathEdge,
     HumanReview,
+    PermissionScope,
     PreparedBenchmarkCase,
     ReviewChecklist,
     ReviewedGoldPath,
     SourceAsset,
     SourceLicense,
-    PermissionScope,
     canonical_json_hash,
     human_review_digest,
 )
