@@ -1,0 +1,219 @@
+{
+  "$defs": {
+    "DatasetStatus": {
+      "enum": [
+        "BLOCKED_INPUTS",
+        "FROZEN"
+      ],
+      "title": "DatasetStatus",
+      "type": "string"
+    },
+    "PermissionScope": {
+      "enum": [
+        "redistributable",
+        "local_evaluation_only"
+      ],
+      "title": "PermissionScope",
+      "type": "string"
+    },
+    "SourceAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "source_family_id": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "title": "Source Family Id",
+          "type": "string"
+        },
+        "source_path": {
+          "minLength": 1,
+          "title": "Source Path",
+          "type": "string"
+        },
+        "material_path": {
+          "minLength": 1,
+          "title": "Material Path",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SourceKind"
+        },
+        "raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Sha256",
+          "type": "string"
+        },
+        "license": {
+          "$ref": "#/$defs/SourceLicense"
+        }
+      },
+      "required": [
+        "id",
+        "source_family_id",
+        "source_path",
+        "material_path",
+        "kind",
+        "raw_sha256",
+        "license"
+      ],
+      "title": "SourceAsset",
+      "type": "object"
+    },
+    "SourceKind": {
+      "enum": [
+        "python_repo",
+        "pdf",
+        "docx",
+        "markdown"
+      ],
+      "title": "SourceKind",
+      "type": "string"
+    },
+    "SourceLicense": {
+      "additionalProperties": false,
+      "properties": {
+        "license_name": {
+          "minLength": 1,
+          "title": "License Name",
+          "type": "string"
+        },
+        "license_uri": {
+          "minLength": 1,
+          "title": "License Uri",
+          "type": "string"
+        },
+        "permission_scope": {
+          "$ref": "#/$defs/PermissionScope"
+        },
+        "permission_evidence": {
+          "minLength": 1,
+          "title": "Permission Evidence",
+          "type": "string"
+        },
+        "verified_by": {
+          "minLength": 1,
+          "title": "Verified By",
+          "type": "string"
+        },
+        "verified_at": {
+          "format": "date-time",
+          "title": "Verified At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "license_name",
+        "license_uri",
+        "permission_scope",
+        "permission_evidence",
+        "verified_by",
+        "verified_at"
+      ],
+      "title": "SourceLicense",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "enum": [
+        1
+      ],
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "plan_version": {
+      "const": "KW-P0-2026-11-18",
+      "default": "KW-P0-2026-11-18",
+      "enum": [
+        "KW-P0-2026-11-18"
+      ],
+      "title": "Plan Version",
+      "type": "string"
+    },
+    "dataset_id": {
+      "minLength": 1,
+      "title": "Dataset Id",
+      "type": "string"
+    },
+    "dataset_version": {
+      "minLength": 1,
+      "title": "Dataset Version",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/DatasetStatus"
+    },
+    "expected_case_count": {
+      "const": 100,
+      "default": 100,
+      "enum": [
+        100
+      ],
+      "title": "Expected Case Count",
+      "type": "integer"
+    },
+    "case_count": {
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Case Count",
+      "type": "integer"
+    },
+    "cases_file": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cases File"
+    },
+    "cases_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cases Sha256"
+    },
+    "sources": {
+      "items": {
+        "$ref": "#/$defs/SourceAsset"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "blockers": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Blockers",
+      "type": "array"
+    }
+  },
+  "required": [
+    "dataset_id",
+    "dataset_version",
+    "status",
+    "case_count"
+  ],
+  "title": "DatasetManifest",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}
