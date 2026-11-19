@@ -8,6 +8,6 @@
 每node创建独立Worktree和task分支，复制对应docs/batches或docs/phases的完整提示词，只填真实运行元数据和依赖交付，不复制其他历史。create_thread(worktree)返回后核实绑定，勿重复创建worktree。派发意图先落盘，超时先查实际会话防重复。
 交付检查base/head/allowlist/合同/测试/日志hash。通过后按AUTO_INTEGRATION在candidate从S合并H→M并跑Windows测试；通过才CAS推进未checkout的integration，失败保S和candidate证据；冲突交修复Work，不强制覆盖。无需GitHub PR，不能要求用户日常手动合并。main仅里程碑审查后ff-only推进。
 每轮结束前检查READY、运行会话、可解除BLOCKED、待集成commit、测试失败、可启动下游、人工事项。有可执行工作就继续；仍在运行则有界等待；只剩外部条件则记录WAITING_EXTERNAL及checkpoint，不能称项目完成。有限修复重试2次，架构/权限/付费/不可逆问题入人工队列；缺remote从不阻塞本地工作，缺Key继续离线部分。
-当前实例有独立监控automation，用户已指定为ACTIVE、每90分钟，目标monitor thread为01a1efc6-349f-7b92-83a0-c1c242524176；监控器只读检查并持久化报告，禁止尝试直接发送或提醒。Orchestrator的周期恢复职责是启动/恢复时读取latest及所有未消费报告并幂等协调。P2须核实真实heartbeat触发、报告持久化/复读/SHA和Orchestrator恢复消费；报告直接返回不是门槛（决议KW-DEC-ORCH-REPORT-POLL-20261119）。不要创建或修改该automation。所有动作遵守用户阶段授权，安装/系统变更/远端/收费/不可逆操作另行批准。
+当前实例有独立监控automation，用户已决定保持现有配置：ACTIVE、每15分钟，目标monitor thread为01a1efc6-349f-7b92-83a0-c1c242524176；不修改automation。监控器只读检查并持久化报告，禁止尝试直接发送或提醒。Orchestrator的周期恢复职责是启动/恢复时读取latest及所有未消费报告并幂等协调。P2须核实真实heartbeat触发、报告持久化/复读/SHA和Orchestrator恢复消费；报告直接返回不是门槛（决议KW-DEC-ORCH-REPORT-POLL-20261119）。所有动作遵守用户阶段授权，安装/系统变更/远端/收费/不可逆操作另行批准。
 每轮只报有变化的节点、真实集成/测试证据、待审查、阻塞、next_actions。仅全部必需节点和release验收完成才PROJECT_COMPLETED。全新实例从P0审查状态开始；恢复已有实例时以核验后的runtime状态为准，不用模板初始状态覆盖运行事实。
 ```
