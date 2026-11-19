@@ -1,0 +1,59 @@
+{
+  "entities": [
+    {
+      "local_id": "e-alpha",
+      "name": "Alpha",
+      "kind": "concept",
+      "mentions": [
+        {"surface_form": "Alpha", "quote": "Alpha supports Beta with a documented method."},
+        {"surface_form": "Alpha", "quote": "Alpha does not support Beta under the old constraint."}
+      ],
+      "aliases": []
+    },
+    {
+      "local_id": "e-beta",
+      "name": "Beta",
+      "kind": "concept",
+      "mentions": [
+        {"surface_form": "Beta", "quote": "Alpha supports Beta with a documented method."},
+        {"surface_form": "Beta", "quote": "Alpha does not support Beta under the old constraint."}
+      ],
+      "aliases": []
+    },
+    {
+      "local_id": "e-gamma",
+      "name": "Gamma",
+      "kind": "concept",
+      "mentions": [
+        {"surface_form": "Gamma", "quote": "Gamma is also known as Gamma-X."}
+      ],
+      "aliases": [
+        {"surface_form": "Gamma-X", "quote": "Gamma is also known as Gamma-X."}
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "subject_local_id": "e-alpha",
+      "predicate": "RELATED_TO",
+      "object_local_id": "e-beta",
+      "polarity": "positive",
+      "qualifiers": {"context": "documented method"},
+      "confidence": 0.81,
+      "evidence": [
+        {"surface_form": "Alpha supports Beta", "quote": "Alpha supports Beta with a documented method."}
+      ]
+    },
+    {
+      "subject_local_id": "e-alpha",
+      "predicate": "RELATED_TO",
+      "object_local_id": "e-beta",
+      "polarity": "negative",
+      "qualifiers": {"context": "old constraint"},
+      "confidence": 0.64,
+      "evidence": [
+        {"surface_form": "Alpha does not support Beta", "quote": "Alpha does not support Beta under the old constraint."}
+      ]
+    }
+  ]
+}
