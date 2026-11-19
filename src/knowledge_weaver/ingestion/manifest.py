@@ -17,10 +17,10 @@ from knowledge_weaver.models import (
 
 from .fingerprints import parser_fingerprint
 from .paths import (
-    PathSafetyError,
     SUPPORTED_SUFFIXES,
-    normalize_root,
+    PathSafetyError,
     is_link_or_reparse,
+    normalize_root,
     resolve_relative_file,
     sha256_file,
 )

@@ -213,12 +213,11 @@ def test_pdf_pages_headings_tables_and_bbox_are_preserved(
             return FakeBBox(self.l, page_height - self.b, self.r, page_height - self.t)
 
     class FakeDoclingDocument:
-        pages = {
-            1: SimpleNamespace(size=SimpleNamespace(height=100.0)),
-            2: SimpleNamespace(size=SimpleNamespace(height=100.0)),
-        }
-
         def __init__(self) -> None:
+            self.pages = {
+                1: SimpleNamespace(size=SimpleNamespace(height=100.0)),
+                2: SimpleNamespace(size=SimpleNamespace(height=100.0)),
+            }
             heading = SimpleNamespace(
                 label=SimpleNamespace(value="section_header"),
                 text="Methods",
@@ -318,8 +317,6 @@ def test_pdf_table_model_failure_falls_back_with_warning(
 def test_parser_rejects_manifest_path_escape_and_changed_content(
     tmp_path, source_factory, run_immediate_async
 ) -> None:
-    from knowledge_weaver.models import SourceVersion
-
     source = source_factory(SourceKind.markdown)
     raw_hash = sha256_bytes(b"outside")
     fingerprint = parser_fingerprint(SourceKind.markdown)

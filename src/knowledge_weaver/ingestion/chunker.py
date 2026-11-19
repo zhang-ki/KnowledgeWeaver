@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import bisect
 from dataclasses import dataclass
+
 from knowledge_weaver.core.ids import chunk_id, deterministic_id, sha256_text
 from knowledge_weaver.models import (
     Block,
@@ -10,11 +11,10 @@ from knowledge_weaver.models import (
     Chunk,
     ChunkConfig,
     ChunkSpan,
-    DocxLocator,
     Document,
+    DocxLocator,
     Locator,
     MarkdownLocator,
-    PdfLocator,
     PythonLocator,
     StructureType,
 )
@@ -324,14 +324,14 @@ def _table_slices(
         group_index = 0
         previous_column: int | None = None
 
-        def flush() -> None:
+        def flush(current_row: int = row) -> None:
             nonlocal buffer, spans, cursor, group_index, previous_column
             if buffer:
                 result.append(
                     _SpanSlice(
                         text="".join(buffer),
                         spans=tuple(spans),
-                        path_component=f"row:{row}:group:{group_index}",
+                        path_component=f"row:{current_row}:group:{group_index}",
                     )
                 )
                 group_index += 1

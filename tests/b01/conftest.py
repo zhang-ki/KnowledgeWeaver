@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Coroutine
+from typing import Any
 
 import pytest
 
-from knowledge_weaver.models import ParseLimits, ParseRequest, Source, SourceKind
 from knowledge_weaver.ingestion import ManifestBuilder
+from knowledge_weaver.models import ParseLimits, ParseRequest, Source, SourceKind
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "b01"
 SOURCE_IDS = {

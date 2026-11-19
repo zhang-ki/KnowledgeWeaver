@@ -8,26 +8,29 @@ import os
 import re
 import threading
 from collections import OrderedDict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
+
+from pydantic import ValidationError
 
 from knowledge_weaver.core.ids import block_id, document_id, sha256_bytes, sha256_text
 from knowledge_weaver.models import (
     Block,
     BlockKind,
-    Document as DocumentDto,
     DocxLocator,
     Locator,
     MarkdownLocator,
-    ParseRequest,
     ParsedSource,
+    ParseRequest,
     PdfLocator,
     PythonLocator,
     RejectedFile,
     SourceKind,
     TableCell,
 )
+from knowledge_weaver.models import Document as DocumentDto
 
 from .fingerprints import parser_fingerprint
 from .paths import (
@@ -231,7 +234,16 @@ class StructuralParser:
                     )
                 )
                 continue
-            except Exception:
+            except (
+                AttributeError,
+                IndexError,
+                KeyError,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+                ValidationError,
+            ):
                 rejected_files.append(
                     RejectedFile(
                         path=normalized,
@@ -507,10 +519,8 @@ def _line_and_column(text: str, line_starts: list[int], offset: int) -> tuple[in
 
 
 def _markdown_specs(text: str, relative_path: str) -> list[tuple[_BlockSpec, int]]:
-    try:
-        from markdown_it import MarkdownIt
-    except ImportError:
-        raise
+    from markdown_it import MarkdownIt
+
     tokens = MarkdownIt("commonmark").parse(text)
     line_starts = _line_starts(text)
     specs: list[tuple[_BlockSpec, int]] = []
@@ -577,16 +587,18 @@ def _markdown_specs(text: str, relative_path: str) -> list[tuple[_BlockSpec, int
 
 
 def _docx_specs(raw: bytes, relative_path: str) -> tuple[list[_BlockSpec], list[str]]:
-    try:
-        from docx import Document as load_docx
-        from docx.oxml.table import CT_Tbl
-        from docx.oxml.text.paragraph import CT_P
-        from docx.table import Table
-        from docx.text.paragraph import Paragraph
-    except ImportError:
-        raise
+    from docx import Document as load_docx
+    from docx.opc.exceptions import PackageNotFoundError
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from lxml.etree import XMLSyntaxError
 
-    document = load_docx(io.BytesIO(raw))
+    try:
+        document = load_docx(io.BytesIO(raw))
+    except (PackageNotFoundError, XMLSyntaxError, OSError, ValueError, KeyError) as exc:
+        raise _FileParseProblem("PARSE_FAILED", "DOCX document content could not be parsed.") from exc
     specs: list[_BlockSpec] = []
     heading_stack: list[str] = []
     block_index = 0
@@ -686,14 +698,21 @@ def _pdf_specs(path: Path, relative_path: str) -> tuple[list[_BlockSpec], list[s
         with _docling_offline_environment():
             try:
                 result = _run_docling(path, table_structure=True)
-            except Exception:
+            except (OSError, RuntimeError, TypeError, ValueError, ValidationError):
                 warnings.append(
                     "PDF_TABLE_STRUCTURE_UNAVAILABLE: table model failed offline; retried with table extraction disabled."
                 )
                 result = _run_docling(path, table_structure=False)
-    except ImportError:
-        raise
-    except Exception as exc:
+    except (
+        AttributeError,
+        IndexError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+        ValidationError,
+    ) as exc:
         raise _FileParseProblem(
             "PARSE_FAILED", "PDF conversion failed with the offline Docling configuration."
         ) from exc
