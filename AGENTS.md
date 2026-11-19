@@ -2,7 +2,7 @@
 
 唯一当前技术依据：docs/planning/，版本 KW-P0-2026-11-18；具体节点：docs/phases/ 与 docs/batches/。用户最新指令优先，变更须留下版本与决定记录。
 
-本轮 Phase 0 仅文档。不得安装软件、初始化 Git、启动开发 Batch、创建远端或调用收费 API。Phase 0 READY_FOR_REVIEW 不代表架构已获审查批准或项目已完成。
+Phase 0 文档限定仅适用于原始 Phase 0 审查轮次。后续用户已明确批准全项目持续自主推进，故旧有“Phase 0 only / Hold at Phase 0”限制自 2026-11-20 起标记为 SUPERSEDED / INVALID；阶段执行以运行账本和冻结依赖、验收门禁为准。此规则不授权跳过正式审查、阶段依赖、Batch allowlist、Git 安全门禁或用户数据保护。
 
 ChatGPT 技术负责人负责架构、算法、模型、接口、任务划分、验收及争议裁决。Orchestrator 依固定计划恢复账本、派发独立会话、核验提交、测试并本地集成；不改变方案或新拆业务 Batch。Work 只在分配的独立 Worktree/分支内修改 allowlist，不能改 main/integration、不能自行合并或再派开发会话。
 
