@@ -21,6 +21,19 @@ _EMBED_STOPWORDS = {"a", "an", "and", "are", "does", "how", "is", "of", "or", "t
 class ProviderUnavailable(RuntimeError):
     """A provider is not configured or the approved capability gate is closed."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "provider_unavailable",
+        retryable: bool = False,
+        http_status: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+        self.retryable = retryable
+        self.http_status = http_status
+
 
 @dataclass(frozen=True)
 class RemoteUseApproval:
@@ -34,8 +47,7 @@ class RemoteUseApproval:
             self.external_data_approved
             and self.budget_approved
             and self.calls_explicitly_enabled
-            and self.currency_cap is not None
-            and self.currency_cap > 0
+            and (self.currency_cap is None or self.currency_cap > 0)
             and os.environ.get("KW_ALLOW_REMOTE", "false").casefold() == "true"
             and os.environ.get("KW_MODEL_OFFLINE", "true").casefold() == "false"
         ):
@@ -303,17 +315,32 @@ class DeepSeekGenerationProvider:
         prompt_tokens = _validated_token_count(usage, "prompt_tokens")
         completion_tokens = _validated_token_count(usage, "completion_tokens")
         usage_is_exact = prompt_tokens is not None and completion_tokens is not None
+        preserved_usage: dict[str, int | str] = {}
+        for field in (
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
+            "cache_hit_tokens",
+            "cache_miss_tokens",
+        ):
+            value = _validated_token_count(usage, field)
+            if value is not None:
+                preserved_usage[field] = value
         response_model = response.get("model")
         revision = response_model if isinstance(response_model, str) and response_model else model
+        normalized_usage: dict[str, int | str] = {
+            "input_tokens": prompt_tokens if prompt_tokens is not None else 0,
+            "output_tokens": completion_tokens if completion_tokens is not None else 0,
+            "count_kind": "exact" if usage_is_exact else "unavailable",
+        }
+        normalized_usage.update(preserved_usage)
         return LLMResult(
             parsed,
             model,
             revision,
-            {
-                "input_tokens": prompt_tokens if prompt_tokens is not None else 0,
-                "output_tokens": completion_tokens if completion_tokens is not None else 0,
-                "count_kind": "exact" if usage_is_exact else "unavailable",
-            },
+            normalized_usage,
             str(response.get("id")) if response.get("id") else None,
         )
 
@@ -348,22 +375,87 @@ def _post_json(
     *,
     local_only: bool = False,
 ) -> dict[str, Any]:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    try:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        raise ProviderUnavailable(
+            "configured provider request could not be serialized",
+            category="request_invalid",
+            retryable=False,
+        ) from None
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    request = urllib.request.Request(
-        url,
-        data=body,
-        headers=headers,
-        method="POST",
-    )
+    try:
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+    except (TypeError, ValueError, UnicodeError):
+        raise ProviderUnavailable(
+            "configured provider request URL is invalid",
+            category="request_invalid",
+            retryable=False,
+        ) from None
     try:
         with _open_json_request(request, timeout=timeout, local_only=local_only) as response:
             result = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        # Never attach headers, endpoint query parameters, response body, or credentials.
-        raise ProviderUnavailable(f"configured provider request failed: {type(exc).__name__}") from None
+    except urllib.error.HTTPError as exc:
+        # Only the numeric status crosses this boundary; do not read or expose the
+        # response body, headers, URL, reason text, or credential-bearing request.
+        status = exc.code if type(exc.code) is int else None
+        if status in {408, 425, 429}:
+            category, retryable = "http_transient", True
+        elif status is not None and 500 <= status <= 599:
+            category, retryable = "http_server_error", True
+        elif status in {401, 403}:
+            category, retryable = "http_auth", False
+        elif status is not None and 400 <= status <= 499:
+            category, retryable = "http_client_error", False
+        else:
+            category, retryable = "http_error", False
+        label = f"configured provider returned HTTP {status}" if status is not None else "configured provider returned an HTTP error"
+        raise ProviderUnavailable(
+            label,
+            category=category,
+            retryable=retryable,
+            http_status=status,
+        ) from None
+    except urllib.error.URLError as exc:
+        # URLError.reason may contain DNS, proxy, or URL details; keep classification only.
+        is_timeout = isinstance(exc.reason, TimeoutError)
+        raise ProviderUnavailable(
+            "configured provider request timed out" if is_timeout else "configured provider network request failed",
+            category="timeout" if is_timeout else "network_error",
+            retryable=True,
+        ) from None
+    except (TimeoutError, OSError) as exc:
+        is_timeout = isinstance(exc, TimeoutError)
+        # Never attach exception text: it can contain endpoints or other request data.
+        raise ProviderUnavailable(
+            "configured provider request timed out" if is_timeout else "configured provider network request failed",
+            category="timeout" if is_timeout else "network_error",
+            retryable=True,
+        ) from None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ProviderUnavailable(
+            "configured provider returned an invalid JSON response",
+            category="response_invalid",
+            retryable=False,
+        ) from None
+    except (TypeError, ValueError):
+        # urllib may include the configured URL in these deterministic request errors.
+        raise ProviderUnavailable(
+            "configured provider request configuration is invalid",
+            category="request_invalid",
+            retryable=False,
+        ) from None
     if not isinstance(result, dict):
-        raise ProviderUnavailable("configured provider returned an invalid JSON object")
+        raise ProviderUnavailable(
+            "configured provider returned an invalid JSON object",
+            category="response_invalid",
+            retryable=False,
+        )
     return result

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import urllib.error
 from pathlib import Path
@@ -366,6 +367,33 @@ def test_deepseek_cloud_provider_remains_closed_without_remote_approval(monkeypa
     assert "unit-test-cloud-placeholder" not in str(error.value)
 
 
+def test_uncapped_remote_approval_still_requires_every_explicit_gate(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+    monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+    RemoteUseApproval(
+        external_data_approved=True,
+        budget_approved=True,
+        calls_explicitly_enabled=True,
+        currency_cap=None,
+    ).require_open()
+
+    for approval in (
+        RemoteUseApproval(False, True, True, None),
+        RemoteUseApproval(True, False, True, None),
+        RemoteUseApproval(True, True, False, None),
+        RemoteUseApproval(True, True, True, 0),
+    ):
+        with pytest.raises(ProviderUnavailable, match="gate is closed"):
+            approval.require_open()
+
+    for variable, closed_value in (("KW_ALLOW_REMOTE", "false"), ("KW_MODEL_OFFLINE", "true")):
+        monkeypatch.setenv(variable, closed_value)
+        with pytest.raises(ProviderUnavailable, match="gate is closed"):
+            RemoteUseApproval(True, True, True, None).require_open()
+        monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+        monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+
+
 def test_mock_deepseek_uses_separate_cloud_config_and_parses_json(monkeypatch: pytest.MonkeyPatch):
     """This mocked chat response checks the JSON contract only; no DeepSeek call is made."""
     _immediate_thread_call(monkeypatch)
@@ -385,7 +413,13 @@ def test_mock_deepseek_uses_separate_cloud_config_and_parses_json(monkeypatch: p
             "id": "mock-response-id",
             "model": "deepseek-resolved-alias",
             "choices": [{"message": {"content": '{"status":"answered","claims":[]}'}}],
-            "usage": {"prompt_tokens": 4, "completion_tokens": 7},
+            "usage": {
+                "prompt_tokens": 4,
+                "completion_tokens": 7,
+                "total_tokens": 11,
+                "prompt_cache_hit_tokens": 2,
+                "prompt_cache_miss_tokens": 1,
+            },
         }
 
     monkeypatch.setattr(provider_module, "_post_json", mock_post)
@@ -393,10 +427,40 @@ def test_mock_deepseek_uses_separate_cloud_config_and_parses_json(monkeypatch: p
     assert result.parsed_json == {"status": "answered", "claims": []}
     assert result.model == "deepseek-chat-alias"
     assert result.revision == "deepseek-resolved-alias"
-    assert result.usage == {"input_tokens": 4, "output_tokens": 7, "count_kind": "exact"}
+    assert result.usage == {
+        "input_tokens": 4,
+        "output_tokens": 7,
+        "count_kind": "exact",
+        "prompt_tokens": 4,
+        "completion_tokens": 7,
+        "total_tokens": 11,
+        "prompt_cache_hit_tokens": 2,
+        "prompt_cache_miss_tokens": 1,
+    }
     assert captured[0][0] == "https://api.deepseek.example/v1/chat/completions"
     assert captured[0][2] == "unit-test-cloud-placeholder"
     assert "unit-test-local-placeholder" not in str(captured[0])
+
+
+def test_mock_deepseek_missing_usage_is_marked_unavailable(monkeypatch: pytest.MonkeyPatch):
+    """A mocked response without usage remains valid and does not invent token counts."""
+    _immediate_thread_call(monkeypatch)
+    monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+    monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+    monkeypatch.setenv("KW_LLM_BASE_URL", "https://api.deepseek.example/v1")
+    monkeypatch.setenv("KW_LLM_MODEL", "deepseek-chat")
+    monkeypatch.setenv("KW_LLM_API_KEY", "unit-test-cloud-placeholder")
+    monkeypatch.setattr(
+        provider_module,
+        "_post_json",
+        lambda *args, **kwargs: {
+            "model": "deepseek-resolved-alias",
+            "choices": [{"message": {"content": '{"status":"answered"}'}}],
+        },
+    )
+    result = _run(DeepSeekGenerationProvider(_open_remote_approval()).generate(_llm_request()))
+    assert result.revision == "deepseek-resolved-alias"
+    assert result.usage == {"input_tokens": 0, "output_tokens": 0, "count_kind": "unavailable"}
 
 
 def test_mock_deepseek_parse_and_transport_errors_are_sanitized(monkeypatch: pytest.MonkeyPatch):
@@ -423,7 +487,7 @@ def test_mock_deepseek_parse_and_transport_errors_are_sanitized(monkeypatch: pyt
         raise urllib.error.URLError("mock-private-response unit-test-cloud-placeholder")
 
     monkeypatch.setattr(provider_module.urllib.request, "urlopen", mock_urlopen_failure)
-    with pytest.raises(ProviderUnavailable, match="request failed: URLError") as request_error:
+    with pytest.raises(ProviderUnavailable, match="network request failed") as request_error:
         provider_module._post_json(
             "https://api.deepseek.example/v1/chat/completions?mock-private-query",
             {},
@@ -433,6 +497,115 @@ def test_mock_deepseek_parse_and_transport_errors_are_sanitized(monkeypatch: pyt
     assert "mock-private-response" not in str(request_error.value)
     assert "unit-test-cloud-placeholder" not in str(request_error.value)
     assert "mock-private-query" not in str(request_error.value)
+    assert request_error.value.category == "network_error"
+    assert request_error.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    ("status", "category", "retryable"),
+    [
+        (401, "http_auth", False),
+        (429, "http_transient", True),
+        (503, "http_server_error", True),
+        (400, "http_client_error", False),
+    ],
+)
+def test_mock_http_errors_keep_only_safe_classification(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    category: str,
+    retryable: bool,
+):
+    """Synthetic HTTP failures never expose response bodies, headers, URL, or API key."""
+    body = io.BytesIO(b"mock-private-body unit-test-cloud-placeholder")
+    failure = urllib.error.HTTPError(
+        "https://api.deepseek.example/v1/chat/completions?mock-private-query",
+        status,
+        "mock-private-status-text",
+        {"Authorization": "mock-private-header"},
+        body,
+    )
+
+    def mock_urlopen(request, timeout):
+        raise failure
+
+    monkeypatch.setattr(provider_module.urllib.request, "urlopen", mock_urlopen)
+    with pytest.raises(ProviderUnavailable) as error:
+        provider_module._post_json(
+            "https://api.deepseek.example/v1/chat/completions?mock-private-query",
+            {},
+            "unit-test-cloud-placeholder",
+            1.0,
+        )
+    assert error.value.http_status == status
+    assert error.value.category == category
+    assert error.value.retryable is retryable
+    message = str(error.value)
+    for private_value in (
+        "mock-private-body",
+        "unit-test-cloud-placeholder",
+        "mock-private-query",
+        "mock-private-header",
+        "mock-private-status-text",
+    ):
+        assert private_value not in message
+    assert body.tell() == 0
+
+
+@pytest.mark.parametrize(
+    ("failure", "category"),
+    [
+        (TimeoutError("mock-private-timeout unit-test-cloud-placeholder"), "timeout"),
+        (urllib.error.URLError(TimeoutError("mock-private-urllib-timeout unit-test-cloud-placeholder")), "timeout"),
+        (ConnectionError("mock-private-network unit-test-cloud-placeholder"), "network_error"),
+    ],
+)
+def test_mock_network_and_timeout_failures_are_retryable_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    category: str,
+):
+    def mock_urlopen(request, timeout):
+        raise failure
+
+    monkeypatch.setattr(provider_module.urllib.request, "urlopen", mock_urlopen)
+    with pytest.raises(ProviderUnavailable) as error:
+        provider_module._post_json(
+            "https://api.deepseek.example/v1/chat/completions?mock-private-query",
+            {},
+            "unit-test-cloud-placeholder",
+            1.0,
+        )
+    assert error.value.category == category
+    assert error.value.retryable is True
+    assert error.value.http_status is None
+    for private_value in (
+        "mock-private-timeout",
+        "mock-private-urllib-timeout",
+        "mock-private-network",
+        "unit-test-cloud-placeholder",
+        "mock-private-query",
+    ):
+        assert private_value not in str(error.value)
+
+
+def test_invalid_request_configuration_is_sanitized_and_not_retryable(monkeypatch: pytest.MonkeyPatch):
+    def mock_invalid_request(request, timeout, *, local_only):
+        raise ValueError(f"invalid URL {request.full_url} mock-private-query")
+
+    monkeypatch.setattr(provider_module, "_open_json_request", mock_invalid_request)
+    with pytest.raises(ProviderUnavailable) as error:
+        provider_module._post_json(
+            "https://api.deepseek.example/v1/path?mock-private-query\n",
+            {},
+            "unit-test-cloud-placeholder",
+            1.0,
+        )
+    assert error.value.category == "request_invalid"
+    assert error.value.retryable is False
+    assert error.value.http_status is None
+    assert "mock-private-query" not in str(error.value)
+    assert "unit-test-cloud-placeholder" not in str(error.value)
 
 
 def test_safe_snapshot_and_isolation_names(tmp_path: Path):
