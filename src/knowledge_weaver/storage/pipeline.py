@@ -358,6 +358,7 @@ class PipelineService:
                 version_id for version_id in list(members.get("source_version", set()))
                 if version_id not in versions
             )
+            await self._validate_generation(session, members)
             index_manifest, embed_fingerprint = await self._build_indexes(session, request.corpus_id, new_generation_id, members)
             await self._inject("after_facts")
             await self._inject("after_indexes")
@@ -439,11 +440,26 @@ class PipelineService:
         members.setdefault("evidence", set()).difference_update(evidence_ids)
         provenance_ids = set((await session.scalars(select(ProvenanceRow.id).where(ProvenanceRow.document_id.in_(doc_ids)))).all())
         members.setdefault("provenance", set()).difference_update(provenance_ids)
-        entity_ids = set((await session.scalars(select(MentionRow.entity_id).where(MentionRow.evidence_id.in_(evidence_ids)))).all()) if evidence_ids else set()
-        members.setdefault("entity", set()).difference_update(entity_ids)
-        relation_ids = set((await session.scalars(select(RelationEvidenceRow.relation_id).where(RelationEvidenceRow.evidence_id.in_(evidence_ids)))).all()) if evidence_ids else set()
-        members.setdefault("relation", set()).difference_update(relation_ids)
-        members.setdefault("mention", set()).difference_update(set((await session.scalars(select(MentionRow.id).where(MentionRow.evidence_id.in_(evidence_ids)))).all()) if evidence_ids else set())
+        removed_mention_ids = set((await session.scalars(select(MentionRow.id).where(MentionRow.evidence_id.in_(evidence_ids)))).all()) if evidence_ids else set()
+        affected_entity_ids = set((await session.scalars(select(MentionRow.entity_id).where(MentionRow.id.in_(removed_mention_ids)))).all()) if removed_mention_ids else set()
+        members.setdefault("mention", set()).difference_update(removed_mention_ids)
+        remaining_entity_ids = set((await session.scalars(select(MentionRow.entity_id).where(
+            MentionRow.id.in_(members.get("mention", set())),
+            MentionRow.entity_id.in_(affected_entity_ids),
+        ))).all()) if members.get("mention") and affected_entity_ids else set()
+        removed_entity_ids = affected_entity_ids - remaining_entity_ids
+        members.setdefault("entity", set()).difference_update(removed_entity_ids)
+        evidence_relation_ids = set((await session.scalars(select(RelationEvidenceRow.relation_id).where(RelationEvidenceRow.evidence_id.in_(evidence_ids)))).all()) if evidence_ids else set()
+        members.setdefault("relation", set()).difference_update(evidence_relation_ids)
+        if members.get("relation"):
+            relation_rows = (await session.scalars(select(RelationRow).where(RelationRow.id.in_(members["relation"])))).all()
+            invalid_relation_ids = {
+                row.id for row in relation_rows
+                if row.subject_id not in members.get("entity", set())
+                or row.object_id not in members.get("entity", set())
+                or row.provenance_id not in members.get("provenance", set())
+            }
+            members["relation"].difference_update(invalid_relation_ids)
         return members
 
     async def _persist_version(self, session: AsyncSession, version: SourceVersion) -> None:
