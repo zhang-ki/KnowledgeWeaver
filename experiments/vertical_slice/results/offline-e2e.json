@@ -1,0 +1,872 @@
+{
+  "plan_version": "KW-P0-2026-11-18",
+  "declared_plan_hash": "6ef838b43dc6a6a8d1680c8b9503e55fe7a63c6ca9c4238e4942acf8d495d1df",
+  "created_at_utc": "2026-11-18T21:05:53.131126+00:00",
+  "environment": {
+    "python": "3.12.7",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "pytest": "7.4.4",
+    "uv_available": false,
+    "project_python311_available": false,
+    "lockfile": {
+      "path": "uv.lock",
+      "declared_sha256": "4c41a9ab7ef2f51b0cf41c6fcfe6a3515fefd6e2a4e588415e7ad7ca605b9a5e",
+      "applied": false
+    },
+    "run_mode": "offline_fake_provider"
+  },
+  "corpus": {
+    "manifest_path": "experiments/vertical_slice/corpus/manifest.json",
+    "manifest_sha256": "558cd03a39e03e644d5fa7e13afdd26c139cdeffdb5b6a557abfe3bff473376f",
+    "snapshot_path": "experiments/vertical_slice/results/corpus-snapshot.json",
+    "snapshot_sha256": "80947aa2761d72f5cd51e9ff5621b3a314bcae645f6febcc7bf59fae6239d3e9",
+    "source_count": 2,
+    "chunk_count": 20,
+    "evidence_count": 20,
+    "relation_count": 4
+  },
+  "indexes": {
+    "bm25_path": "experiments/vertical_slice/results/bm25-index.json",
+    "bm25_sha256": "384cd126959015c1df57c55dcc31a56a72b65ee5156c801406476a945add22b6",
+    "dense_path": "experiments/vertical_slice/results/dense-index.json",
+    "dense_sha256": "a3f5c3f27192b6d9e511c14302c602de21951e52f16c084b3ad7e7bec88202e1",
+    "dense_provider": "fake-hash-embedding-v1",
+    "dense_is_model_evidence": false
+  },
+  "live_gates": {
+    "postgresql": "WAITING_EXTERNAL: localhost:55432 unreachable; DSN absent in this session",
+    "qdrant": "WAITING_EXTERNAL: localhost:56333 unreachable; URL/key absent in this session",
+    "qwen_embedding": "WAITING_EXTERNAL: no credential, exact endpoint, external-data approval, or cost cap",
+    "deepseek_generation": "WAITING_EXTERNAL: no credential, exact endpoint, external-data approval, or cost cap",
+    "remote_call_made": false,
+    "remote_use_approval": {
+      "external_data_approved": false,
+      "budget_approved": false,
+      "calls_explicitly_enabled": false,
+      "currency_cap": null
+    }
+  },
+  "cases": {
+    "symbol_bm25": {
+      "status": "answered",
+      "answer": "EvidenceRecord.span is annotated as SourceSpan.",
+      "claims": [
+        {
+          "text": "EvidenceRecord.span is annotated as SourceSpan.",
+          "evidence_ids": [
+            "a8a4ba40-bb51-5f1e-90b5-dd6db6c768c6"
+          ],
+          "relation_ids": []
+        }
+      ],
+      "citations": [
+        {
+          "evidence_id": "a8a4ba40-bb51-5f1e-90b5-dd6db6c768c6",
+          "relative_path": "python_repo/evidence_contract.py",
+          "quote": "def bind_source_span(span: SourceSpan, quote: str) -> EvidenceRecord:",
+          "locator": {
+            "kind": "python",
+            "path": "python_repo/evidence_contract.py",
+            "line_start": 26,
+            "line_end": 26
+          }
+        }
+      ],
+      "unresolved": [],
+      "conflicts": [],
+      "route_history": [
+        "bm25"
+      ],
+      "action_history": [
+        {
+          "tool": "bm25",
+          "query": "What type annotates EvidenceRecord.span?",
+          "top_k": 10,
+          "candidate_scores": [
+            {
+              "tool": "bm25",
+              "prior_gain": 0.6,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.48,
+              "cost": 0.001583,
+              "utility": 0.479525,
+              "features": [
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.4166666666666667,
+                1.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            },
+            {
+              "tool": "dense",
+              "prior_gain": 0.2,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.16000000000000003,
+              "cost": 0.002,
+              "utility": 0.1594,
+              "features": [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.4166666666666667,
+                1.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            }
+          ],
+          "returned_chunk_ids": [
+            "337be616-919c-5ba0-9138-771115c6dafa",
+            "c020175c-9210-5b18-9c34-00f4def8f392",
+            "7895f33a-fc31-5f5d-9e90-cf7d6c25771c",
+            "71b75931-694e-5394-812d-f725f79161ad",
+            "7d0d911b-4467-535a-aa60-8cfbc6ca2857",
+            "ef018baf-c7d6-587e-ac58-146ace954584"
+          ],
+          "returned_channels": [
+            "bm25",
+            "bm25",
+            "bm25",
+            "bm25",
+            "bm25",
+            "bm25"
+          ],
+          "tool_calls_used": 1,
+          "estimated_tokens_used": 32,
+          "remaining_tokens": 11968,
+          "new_evidence_ids": [
+            "4b73f55c-5bd7-5020-a20a-1f77ece49f0f",
+            "a8a4ba40-bb51-5f1e-90b5-dd6db6c768c6",
+            "4878a2c9-509d-5372-bb5b-196fb10dea32",
+            "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+            "1b82f809-5705-587d-8eb8-1a89a7345422",
+            "b3266e8a-7248-56c6-9cae-9695e76cdece"
+          ],
+          "observed_reward_proxy": 0.9,
+          "ema_after": 0.45,
+          "actual_elapsed_ms": 0.047,
+          "stop_reason": "continue_or_finish"
+        }
+      ],
+      "budget_used": {
+        "tool_calls": 1,
+        "llm_calls": 1,
+        "estimated_total_tokens": 599
+      },
+      "stop_reason": "sufficient_evidence",
+      "policy_profile": "prior",
+      "warnings": [
+        "provider=p3-offline-fake; not a real model result"
+      ]
+    },
+    "cross_source_dense_two_hop": {
+      "status": "answered",
+      "answer": "The PDF links the ingestion pipeline to Evidence, and the Python type annotation links EvidenceRecord.span to SourceSpan.",
+      "claims": [
+        {
+          "text": "The two sources form a pipeline → Evidence → SourceSpan chain.",
+          "evidence_ids": [
+            "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+            "1b82f809-5705-587d-8eb8-1a89a7345422"
+          ],
+          "relation_ids": [
+            "3824d873-82fb-54e0-a07b-f07f5fcef04a",
+            "4721f2e8-bbd6-5334-bdd7-90d589e47a68"
+          ]
+        }
+      ],
+      "citations": [
+        {
+          "evidence_id": "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+          "relative_path": "documents/p3_contract.pdf",
+          "quote": "The ingestion pipeline stores each source span as a durable EvidenceRecord.",
+          "locator": {
+            "kind": "pdf",
+            "page": 1,
+            "block": 2
+          }
+        },
+        {
+          "evidence_id": "1b82f809-5705-587d-8eb8-1a89a7345422",
+          "relative_path": "python_repo/evidence_contract.py",
+          "quote": "    span: SourceSpan",
+          "locator": {
+            "kind": "python",
+            "path": "python_repo/evidence_contract.py",
+            "line_start": 15,
+            "line_end": 15
+          }
+        }
+      ],
+      "unresolved": [],
+      "conflicts": [],
+      "route_history": [
+        "dense",
+        "graph"
+      ],
+      "action_history": [
+        {
+          "tool": "dense",
+          "query": "How does the ingestion pipeline connect Evidence to source spans?",
+          "top_k": 10,
+          "candidate_scores": [
+            {
+              "tool": "dense",
+              "prior_gain": 0.4,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.32000000000000006,
+              "cost": 0.002,
+              "utility": 0.3194,
+              "features": [
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.5,
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            },
+            {
+              "tool": "bm25",
+              "prior_gain": 0.2,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.16000000000000003,
+              "cost": 0.001583,
+              "utility": 0.159525,
+              "features": [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.5,
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            }
+          ],
+          "returned_chunk_ids": [
+            "71b75931-694e-5394-812d-f725f79161ad",
+            "c020175c-9210-5b18-9c34-00f4def8f392",
+            "7895f33a-fc31-5f5d-9e90-cf7d6c25771c",
+            "ef018baf-c7d6-587e-ac58-146ace954584",
+            "7d0d911b-4467-535a-aa60-8cfbc6ca2857"
+          ],
+          "returned_channels": [
+            "dense_fake",
+            "dense_fake",
+            "dense_fake",
+            "dense_fake",
+            "dense_fake"
+          ],
+          "tool_calls_used": 1,
+          "estimated_tokens_used": 32,
+          "remaining_tokens": 11968,
+          "new_evidence_ids": [
+            "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+            "a8a4ba40-bb51-5f1e-90b5-dd6db6c768c6",
+            "4878a2c9-509d-5372-bb5b-196fb10dea32",
+            "b3266e8a-7248-56c6-9cae-9695e76cdece",
+            "1b82f809-5705-587d-8eb8-1a89a7345422"
+          ],
+          "observed_reward_proxy": 0.9,
+          "ema_after": 0.45,
+          "actual_elapsed_ms": 0.119,
+          "stop_reason": "continue_or_finish"
+        },
+        {
+          "tool": "graph",
+          "query": "How does the ingestion pipeline connect Evidence to source spans?",
+          "top_k": 10,
+          "candidate_scores": [
+            {
+              "tool": "graph",
+              "prior_gain": 0.4,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.32000000000000006,
+              "cost": 0.003007,
+              "utility": 0.319098,
+              "features": [
+                1.0,
+                1.0,
+                1.0,
+                0.5,
+                0.0,
+                1.0,
+                0.0,
+                0.5,
+                0.0,
+                1.0,
+                0.16666666666666666,
+                0.9973333333333333
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            }
+          ],
+          "returned_path_count": 1,
+          "returned_paths": [
+            {
+              "path_id": "d2eea554-f107-5862-9439-28aebb9f6102",
+              "entity_names": [
+                "IngestionPipeline",
+                "Evidence",
+                "SourceSpan"
+              ],
+              "relation_ids": [
+                "3824d873-82fb-54e0-a07b-f07f5fcef04a",
+                "4721f2e8-bbd6-5334-bdd7-90d589e47a68"
+              ],
+              "evidence_ids": [
+                "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+                "1b82f809-5705-587d-8eb8-1a89a7345422"
+              ],
+              "source_kinds": [
+                "pdf",
+                "python_repo"
+              ]
+            }
+          ],
+          "returned_evidence_ids": [
+            "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+            "1b82f809-5705-587d-8eb8-1a89a7345422"
+          ],
+          "new_evidence_ids": [],
+          "observed_reward_proxy": 0.4,
+          "ema_after": 0.2,
+          "actual_elapsed_ms": 0.051,
+          "estimated_tokens": 64,
+          "remaining_tokens": 11904,
+          "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0",
+          "stop_reason": "path_found"
+        }
+      ],
+      "budget_used": {
+        "tool_calls": 2,
+        "llm_calls": 1,
+        "estimated_total_tokens": 741
+      },
+      "stop_reason": "sufficient_evidence",
+      "policy_profile": "prior",
+      "warnings": [
+        "provider=p3-offline-fake; not a real model result"
+      ]
+    },
+    "no_evidence": {
+      "status": "insufficient",
+      "answer": "The corpus contains no supporting evidence for this question.",
+      "claims": [],
+      "citations": [],
+      "unresolved": [
+        "No source evidence matched the question."
+      ],
+      "conflicts": [],
+      "route_history": [
+        "bm25"
+      ],
+      "action_history": [
+        {
+          "tool": "bm25",
+          "query": "What color is the admin console?",
+          "top_k": 10,
+          "candidate_scores": [
+            {
+              "tool": "bm25",
+              "prior_gain": 0.2,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.16000000000000003,
+              "cost": 0.001583,
+              "utility": 0.159525,
+              "features": [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.25,
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            },
+            {
+              "tool": "dense",
+              "prior_gain": 0.2,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.16000000000000003,
+              "cost": 0.002,
+              "utility": 0.1594,
+              "features": [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.25,
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            }
+          ],
+          "returned_chunk_ids": [],
+          "returned_channels": [],
+          "tool_calls_used": 1,
+          "estimated_tokens_used": 32,
+          "remaining_tokens": 11968,
+          "new_evidence_ids": [],
+          "observed_reward_proxy": 0.0,
+          "ema_after": 0.0,
+          "actual_elapsed_ms": 0.013,
+          "stop_reason": "continue_or_finish"
+        }
+      ],
+      "budget_used": {
+        "tool_calls": 1,
+        "llm_calls": 0,
+        "estimated_total_tokens": 32
+      },
+      "stop_reason": "insufficient_evidence",
+      "policy_profile": "prior",
+      "warnings": [
+        "provider=p3-offline-fake; not a real model result"
+      ]
+    },
+    "conflict": {
+      "status": "conflicted",
+      "answer": "The sources conflict: the PDF says the demo cache uses PersistentStore, while the Python comment says it uses ProcessMemory. The available evidence does not resolve which is correct.",
+      "claims": [
+        {
+          "text": "DemoLookupCache USES PersistentStore",
+          "evidence_ids": [
+            "2d132426-c289-5adc-a4ff-57ed4357ea2c"
+          ],
+          "relation_ids": [
+            "7fe5ec45-dab9-5f5e-9f6c-0e8bf86ae337"
+          ]
+        },
+        {
+          "text": "DemoLookupCache USES ProcessMemory",
+          "evidence_ids": [
+            "c12ed6d1-3b7b-5859-8cdd-c08129b0e679"
+          ],
+          "relation_ids": [
+            "c80f2259-797c-58a4-a408-2282ebda26fb"
+          ]
+        }
+      ],
+      "citations": [
+        {
+          "evidence_id": "2d132426-c289-5adc-a4ff-57ed4357ea2c",
+          "relative_path": "documents/p3_contract.pdf",
+          "quote": "The demo lookup cache uses a PersistentStore and survives process restart.",
+          "locator": {
+            "kind": "pdf",
+            "page": 1,
+            "block": 3
+          }
+        },
+        {
+          "evidence_id": "c12ed6d1-3b7b-5859-8cdd-c08129b0e679",
+          "relative_path": "python_repo/evidence_contract.py",
+          "quote": "# The demo lookup cache uses ProcessMemory and resets on restart.",
+          "locator": {
+            "kind": "python",
+            "path": "python_repo/evidence_contract.py",
+            "line_start": 19,
+            "line_end": 19
+          }
+        }
+      ],
+      "unresolved": [
+        "Which cache implementation is authoritative?"
+      ],
+      "conflicts": [
+        {
+          "subject": "DemoLookupCache",
+          "predicate": "USES",
+          "evidence_sides": [
+            {
+              "claim": "DemoLookupCache USES PersistentStore",
+              "evidence_ids": [
+                "2d132426-c289-5adc-a4ff-57ed4357ea2c"
+              ],
+              "relation_ids": [
+                "7fe5ec45-dab9-5f5e-9f6c-0e8bf86ae337"
+              ],
+              "source_kind": "pdf"
+            },
+            {
+              "claim": "DemoLookupCache USES ProcessMemory",
+              "evidence_ids": [
+                "c12ed6d1-3b7b-5859-8cdd-c08129b0e679"
+              ],
+              "relation_ids": [
+                "c80f2259-797c-58a4-a408-2282ebda26fb"
+              ],
+              "source_kind": "python_repo"
+            }
+          ]
+        }
+      ],
+      "route_history": [
+        "bm25"
+      ],
+      "action_history": [
+        {
+          "tool": "bm25",
+          "query": "Does the demo lookup cache survive process restart?",
+          "top_k": 10,
+          "candidate_scores": [
+            {
+              "tool": "bm25",
+              "prior_gain": 0.2,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.16000000000000003,
+              "cost": 0.001583,
+              "utility": 0.159525,
+              "features": [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.5,
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            },
+            {
+              "tool": "dense",
+              "prior_gain": 0.2,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.16000000000000003,
+              "cost": 0.002,
+              "utility": 0.1594,
+              "features": [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.5,
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            }
+          ],
+          "returned_chunk_ids": [
+            "70b4e3a1-bd31-5f13-9d46-483ab6adad93",
+            "fa1f9e33-acdb-5933-8e0b-92dabc8e4f62",
+            "64762363-c6f0-5ef2-9191-c8b776b48a84",
+            "40754664-40f3-52ad-876d-44cfb16c3773"
+          ],
+          "returned_channels": [
+            "bm25",
+            "bm25",
+            "bm25",
+            "bm25"
+          ],
+          "tool_calls_used": 1,
+          "estimated_tokens_used": 32,
+          "remaining_tokens": 11968,
+          "new_evidence_ids": [
+            "2d132426-c289-5adc-a4ff-57ed4357ea2c",
+            "c12ed6d1-3b7b-5859-8cdd-c08129b0e679",
+            "aceb9a10-dfee-58fb-8a82-8b2c721a3ad8",
+            "803afa7f-815b-524a-8df6-90c25c2dda98"
+          ],
+          "observed_reward_proxy": 0.9,
+          "ema_after": 0.45,
+          "actual_elapsed_ms": 0.03,
+          "stop_reason": "continue_or_finish"
+        }
+      ],
+      "budget_used": {
+        "tool_calls": 1,
+        "llm_calls": 1,
+        "estimated_total_tokens": 579
+      },
+      "stop_reason": "conflict_disclosed",
+      "policy_profile": "prior",
+      "warnings": [
+        "provider=p3-offline-fake; not a real model result"
+      ]
+    },
+    "timeout": {
+      "status": "insufficient",
+      "answer": "The answer provider timed out; no generated claim is trusted.",
+      "claims": [],
+      "citations": [],
+      "unresolved": [
+        "Answer generation timed out."
+      ],
+      "conflicts": [],
+      "route_history": [
+        "bm25"
+      ],
+      "action_history": [
+        {
+          "tool": "bm25",
+          "query": "What type annotates EvidenceRecord.span?",
+          "top_k": 10,
+          "candidate_scores": [
+            {
+              "tool": "bm25",
+              "prior_gain": 0.6,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.48,
+              "cost": 0.001583,
+              "utility": 0.479525,
+              "features": [
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.4166666666666667,
+                1.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            },
+            {
+              "tool": "dense",
+              "prior_gain": 0.2,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.16000000000000003,
+              "cost": 0.002,
+              "utility": 0.1594,
+              "features": [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.4166666666666667,
+                1.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            }
+          ],
+          "returned_chunk_ids": [
+            "337be616-919c-5ba0-9138-771115c6dafa",
+            "c020175c-9210-5b18-9c34-00f4def8f392",
+            "7895f33a-fc31-5f5d-9e90-cf7d6c25771c",
+            "71b75931-694e-5394-812d-f725f79161ad",
+            "7d0d911b-4467-535a-aa60-8cfbc6ca2857",
+            "ef018baf-c7d6-587e-ac58-146ace954584"
+          ],
+          "returned_channels": [
+            "bm25",
+            "bm25",
+            "bm25",
+            "bm25",
+            "bm25",
+            "bm25"
+          ],
+          "tool_calls_used": 1,
+          "estimated_tokens_used": 32,
+          "remaining_tokens": 11968,
+          "new_evidence_ids": [
+            "4b73f55c-5bd7-5020-a20a-1f77ece49f0f",
+            "a8a4ba40-bb51-5f1e-90b5-dd6db6c768c6",
+            "4878a2c9-509d-5372-bb5b-196fb10dea32",
+            "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+            "1b82f809-5705-587d-8eb8-1a89a7345422",
+            "b3266e8a-7248-56c6-9cae-9695e76cdece"
+          ],
+          "observed_reward_proxy": 0.9,
+          "ema_after": 0.45,
+          "actual_elapsed_ms": 0.031,
+          "stop_reason": "continue_or_finish"
+        }
+      ],
+      "budget_used": {
+        "tool_calls": 1,
+        "llm_calls": 1,
+        "estimated_total_tokens": 32
+      },
+      "stop_reason": "deadline_exceeded",
+      "policy_profile": "prior",
+      "warnings": [
+        "provider=p3-offline-fake; not a real model result"
+      ]
+    },
+    "budget_stop": {
+      "status": "budget_exhausted",
+      "answer": "The investigation stopped at its hard budget before all planned retrieval actions completed.",
+      "claims": [],
+      "citations": [],
+      "unresolved": [
+        "A required retrieval step did not fit the remaining budget."
+      ],
+      "conflicts": [],
+      "route_history": [
+        "dense"
+      ],
+      "action_history": [
+        {
+          "tool": "dense",
+          "query": "How does the ingestion pipeline connect Evidence to source spans?",
+          "top_k": 10,
+          "candidate_scores": [
+            {
+              "tool": "dense",
+              "prior_gain": 0.4,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.32000000000000006,
+              "cost": 0.002,
+              "utility": 0.3194,
+              "features": [
+                1.0,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.5,
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            },
+            {
+              "tool": "bm25",
+              "prior_gain": 0.2,
+              "ema_gain_before": 0.0,
+              "predicted_gain": 0.16000000000000003,
+              "cost": 0.001583,
+              "utility": 0.159525,
+              "features": [
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.5,
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "policy_fingerprint": "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
+            }
+          ],
+          "returned_chunk_ids": [
+            "71b75931-694e-5394-812d-f725f79161ad",
+            "c020175c-9210-5b18-9c34-00f4def8f392",
+            "7895f33a-fc31-5f5d-9e90-cf7d6c25771c",
+            "ef018baf-c7d6-587e-ac58-146ace954584",
+            "7d0d911b-4467-535a-aa60-8cfbc6ca2857"
+          ],
+          "returned_channels": [
+            "dense_fake",
+            "dense_fake",
+            "dense_fake",
+            "dense_fake",
+            "dense_fake"
+          ],
+          "tool_calls_used": 1,
+          "estimated_tokens_used": 32,
+          "remaining_tokens": 11968,
+          "new_evidence_ids": [
+            "fdc3b7ad-5f17-5e4e-b103-cba7e67860e1",
+            "a8a4ba40-bb51-5f1e-90b5-dd6db6c768c6",
+            "4878a2c9-509d-5372-bb5b-196fb10dea32",
+            "b3266e8a-7248-56c6-9cae-9695e76cdece",
+            "1b82f809-5705-587d-8eb8-1a89a7345422"
+          ],
+          "observed_reward_proxy": 0.9,
+          "ema_after": 0.45,
+          "actual_elapsed_ms": 0.113,
+          "stop_reason": "continue_or_finish"
+        }
+      ],
+      "budget_used": {
+        "tool_calls": 1,
+        "llm_calls": 0,
+        "estimated_total_tokens": 32
+      },
+      "stop_reason": "budget_exhausted",
+      "policy_profile": "prior",
+      "warnings": [
+        "provider=p3-offline-fake; not a real model result"
+      ]
+    }
+  },
+  "acceptance": {
+    "pdf_and_python_fixture_parsed": true,
+    "local_json_evidence_snapshot": true,
+    "bm25_dense_routes_differ": true,
+    "cross_source_two_hop": true,
+    "page_and_line_locators": true,
+    "no_evidence_explicit": true,
+    "conflict_explicit": true,
+    "timeout_stops_claims": true,
+    "hard_budget_stop": true,
+    "postgres_qdrant_live_persistence": false,
+    "real_qwen_embedding": false,
+    "real_deepseek_generation": false,
+    "currency_cost": null,
+    "currency_budget_authorized": false
+  }
+}

@@ -1,0 +1,7 @@
+command=python -m experiments.vertical_slice.service_probe --schema p3_vertical_slice_20261119 --collection p3_vertical_slice_20261119
+started=2026-11-19T04:54:06.1204652+08:00
+service_probe=WAITING_EXTERNAL
+last_error=PostgreSQL DSN is not configured
+exit_code=2
+ended=2026-11-19T04:54:06.5656959+08:00
+resources_created=false

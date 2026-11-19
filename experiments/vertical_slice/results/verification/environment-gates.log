@@ -1,0 +1,17 @@
+started=2026-11-19T04:54:39.1280788+08:00
+operation=read_only_P3_environment_probe; no Docker start/restart
+127.0.0.1:55432 reachable=False
+127.0.0.1:56333 reachable=False
+KW_DATABASE_URL present=False
+KW_POSTGRES_DSN present=False
+KW_QDRANT_URL present=False
+KW_QDRANT_API_KEY present=False
+KW_EMBEDDING_API_KEY present=False
+KW_LLM_API_KEY present=False
+KW_ALLOW_REMOTE present=False
+KW_MODEL_OFFLINE present=False
+verification\environment\python\.venv\Scripts\python.exe exists=False
+verification\environment\python\tools\uvsite\bin\uv.exe exists=False
+docker_ps_exit_code=1
+docker_ps_error=permission denied while trying to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine
+ended=2026-11-19T04:54:39.4293441+08:00

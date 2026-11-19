@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "plan_version": "KW-P0-2026-11-18",
+  "corpus_id": "a81572b5-2b2b-414d-81d6-3c49c8697700",
+  "generation_id": "63fa08b5-b198-49b8-87f5-5840d856e577",
+  "git_revision": "b15c0d42bc53e5d3644ede5a64b6da1091b3183b",
+  "git_dirty": true,
+  "parser_fingerprint": "p3-fixture-pdf-text-layer-v1+python-ast-v1",
+  "chunker_fingerprint": "p3-line-block-leaf-v1",
+  "synthetic_public_corpus": true,
+  "sources": [
+    {
+      "kind": "pdf",
+      "path": "documents/p3_contract.pdf",
+      "raw_hash": "5756138c01a40d28a6bb9c8b29dcf8ad6d9f6b18879e2a6ad3123100cd2a99ba",
+      "source_id": "d73bfd0f-9274-5167-9607-66cfd15f945f",
+      "document_id": "fc60ba53-7874-53c9-90b7-5b2ce4b47fd5"
+    },
+    {
+      "kind": "python_repo",
+      "path": "python_repo/evidence_contract.py",
+      "raw_hash": "aee1b56ff8bcf7752dde3b775980150068ac039089956498e9556bbe982aaa2c",
+      "source_id": "af0cd1de-34cd-590c-be58-f209f6003c98",
+      "document_id": "0fb2536a-198b-5acd-b3c0-4069e1249693"
+    }
+  ],
+  "explicit_entity_mappings": [
+    {
+      "canonical_name": "IngestionPipeline",
+      "forms": [
+        "IngestionPipeline",
+        "ingestion pipeline"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "Evidence",
+      "forms": [
+        "Evidence",
+        "EvidenceRecord"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "SourceSpan",
+      "forms": [
+        "SourceSpan",
+        "source span"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "DemoLookupCache",
+      "forms": [
+        "DemoLookupCache",
+        "demo lookup cache"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "PersistentStore",
+      "forms": [
+        "PersistentStore",
+        "persistent store"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    },
+    {
+      "canonical_name": "ProcessMemory",
+      "forms": [
+        "ProcessMemory",
+        "process memory"
+      ],
+      "basis": "Explicit human-curated mapping for this synthetic P3 corpus."
+    }
+  ]
+}
