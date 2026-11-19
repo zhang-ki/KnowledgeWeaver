@@ -292,7 +292,7 @@ class DeepSeekGenerationProvider:
         self.approval.require_open()
         base_url = os.environ.get("KW_LLM_BASE_URL", "").strip().rstrip("/")
         model = os.environ.get("KW_LLM_MODEL", "").strip()
-        api_key = os.environ.get("KW_LLM_API_KEY", "")
+        api_key = os.environ.get("KW_LLM_API_KEY", "").strip()
         if not base_url or not model or not api_key:
             raise ProviderUnavailable(
                 "DeepSeek endpoint, model, or credential is missing",

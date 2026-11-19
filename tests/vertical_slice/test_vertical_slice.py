@@ -494,6 +494,30 @@ def test_mock_deepseek_missing_configuration_is_classified_without_transport(
         assert private_value not in str(error.value)
 
 
+def test_mock_deepseek_whitespace_only_api_key_is_missing_without_transport(monkeypatch: pytest.MonkeyPatch):
+    _immediate_thread_call(monkeypatch)
+    monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+    monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+    monkeypatch.setenv("KW_LLM_BASE_URL", "https://api.deepseek.example/v1?mock-private-query")
+    monkeypatch.setenv("KW_LLM_MODEL", "mock-private-model")
+    monkeypatch.setenv("KW_LLM_API_KEY", " \t\r\n ")
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("whitespace-only API key must fail before transport")
+
+    monkeypatch.setattr(provider_module, "_post_json", fail_if_called)
+    with pytest.raises(ProviderUnavailable) as error:
+        _run(DeepSeekGenerationProvider(_open_remote_approval()).generate(_llm_request()))
+    assert not called
+    assert error.value.category == "configuration_missing"
+    assert error.value.retryable is False
+    assert "mock-private-query" not in str(error.value)
+    assert "mock-private-model" not in str(error.value)
+
+
 @pytest.mark.parametrize(
     "content",
     [
