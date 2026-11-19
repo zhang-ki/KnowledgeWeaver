@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "plan_version": "KW-P0-2026-11-18",
+  "dataset_id": "b07-human-gold-v1",
+  "dataset_version": "1.0.0-prep",
+  "status": "BLOCKED_INPUTS",
+  "expected_case_count": 100,
+  "case_count": 0,
+  "cases_file": null,
+  "cases_sha256": null,
+  "sources": [],
+  "blockers": [
+    "No licensed source corpus with source-family metadata was present in the assigned workspace.",
+    "No human-reviewed Gold questions, quotes, locators, or reviewer records were present.",
+    "At least 15 licensed source families are required before train/dev/test family splits can be frozen."
+  ]
+}

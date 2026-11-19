@@ -1,0 +1,169 @@
+{
+  "$defs": {
+    "Budget": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "enum": [
+            1
+          ],
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "max_steps": {
+          "default": 6,
+          "minimum": 1,
+          "title": "Max Steps",
+          "type": "integer"
+        },
+        "max_tool_calls": {
+          "default": 12,
+          "minimum": 1,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        },
+        "max_llm_calls": {
+          "default": 8,
+          "minimum": 1,
+          "title": "Max Llm Calls",
+          "type": "integer"
+        },
+        "max_total_tokens": {
+          "default": 12000,
+          "minimum": 1,
+          "title": "Max Total Tokens",
+          "type": "integer"
+        },
+        "deadline_utc": {
+          "format": "date-time",
+          "title": "Deadline Utc",
+          "type": "string"
+        },
+        "max_graph_edges": {
+          "default": 200,
+          "minimum": 1,
+          "title": "Max Graph Edges",
+          "type": "integer"
+        },
+        "max_currency_amount": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Currency Amount"
+        }
+      },
+      "required": [
+        "deadline_utc"
+      ],
+      "title": "Budget",
+      "type": "object"
+    },
+    "Split": {
+      "enum": [
+        "train",
+        "dev",
+        "test"
+      ],
+      "title": "Split",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "enum": [
+        1
+      ],
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "dataset_path": {
+      "minLength": 1,
+      "title": "Dataset Path",
+      "type": "string"
+    },
+    "split": {
+      "$ref": "#/$defs/Split"
+    },
+    "systems": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Systems",
+      "type": "array"
+    },
+    "ablations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Ablations",
+      "type": "array"
+    },
+    "seeds": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Seeds",
+      "type": "array"
+    },
+    "corpus_manifest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Corpus Manifest",
+      "type": "string"
+    },
+    "provider_profiles": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Provider Profiles",
+      "type": "array"
+    },
+    "budget": {
+      "$ref": "#/$defs/Budget"
+    },
+    "policy_artifact": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Policy Artifact"
+    },
+    "output_dir": {
+      "minLength": 1,
+      "title": "Output Dir",
+      "type": "string"
+    }
+  },
+  "required": [
+    "dataset_path",
+    "split",
+    "systems",
+    "ablations",
+    "seeds",
+    "corpus_manifest",
+    "provider_profiles",
+    "budget",
+    "output_dir"
+  ],
+  "title": "RunSpec",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

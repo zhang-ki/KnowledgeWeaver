@@ -1,0 +1,507 @@
+{
+  "$defs": {
+    "AblationSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^A(0[1-9]|10)$",
+          "title": "Id",
+          "type": "string"
+        },
+        "behavior": {
+          "minLength": 1,
+          "title": "Behavior",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "behavior"
+      ],
+      "title": "AblationSpec",
+      "type": "object"
+    },
+    "BudgetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "enum": [
+            "low",
+            "standard",
+            "high"
+          ],
+          "title": "Id",
+          "type": "string"
+        },
+        "max_steps": {
+          "exclusiveMinimum": 0,
+          "title": "Max Steps",
+          "type": "integer"
+        },
+        "max_tool_calls": {
+          "exclusiveMinimum": 0,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        },
+        "max_llm_calls": {
+          "exclusiveMinimum": 0,
+          "title": "Max Llm Calls",
+          "type": "integer"
+        },
+        "max_total_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Max Total Tokens",
+          "type": "integer"
+        },
+        "deadline_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Deadline Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "max_steps",
+        "max_tool_calls",
+        "max_llm_calls",
+        "max_total_tokens",
+        "deadline_seconds"
+      ],
+      "title": "BudgetSpec",
+      "type": "object"
+    },
+    "FairnessControls": {
+      "additionalProperties": false,
+      "properties": {
+        "same_corpus_generation": {
+          "const": true,
+          "enum": [
+            true
+          ],
+          "title": "Same Corpus Generation",
+          "type": "boolean"
+        },
+        "same_answer_generator_and_prompt": {
+          "const": true,
+          "enum": [
+            true
+          ],
+          "title": "Same Answer Generator And Prompt",
+          "type": "boolean"
+        },
+        "same_verifier_and_hard_budget": {
+          "const": true,
+          "enum": [
+            true
+          ],
+          "title": "Same Verifier And Hard Budget",
+          "type": "boolean"
+        },
+        "reranker_availability_fixed": {
+          "const": true,
+          "enum": [
+            true
+          ],
+          "title": "Reranker Availability Fixed",
+          "type": "boolean"
+        },
+        "unavailable_provider_blocks_run": {
+          "const": true,
+          "enum": [
+            true
+          ],
+          "title": "Unavailable Provider Blocks Run",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "same_corpus_generation",
+        "same_answer_generator_and_prompt",
+        "same_verifier_and_hard_budget",
+        "reranker_availability_fixed",
+        "unavailable_provider_blocks_run"
+      ],
+      "title": "FairnessControls",
+      "type": "object"
+    },
+    "MetricPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "retrieval_k": {
+          "items": {
+            "enum": [
+              5,
+              10,
+              20
+            ],
+            "type": "integer"
+          },
+          "title": "Retrieval K",
+          "type": "array"
+        },
+        "retrieval_grouping": {
+          "const": "claim_group_first_occurrence",
+          "enum": [
+            "claim_group_first_occurrence"
+          ],
+          "title": "Retrieval Grouping",
+          "type": "string"
+        },
+        "precision_denominator": {
+          "const": "fixed_k_including_empty_slots",
+          "enum": [
+            "fixed_k_including_empty_slots"
+          ],
+          "title": "Precision Denominator",
+          "type": "string"
+        },
+        "ndcg_gain": {
+          "const": "2^grade_minus_1",
+          "enum": [
+            "2^grade_minus_1"
+          ],
+          "title": "Ndcg Gain",
+          "type": "string"
+        },
+        "exclude_unanswerable_from_retrieval": {
+          "const": true,
+          "enum": [
+            true
+          ],
+          "title": "Exclude Unanswerable From Retrieval",
+          "type": "boolean"
+        },
+        "answerability_metrics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Answerability Metrics",
+          "type": "array"
+        },
+        "citation_metrics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Citation Metrics",
+          "type": "array"
+        },
+        "multihop_metrics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Multihop Metrics",
+          "type": "array"
+        },
+        "answer_correctness_scale": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Answer Correctness Scale",
+          "type": "array"
+        },
+        "efficiency_metrics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Efficiency Metrics",
+          "type": "array"
+        },
+        "unknown_currency_cost": {
+          "const": "null",
+          "enum": [
+            "null"
+          ],
+          "title": "Unknown Currency Cost",
+          "type": "string"
+        },
+        "latency_concurrency": {
+          "const": 1,
+          "enum": [
+            1
+          ],
+          "title": "Latency Concurrency",
+          "type": "integer"
+        },
+        "latency_cache_states": {
+          "items": {
+            "enum": [
+              "cold",
+              "warm"
+            ],
+            "type": "string"
+          },
+          "title": "Latency Cache States",
+          "type": "array"
+        },
+        "bootstrap_unit": {
+          "const": "source_family",
+          "enum": [
+            "source_family"
+          ],
+          "title": "Bootstrap Unit",
+          "type": "string"
+        },
+        "bootstrap_confidence_level": {
+          "maximum": 0.95,
+          "minimum": 0.95,
+          "title": "Bootstrap Confidence Level",
+          "type": "number"
+        }
+      },
+      "required": [
+        "retrieval_k",
+        "retrieval_grouping",
+        "precision_denominator",
+        "ndcg_gain",
+        "exclude_unanswerable_from_retrieval",
+        "answerability_metrics",
+        "citation_metrics",
+        "multihop_metrics",
+        "answer_correctness_scale",
+        "efficiency_metrics",
+        "unknown_currency_cost",
+        "latency_concurrency",
+        "latency_cache_states",
+        "bootstrap_unit",
+        "bootstrap_confidence_level"
+      ],
+      "title": "MetricPlan",
+      "type": "object"
+    },
+    "SystemSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "behavior": {
+          "minLength": 1,
+          "title": "Behavior",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "behavior"
+      ],
+      "title": "SystemSpec",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "enum": [
+        1
+      ],
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "plan_version": {
+      "const": "KW-P0-2026-11-18",
+      "enum": [
+        "KW-P0-2026-11-18"
+      ],
+      "title": "Plan Version",
+      "type": "string"
+    },
+    "protocol_id": {
+      "minLength": 1,
+      "title": "Protocol Id",
+      "type": "string"
+    },
+    "dataset_target": {
+      "const": 100,
+      "enum": [
+        100
+      ],
+      "title": "Dataset Target",
+      "type": "integer"
+    },
+    "categories": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Categories",
+      "type": "array"
+    },
+    "category_cases_each": {
+      "const": 20,
+      "enum": [
+        20
+      ],
+      "title": "Category Cases Each",
+      "type": "integer"
+    },
+    "language_minimum_each": {
+      "const": 40,
+      "enum": [
+        40
+      ],
+      "title": "Language Minimum Each",
+      "type": "integer"
+    },
+    "unanswerable_minimum": {
+      "const": 10,
+      "enum": [
+        10
+      ],
+      "title": "Unanswerable Minimum",
+      "type": "integer"
+    },
+    "source_family_minimum": {
+      "const": 15,
+      "enum": [
+        15
+      ],
+      "title": "Source Family Minimum",
+      "type": "integer"
+    },
+    "split_family_minimum_each": {
+      "const": 5,
+      "enum": [
+        5
+      ],
+      "title": "Split Family Minimum Each",
+      "type": "integer"
+    },
+    "test_case_minimum": {
+      "const": 40,
+      "enum": [
+        40
+      ],
+      "title": "Test Case Minimum",
+      "type": "integer"
+    },
+    "test_category_minimum_each": {
+      "const": 6,
+      "enum": [
+        6
+      ],
+      "title": "Test Category Minimum Each",
+      "type": "integer"
+    },
+    "split_case_targets": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Split Case Targets",
+      "type": "object"
+    },
+    "systems": {
+      "items": {
+        "$ref": "#/$defs/SystemSpec"
+      },
+      "title": "Systems",
+      "type": "array"
+    },
+    "budgets": {
+      "items": {
+        "$ref": "#/$defs/BudgetSpec"
+      },
+      "title": "Budgets",
+      "type": "array"
+    },
+    "ablations": {
+      "items": {
+        "$ref": "#/$defs/AblationSpec"
+      },
+      "title": "Ablations",
+      "type": "array"
+    },
+    "seeds": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Seeds",
+      "type": "array"
+    },
+    "decision_log": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "title": "Decision Log",
+      "type": "array"
+    },
+    "fairness_controls": {
+      "$ref": "#/$defs/FairnessControls"
+    },
+    "metric_plan": {
+      "$ref": "#/$defs/MetricPlan"
+    },
+    "citation_candidate_limit": {
+      "const": 10,
+      "enum": [
+        10
+      ],
+      "title": "Citation Candidate Limit",
+      "type": "integer"
+    },
+    "active_set_rerank_limit": {
+      "const": 40,
+      "enum": [
+        40
+      ],
+      "title": "Active Set Rerank Limit",
+      "type": "integer"
+    },
+    "formal_suite_count": {
+      "const": 111,
+      "enum": [
+        111
+      ],
+      "title": "Formal Suite Count",
+      "type": "integer"
+    },
+    "suite_formula": {
+      "const": "(9*3+10)*3",
+      "enum": [
+        "(9*3+10)*3"
+      ],
+      "title": "Suite Formula",
+      "type": "string"
+    },
+    "final_status": {
+      "const": "BLOCKED_ON_PREP_DATA_UPSTREAMS_PROVIDER_BUDGET",
+      "enum": [
+        "BLOCKED_ON_PREP_DATA_UPSTREAMS_PROVIDER_BUDGET"
+      ],
+      "title": "Final Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "plan_version",
+    "protocol_id",
+    "dataset_target",
+    "categories",
+    "category_cases_each",
+    "language_minimum_each",
+    "unanswerable_minimum",
+    "source_family_minimum",
+    "split_family_minimum_each",
+    "test_case_minimum",
+    "test_category_minimum_each",
+    "split_case_targets",
+    "systems",
+    "budgets",
+    "ablations",
+    "seeds",
+    "decision_log",
+    "fairness_controls",
+    "metric_plan",
+    "citation_candidate_limit",
+    "active_set_rerank_limit",
+    "formal_suite_count",
+    "suite_formula",
+    "final_status"
+  ],
+  "title": "EvaluationProtocol",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

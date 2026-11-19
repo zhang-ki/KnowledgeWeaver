@@ -1,0 +1,480 @@
+{
+  "$defs": {
+    "BenchmarkCategory": {
+      "enum": [
+        "single",
+        "multihop",
+        "cross_source",
+        "conflict",
+        "code"
+      ],
+      "title": "BenchmarkCategory",
+      "type": "string"
+    },
+    "BenchmarkGold": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "enum": [
+            1
+          ],
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "source_path": {
+          "minLength": 1,
+          "title": "Source Path",
+          "type": "string"
+        },
+        "raw_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Hash",
+          "type": "string"
+        },
+        "locator": {
+          "discriminator": {
+            "mapping": {
+              "docx": "#/$defs/DocxLocator",
+              "markdown": "#/$defs/MarkdownLocator",
+              "pdf": "#/$defs/PdfLocator",
+              "python": "#/$defs/PythonLocator"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/PdfLocator"
+            },
+            {
+              "$ref": "#/$defs/DocxLocator"
+            },
+            {
+              "$ref": "#/$defs/MarkdownLocator"
+            },
+            {
+              "$ref": "#/$defs/PythonLocator"
+            }
+          ],
+          "title": "Locator"
+        },
+        "quote": {
+          "minLength": 1,
+          "title": "Quote",
+          "type": "string"
+        },
+        "grade": {
+          "maximum": 3,
+          "minimum": 1,
+          "title": "Grade",
+          "type": "integer"
+        },
+        "claim_group": {
+          "minLength": 1,
+          "title": "Claim Group",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_path",
+        "raw_hash",
+        "locator",
+        "quote",
+        "grade",
+        "claim_group"
+      ],
+      "title": "BenchmarkGold",
+      "type": "object"
+    },
+    "DocxLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "enum": [
+            1
+          ],
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "docx",
+          "default": "docx",
+          "enum": [
+            "docx"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "block": {
+          "minimum": 0,
+          "title": "Block",
+          "type": "integer"
+        },
+        "table": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table"
+        },
+        "row": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row"
+        },
+        "cell": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cell"
+        }
+      },
+      "required": [
+        "block"
+      ],
+      "title": "DocxLocator",
+      "type": "object"
+    },
+    "Language": {
+      "enum": [
+        "zh",
+        "en"
+      ],
+      "title": "Language",
+      "type": "string"
+    },
+    "MarkdownLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "enum": [
+            1
+          ],
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "markdown",
+          "default": "markdown",
+          "enum": [
+            "markdown"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "line_start": {
+          "minimum": 1,
+          "title": "Line Start",
+          "type": "integer"
+        },
+        "line_end": {
+          "minimum": 1,
+          "title": "Line End",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "line_start",
+        "line_end"
+      ],
+      "title": "MarkdownLocator",
+      "type": "object"
+    },
+    "PdfLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "enum": [
+            1
+          ],
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "pdf",
+          "default": "pdf",
+          "enum": [
+            "pdf"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "block": {
+          "minimum": 0,
+          "title": "Block",
+          "type": "integer"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "maxItems": 4,
+              "minItems": 4,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        }
+      },
+      "required": [
+        "page",
+        "block"
+      ],
+      "title": "PdfLocator",
+      "type": "object"
+    },
+    "PythonLocator": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "enum": [
+            1
+          ],
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "kind": {
+          "const": "python",
+          "default": "python",
+          "enum": [
+            "python"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "line_start": {
+          "minimum": 1,
+          "title": "Line Start",
+          "type": "integer"
+        },
+        "line_end": {
+          "minimum": 1,
+          "title": "Line End",
+          "type": "integer"
+        },
+        "qualname": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Qualname"
+        },
+        "col_start": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Col Start"
+        },
+        "col_end": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Col End"
+        }
+      },
+      "required": [
+        "path",
+        "line_start",
+        "line_end"
+      ],
+      "title": "PythonLocator",
+      "type": "object"
+    },
+    "Split": {
+      "enum": [
+        "train",
+        "dev",
+        "test"
+      ],
+      "title": "Split",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "enum": [
+        1
+      ],
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "id": {
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "title": "Id",
+      "type": "string"
+    },
+    "split": {
+      "$ref": "#/$defs/Split"
+    },
+    "source_family_ids": {
+      "items": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "title": "Source Family Ids",
+      "type": "array"
+    },
+    "category": {
+      "$ref": "#/$defs/BenchmarkCategory"
+    },
+    "language": {
+      "$ref": "#/$defs/Language"
+    },
+    "question": {
+      "minLength": 1,
+      "title": "Question",
+      "type": "string"
+    },
+    "answerable": {
+      "title": "Answerable",
+      "type": "boolean"
+    },
+    "gold": {
+      "items": {
+        "$ref": "#/$defs/BenchmarkGold"
+      },
+      "title": "Gold",
+      "type": "array"
+    },
+    "gold_paths": {
+      "items": {
+        "items": {
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Gold Paths",
+      "type": "array"
+    },
+    "reference_claims": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reference Claims",
+      "type": "array"
+    },
+    "reviewer": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reviewer"
+    },
+    "reviewed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Reviewed At"
+    }
+  },
+  "required": [
+    "id",
+    "split",
+    "source_family_ids",
+    "category",
+    "language",
+    "question",
+    "answerable"
+  ],
+  "title": "BenchmarkCase",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

@@ -1,0 +1,167 @@
+{
+  "$defs": {
+    "ActionCostMedian": {
+      "additionalProperties": false,
+      "properties": {
+        "estimated_tokens": {
+          "exclusiveMinimum": 0,
+          "title": "Estimated Tokens",
+          "type": "integer"
+        },
+        "elapsed_ms": {
+          "exclusiveMinimum": 0,
+          "title": "Elapsed Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "estimated_tokens",
+        "elapsed_ms"
+      ],
+      "title": "ActionCostMedian",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Frozen B06 policy artifact schema; B07.prep does not fit an artifact.",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "enum": [
+        1
+      ],
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "algorithm": {
+      "const": "segr_ridge_v1",
+      "default": "segr_ridge_v1",
+      "enum": [
+        "segr_ridge_v1"
+      ],
+      "title": "Algorithm",
+      "type": "string"
+    },
+    "policy_mode": {
+      "enum": [
+        "learned",
+        "mixed",
+        "prior_only"
+      ],
+      "title": "Policy Mode",
+      "type": "string"
+    },
+    "feature_order": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Feature Order",
+      "type": "array"
+    },
+    "action_coefficients": {
+      "additionalProperties": {
+        "items": {
+          "type": "number"
+        },
+        "type": "array"
+      },
+      "title": "Action Coefficients",
+      "type": "object"
+    },
+    "action_sample_counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Action Sample Counts",
+      "type": "object"
+    },
+    "prior_action_families": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Prior Action Families",
+      "type": "array"
+    },
+    "cost_medians": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ActionCostMedian"
+      },
+      "title": "Cost Medians",
+      "type": "object"
+    },
+    "ridge_lambda": {
+      "title": "Ridge Lambda",
+      "type": "number"
+    },
+    "lambda_cost": {
+      "title": "Lambda Cost",
+      "type": "number"
+    },
+    "stop_threshold": {
+      "title": "Stop Threshold",
+      "type": "number"
+    },
+    "training_split": {
+      "const": "train",
+      "default": "train",
+      "enum": [
+        "train"
+      ],
+      "title": "Training Split",
+      "type": "string"
+    },
+    "selection_split": {
+      "const": "dev",
+      "default": "dev",
+      "enum": [
+        "dev"
+      ],
+      "title": "Selection Split",
+      "type": "string"
+    },
+    "train_dataset_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Train Dataset Sha256",
+      "type": "string"
+    },
+    "train_manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Train Manifest Sha256",
+      "type": "string"
+    },
+    "train_action_log_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Train Action Log Sha256",
+      "type": "string"
+    },
+    "feature_schema_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Feature Schema Sha256",
+      "type": "string"
+    },
+    "policy_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Policy Fingerprint",
+      "type": "string"
+    }
+  },
+  "required": [
+    "policy_mode",
+    "feature_order",
+    "action_coefficients",
+    "action_sample_counts",
+    "cost_medians",
+    "ridge_lambda",
+    "lambda_cost",
+    "stop_threshold",
+    "train_dataset_sha256",
+    "train_manifest_sha256",
+    "train_action_log_sha256",
+    "feature_schema_sha256",
+    "policy_fingerprint"
+  ],
+  "title": "RidgePolicyWeights",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

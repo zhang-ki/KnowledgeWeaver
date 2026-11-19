@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "plan_version": "KW-P0-2026-11-18",
+  "protocol_id": "b07-segr-evaluation-v1",
+  "dataset_target": 100,
+  "categories": [
+    "single",
+    "multihop",
+    "cross_source",
+    "conflict",
+    "code"
+  ],
+  "category_cases_each": 20,
+  "language_minimum_each": 40,
+  "unanswerable_minimum": 10,
+  "source_family_minimum": 15,
+  "split_family_minimum_each": 5,
+  "test_case_minimum": 40,
+  "test_category_minimum_each": 6,
+  "split_case_targets": {
+    "train": 30,
+    "dev": 20,
+    "test": 50
+  },
+  "systems": [
+    {"id": "bm25", "behavior": "One BM25 retrieval; shared answer generator."},
+    {"id": "dense", "behavior": "One Dense retrieval; shared answer generator."},
+    {"id": "hybrid_rrf", "behavior": "Fixed BM25+Dense+Symbol+Entity; RRF fusion."},
+    {"id": "hybrid_rerank", "behavior": "hybrid_rrf plus the shared Cross-Encoder/API reranker."},
+    {"id": "graph", "behavior": "Entity seed plus independent two-hop graph; missing seeds count as empty."},
+    {"id": "fixed_agent", "behavior": "Fixed hybrid, graph, one expansion, then rerank; hard budgets apply."},
+    {"id": "rule", "behavior": "Intent/source rules only; no learned gain or feedback EMA."},
+    {"id": "llm_router", "behavior": "LLM selects from the same state/actions; decision tokens count."},
+    {"id": "segr", "behavior": "Frozen gain model with query-local EMA, cost, and stop policy."}
+  ],
+  "budgets": [
+    {"id": "low", "max_steps": 3, "max_tool_calls": 6, "max_llm_calls": 4, "max_total_tokens": 6000, "deadline_seconds": 30},
+    {"id": "standard", "max_steps": 6, "max_tool_calls": 12, "max_llm_calls": 8, "max_total_tokens": 12000, "deadline_seconds": 60},
+    {"id": "high", "max_steps": 8, "max_tool_calls": 16, "max_llm_calls": 10, "max_total_tokens": 16000, "deadline_seconds": 90}
+  ],
+  "ablations": [
+    {"id": "A01", "behavior": "Disable dynamic routing; use the frozen fixed action sequence."},
+    {"id": "A02", "behavior": "Disable graph actions."},
+    {"id": "A03", "behavior": "Disable relation semantic support checks in an isolated experiment; keep citation, permission, and version checks."},
+    {"id": "A04", "behavior": "Disable query expansion."},
+    {"id": "A05", "behavior": "Disable reranking."},
+    {"id": "A06", "behavior": "Disable sufficiency-based stopping; preserve other soft and hard stops."},
+    {"id": "A07", "behavior": "Disable threshold, sufficiency, and no-gain soft stops; preserve exhausted-action and hard-budget stops."},
+    {"id": "A08", "behavior": "Remove source-match features and diversity gain."},
+    {"id": "A09", "behavior": "Remove learned gain and EMA; use the published fixed prior."},
+    {"id": "A10", "behavior": "Remove the cost term by setting lambda_cost to zero."}
+  ],
+  "seeds": [17, 29, 43],
+  "decision_log": [
+    "B07-PREP-D01: use seeds 17, 29, and 43 as fixed replicate identifiers; the frozen plan requires three fixed seeds but does not prescribe their values.",
+    "B07-PREP-D02: retain family-level splits and relax only the 30/20/50 case targets when indivisible families require it; enforce the frozen minimum test size and per-category coverage.",
+    "B07-PREP-D03: permit redistributable or local-evaluation-only source material only when a reviewer, timestamp, license reference, and rights evidence are recorded.",
+    "B07-PREP-D04: keep original licensed materials out of tracked artifacts unless their license explicitly permits redistribution."
+  ],
+  "fairness_controls": {
+    "same_corpus_generation": true,
+    "same_answer_generator_and_prompt": true,
+    "same_verifier_and_hard_budget": true,
+    "reranker_availability_fixed": true,
+    "unavailable_provider_blocks_run": true
+  },
+  "metric_plan": {
+    "retrieval_k": [5, 10, 20],
+    "retrieval_grouping": "claim_group_first_occurrence",
+    "precision_denominator": "fixed_k_including_empty_slots",
+    "ndcg_gain": "2^grade_minus_1",
+    "exclude_unanswerable_from_retrieval": true,
+    "answerability_metrics": [
+      "unanswerable_refusal_accuracy",
+      "unanswerable_false_citation_rate"
+    ],
+    "citation_metrics": [
+      "human_support_precision",
+      "resolvable_citation_validity"
+    ],
+    "multihop_metrics": [
+      "complete_directional_path_accuracy",
+      "gold_path_coverage"
+    ],
+    "answer_correctness_scale": [
+      "incorrect",
+      "partial",
+      "sufficient_and_conflicts_handled"
+    ],
+    "efficiency_metrics": [
+      "total_tokens",
+      "currency_cost",
+      "end_to_end_latency_p50_ms",
+      "end_to_end_latency_p95_ms",
+      "strategy_latency_p50_ms",
+      "strategy_latency_p95_ms"
+    ],
+    "unknown_currency_cost": "null",
+    "latency_concurrency": 1,
+    "latency_cache_states": ["cold", "warm"],
+    "bootstrap_unit": "source_family",
+    "bootstrap_confidence_level": 0.95
+  },
+  "citation_candidate_limit": 10,
+  "active_set_rerank_limit": 40,
+  "formal_suite_count": 111,
+  "suite_formula": "(9*3+10)*3",
+  "final_status": "BLOCKED_ON_PREP_DATA_UPSTREAMS_PROVIDER_BUDGET"
+}
