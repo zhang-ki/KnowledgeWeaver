@@ -21,6 +21,7 @@ b01-ingestion = [
 ]
 b03-storage = [
     "alembic>=1.13,<2",
+    "greenlet>=3,<4",
     "psycopg[binary]>=3.2,<4",
     "qdrant-client>=1.17,<2",
     "sqlalchemy>=2,<3",
