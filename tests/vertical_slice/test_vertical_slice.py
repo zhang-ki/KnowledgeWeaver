@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import urllib.error
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from experiments.vertical_slice import providers as provider_module
 from experiments.vertical_slice.agent import InvestigationBudget, make_agent
 from experiments.vertical_slice.fixture_pdf import PDF_LINES, build_pdf, parse_fixture_pdf
 from experiments.vertical_slice.ingest import PDF_PATH, build_corpus
@@ -14,6 +16,8 @@ from experiments.vertical_slice.offline_runtime import drive_ready_coroutine
 from experiments.vertical_slice.providers import (
     FakeEmbeddingProvider,
     FakeGenerationProvider,
+    DeepSeekGenerationProvider,
+    LLMRequest,
     LLMResult,
     ProviderUnavailable,
     QwenEmbeddingProvider,
@@ -132,15 +136,303 @@ def test_budget_stop_does_not_answer_before_required_graph_action():
     assert result.budget_used["tool_calls"] <= 1
 
 
-def test_fake_embedding_is_deterministic_and_remote_gate_stays_closed():
+def test_fake_embedding_is_deterministic():
     embedder = FakeEmbeddingProvider()
     first = _run(embedder.embed(["SourceSpan evidence"], mode="query"))
     second = _run(embedder.embed(["SourceSpan evidence"], mode="query"))
     assert first.vectors == second.vectors
     assert first.dimension == 32
     assert first.model == "fake-hash-embedding-v1"
-    with pytest.raises(ProviderUnavailable, match="gate is closed"):
-        _run(QwenEmbeddingProvider(RemoteUseApproval()).embed(["synthetic only"], mode="query"))
+
+
+class _MockJsonResponse:
+    """HTTP response fixture for mocked provider-contract tests; never a live model result."""
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
+def _configure_local_qwen(monkeypatch: pytest.MonkeyPatch, endpoint: str = "http://127.0.0.1:56334/v1") -> None:
+    monkeypatch.setenv("KW_EMBEDDING_BASE_URL", endpoint)
+    monkeypatch.setenv("KW_EMBEDDING_MODEL", "qwen-local-alias")
+    for name in (
+        "KW_LOCAL_EMBEDDING_API_KEY",
+        "KW_EMBEDDING_API_KEY",
+        "KW_LLM_API_KEY",
+        "KW_LLM_BASE_URL",
+        "KW_LLM_MODEL",
+        "KW_ALLOW_REMOTE",
+        "KW_MODEL_OFFLINE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _immediate_thread_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run_inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", run_inline)
+
+
+def _qwen_response(vectors: list[list[float]]) -> dict[str, Any]:
+    return {
+        "data": [{"index": index, "embedding": vector} for index, vector in enumerate(vectors)],
+        "model": "server-response-model-is-not-trusted",
+        "usage": {"prompt_tokens": len(vectors)},
+    }
+
+
+def test_mock_local_qwen_works_without_cloud_credentials_or_remote_approval(monkeypatch: pytest.MonkeyPatch):
+    """A mocked loopback response verifies the local request contract, not Qwen inference."""
+    _configure_local_qwen(monkeypatch)
+    _immediate_thread_call(monkeypatch)
+    requests: list[tuple[str, dict[str, Any], dict[str, str]]] = []
+
+    def mock_open(request, timeout, *, local_only):
+        assert local_only
+        payload = json.loads(request.data.decode("utf-8"))
+        headers = {name.casefold(): value for name, value in request.header_items()}
+        requests.append((request.full_url, payload, headers))
+        return _MockJsonResponse(_qwen_response([[0.25, -0.5] for _ in payload["input"]]))
+
+    monkeypatch.setattr(provider_module, "_open_json_request", mock_open)
+    provider = QwenEmbeddingProvider()
+    query_batch = _run(provider.embed(["query text"], mode="query"))
+    document_batch = _run(provider.embed(["document text"], mode="document"))
+
+    assert [request[0] for request in requests] == [
+        "http://127.0.0.1:56334/v1/embeddings",
+        "http://127.0.0.1:56334/v1/embeddings",
+    ]
+    assert requests[0][1] == {"model": "qwen-local-alias", "input": ["query text"]}
+    assert requests[1][1] == {"model": "qwen-local-alias", "input": ["document text"]}
+    assert all("authorization" not in request[2] for request in requests)
+    assert query_batch.vectors == [[0.25, -0.5]]
+    assert document_batch.dimension == 2
+    assert query_batch.model == "qwen-local-alias"
+    assert query_batch.revision == "server-response-model-is-not-trusted"
+    assert query_batch.usage == {"input_tokens": 1, "count_kind": "exact"}
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://api.example.test/v1",
+        "http://127.0.0.2:56334/v1",
+        "http://[::2]:56334/v1",
+        "http://localhost.evil.test/v1",
+        "http://user:password@localhost:56334/v1",
+    ],
+)
+def test_qwen_rejects_non_loopback_endpoint_before_network(monkeypatch: pytest.MonkeyPatch, endpoint: str):
+    _configure_local_qwen(monkeypatch, endpoint)
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("mock network must not be reached for a rejected endpoint")
+
+    monkeypatch.setattr(provider_module, "_open_json_request", fail_if_called)
+    with pytest.raises(ProviderUnavailable, match="loopback") as error:
+        QwenEmbeddingProvider()._embed_sync(["synthetic text"], mode="document")
+    assert not called
+    assert "password" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://localhost:56334/v1",
+        "http://127.0.0.1:56334/v1",
+        "http://[::1]:56334/v1",
+    ],
+)
+def test_qwen_loopback_host_allowlist_accepts_only_named_hosts(endpoint: str):
+    assert QwenEmbeddingProvider._validate_loopback_endpoint(endpoint) == endpoint
+
+
+def test_local_qwen_transport_disables_proxy_and_redirects(monkeypatch: pytest.MonkeyPatch):
+    captured_handlers: list[Any] = []
+
+    class MockOpener:
+        def open(self, request, timeout):
+            assert request.full_url == "http://127.0.0.1:56334/v1/embeddings"
+            return _MockJsonResponse({"ok": True})
+
+    def mock_build_opener(*handlers):
+        captured_handlers.extend(handlers)
+        return MockOpener()
+
+    monkeypatch.setattr(provider_module.urllib.request, "build_opener", mock_build_opener)
+    request = provider_module.urllib.request.Request("http://127.0.0.1:56334/v1/embeddings")
+    with provider_module._open_json_request(request, timeout=1.0, local_only=True) as response:
+        assert json.loads(response.read().decode("utf-8")) == {"ok": True}
+    proxy_handler = next(item for item in captured_handlers if isinstance(item, provider_module.urllib.request.ProxyHandler))
+    redirect_handler = next(item for item in captured_handlers if isinstance(item, provider_module._NoRedirectHandler))
+    assert proxy_handler.proxies == {}
+    assert redirect_handler.redirect_request(None, None, 302, "", {}, "https://external.example") is None
+
+
+@pytest.mark.parametrize(
+    ("response", "input_count", "expected_message"),
+    [
+        ({"data": [{"index": 0, "embedding": [0.1, 0.2]}]}, 2, "response shape is invalid"),
+        (
+            {"data": [{"index": 1, "embedding": [0.1]}, {"index": 0, "embedding": [0.2]}]},
+            2,
+            "response order is invalid",
+        ),
+        (
+            {"data": [{"index": 0, "embedding": [0.1, 0.2]}, {"index": 1, "embedding": [0.3]}]},
+            2,
+            "dimensions are inconsistent",
+        ),
+        ({"data": [{"index": 0, "embedding": []}]}, 1, "non-empty vector"),
+        ({"data": [{"index": 0, "embedding": [float("inf")]}]}, 1, "vector values are invalid"),
+        ({"data": [{"index": 0, "embedding": [float("nan")]}]}, 1, "vector values are invalid"),
+        ({"data": [{"index": 0, "embedding": [True]}]}, 1, "vector values are invalid"),
+        ({"data": [{"index": 0, "embedding": ["0.5"]}]}, 1, "vector values are invalid"),
+    ],
+    ids=["count", "order", "dimension", "empty-vector", "infinite", "nan", "boolean", "string"],
+)
+def test_mock_qwen_invalid_embedding_responses_are_rejected_without_echo(
+    monkeypatch: pytest.MonkeyPatch, response: dict[str, Any], input_count: int, expected_message: str
+):
+    """Mocked response-shape failures are contract tests, never real-model evidence."""
+    _configure_local_qwen(monkeypatch)
+    monkeypatch.setattr(provider_module, "_post_json", lambda *args, **kwargs: response)
+    with pytest.raises(ProviderUnavailable, match=expected_message) as error:
+        QwenEmbeddingProvider()._embed_sync(["input"] * input_count, "query")
+    assert "server-response-model-is-not-trusted" not in str(error.value)
+
+
+def test_qwen_uses_only_dedicated_optional_local_key(monkeypatch: pytest.MonkeyPatch):
+    _configure_local_qwen(monkeypatch)
+    monkeypatch.setenv("KW_LOCAL_EMBEDDING_API_KEY", "unit-test-local-placeholder")
+    monkeypatch.setenv("KW_EMBEDDING_API_KEY", "unused-legacy-placeholder")
+    captured: list[dict[str, str]] = []
+
+    def mock_open(request, timeout, *, local_only):
+        assert local_only
+        captured.append({name.casefold(): value for name, value in request.header_items()})
+        return _MockJsonResponse(_qwen_response([[0.1]]))
+
+    monkeypatch.setattr(provider_module, "_open_json_request", mock_open)
+    QwenEmbeddingProvider()._embed_sync(["text"], "document")
+    assert captured[0]["authorization"] == "Bearer unit-test-local-placeholder"
+    assert "unused-legacy-placeholder" not in captured[0]["authorization"]
+
+
+def _open_remote_approval() -> RemoteUseApproval:
+    return RemoteUseApproval(
+        external_data_approved=True,
+        budget_approved=True,
+        calls_explicitly_enabled=True,
+        currency_cap=0.01,
+    )
+
+
+def _llm_request() -> LLMRequest:
+    return LLMRequest("system instruction", '{"evidence":[]}', {"type": "object"}, 64, 2.0)
+
+
+def test_deepseek_cloud_provider_remains_closed_without_remote_approval(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("KW_LLM_BASE_URL", "https://api.deepseek.example/v1")
+    monkeypatch.setenv("KW_LLM_MODEL", "deepseek-chat")
+    monkeypatch.setenv("KW_LLM_API_KEY", "unit-test-cloud-placeholder")
+    monkeypatch.delenv("KW_ALLOW_REMOTE", raising=False)
+    monkeypatch.delenv("KW_MODEL_OFFLINE", raising=False)
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("closed cloud gate must reject before any request")
+
+    monkeypatch.setattr(provider_module, "_post_json", fail_if_called)
+    with pytest.raises(ProviderUnavailable, match="gate is closed") as error:
+        _run(DeepSeekGenerationProvider(RemoteUseApproval()).generate(_llm_request()))
+    assert not called
+    assert "unit-test-cloud-placeholder" not in str(error.value)
+
+
+def test_mock_deepseek_uses_separate_cloud_config_and_parses_json(monkeypatch: pytest.MonkeyPatch):
+    """This mocked chat response checks the JSON contract only; no DeepSeek call is made."""
+    _immediate_thread_call(monkeypatch)
+    monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+    monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+    monkeypatch.setenv("KW_LLM_BASE_URL", "https://api.deepseek.example/v1")
+    monkeypatch.setenv("KW_LLM_MODEL", "deepseek-chat-alias")
+    monkeypatch.setenv("KW_LLM_API_KEY", "unit-test-cloud-placeholder")
+    monkeypatch.setenv("KW_EMBEDDING_BASE_URL", "http://127.0.0.1:56334/v1")
+    monkeypatch.setenv("KW_EMBEDDING_MODEL", "qwen-local-alias")
+    monkeypatch.setenv("KW_LOCAL_EMBEDDING_API_KEY", "unit-test-local-placeholder")
+    captured: list[tuple[str, dict[str, Any], str | None]] = []
+
+    def mock_post(url, payload, api_key, timeout):
+        captured.append((url, payload, api_key))
+        return {
+            "id": "mock-response-id",
+            "model": "deepseek-resolved-alias",
+            "choices": [{"message": {"content": '{"status":"answered","claims":[]}'}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 7},
+        }
+
+    monkeypatch.setattr(provider_module, "_post_json", mock_post)
+    result = _run(DeepSeekGenerationProvider(_open_remote_approval()).generate(_llm_request()))
+    assert result.parsed_json == {"status": "answered", "claims": []}
+    assert result.model == "deepseek-chat-alias"
+    assert result.revision == "deepseek-resolved-alias"
+    assert result.usage == {"input_tokens": 4, "output_tokens": 7, "count_kind": "exact"}
+    assert captured[0][0] == "https://api.deepseek.example/v1/chat/completions"
+    assert captured[0][2] == "unit-test-cloud-placeholder"
+    assert "unit-test-local-placeholder" not in str(captured[0])
+
+
+def test_mock_deepseek_parse_and_transport_errors_are_sanitized(monkeypatch: pytest.MonkeyPatch):
+    """All error responses are mock fixtures; request bodies and tokens stay out of errors."""
+    _immediate_thread_call(monkeypatch)
+    post_json_impl = provider_module._post_json
+    monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+    monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+    monkeypatch.setenv("KW_LLM_BASE_URL", "https://api.deepseek.example/v1")
+    monkeypatch.setenv("KW_LLM_MODEL", "deepseek-chat")
+    monkeypatch.setenv("KW_LLM_API_KEY", "unit-test-cloud-placeholder")
+    monkeypatch.setattr(
+        provider_module,
+        "_post_json",
+        lambda *args, **kwargs: {"choices": [{"message": {"content": "mock-private-response-not-json"}}]},
+    )
+    with pytest.raises(ProviderUnavailable, match="JSON contract") as parse_error:
+        _run(DeepSeekGenerationProvider(_open_remote_approval()).generate(_llm_request()))
+    assert "mock-private-response-not-json" not in str(parse_error.value)
+
+    monkeypatch.setattr(provider_module, "_post_json", post_json_impl)
+
+    def mock_urlopen_failure(request, timeout):
+        raise urllib.error.URLError("mock-private-response unit-test-cloud-placeholder")
+
+    monkeypatch.setattr(provider_module.urllib.request, "urlopen", mock_urlopen_failure)
+    with pytest.raises(ProviderUnavailable, match="request failed: URLError") as request_error:
+        provider_module._post_json(
+            "https://api.deepseek.example/v1/chat/completions?mock-private-query",
+            {},
+            "unit-test-cloud-placeholder",
+            1.0,
+        )
+    assert "mock-private-response" not in str(request_error.value)
+    assert "unit-test-cloud-placeholder" not in str(request_error.value)
+    assert "mock-private-query" not in str(request_error.value)
 
 
 def test_safe_snapshot_and_isolation_names(tmp_path: Path):

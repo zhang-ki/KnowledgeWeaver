@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
 import os
 import re
-import asyncio
-
-
-_EMBED_STOPWORDS = {"a", "an", "and", "are", "does", "how", "is", "of", "or", "the", "to", "what", "which"}
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
+
+
+_EMBED_STOPWORDS = {"a", "an", "and", "are", "does", "how", "is", "of", "or", "the", "to", "what", "which"}
 
 
 class ProviderUnavailable(RuntimeError):
@@ -89,47 +90,101 @@ class FakeEmbeddingProvider:
 
 
 class QwenEmbeddingProvider:
-    """OpenAI-compatible Qwen adapter. The configured endpoint is never guessed."""
+    """Local-only OpenAI-compatible Qwen adapter; it never uses the cloud gate."""
 
-    def __init__(self, approval: RemoteUseApproval, timeout_seconds: float = 20.0) -> None:
-        self.approval = approval
+    _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+    def __init__(self, timeout_seconds: float = 20.0) -> None:
         self.timeout_seconds = timeout_seconds
 
     async def embed(self, texts: list[str], mode: str) -> EmbeddingBatch:
-        self.approval.require_open()
         return await asyncio.to_thread(self._embed_sync, texts, mode)
 
     def _embed_sync(self, texts: list[str], mode: str) -> EmbeddingBatch:
-        self.approval.require_open()
         if mode not in {"query", "document"}:
             raise ValueError("mode must be query or document")
+        if not isinstance(texts, list) or not texts or any(not isinstance(text, str) for text in texts):
+            raise ValueError("texts must be a non-empty list of strings")
         base_url = os.environ.get("KW_EMBEDDING_BASE_URL", "").strip().rstrip("/")
         model = os.environ.get("KW_EMBEDDING_MODEL", "").strip()
-        api_key = os.environ.get("KW_EMBEDDING_API_KEY", "")
-        if not base_url or not model or not api_key:
-            raise ProviderUnavailable("Qwen embedding endpoint, model, or credential is missing")
+        if not base_url or not model:
+            raise ProviderUnavailable("local Qwen embedding endpoint or model is missing")
+        base_url = self._validate_loopback_endpoint(base_url)
+        local_api_key = os.environ.get("KW_LOCAL_EMBEDDING_API_KEY", "").strip() or None
         payload = {"model": model, "input": texts}
-        response = _post_json(f"{base_url}/embeddings", payload, api_key, self.timeout_seconds)
+        response = _post_json(
+            f"{base_url}/embeddings",
+            payload,
+            local_api_key,
+            self.timeout_seconds,
+            local_only=True,
+        )
         items = response.get("data")
         if not isinstance(items, list) or len(items) != len(texts):
             raise ProviderUnavailable("Qwen embedding response shape is invalid")
-        vectors = [item.get("embedding") for item in sorted(items, key=lambda item: item.get("index", 0))]
-        if any(not isinstance(vector, list) or not vector for vector in vectors):
-            raise ProviderUnavailable("Qwen embedding response omitted vectors")
-        dimension = len(vectors[0])
-        if any(len(vector) != dimension for vector in vectors):
-            raise ProviderUnavailable("Qwen embedding dimensions are inconsistent")
-        usage = response.get("usage", {})
-        revision = str(response.get("model", model))
+        vectors: list[list[float]] = []
+        dimension: int | None = None
+        for expected_index, item in enumerate(items):
+            if not isinstance(item, dict) or type(item.get("index")) is not int or item["index"] != expected_index:
+                raise ProviderUnavailable("Qwen embedding response order is invalid")
+            raw_vector = item.get("embedding")
+            if not isinstance(raw_vector, list) or not raw_vector:
+                raise ProviderUnavailable("Qwen embedding response omitted a non-empty vector")
+            if dimension is None:
+                dimension = len(raw_vector)
+            elif len(raw_vector) != dimension:
+                raise ProviderUnavailable("Qwen embedding dimensions are inconsistent")
+            vector: list[float] = []
+            for value in raw_vector:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    raise ProviderUnavailable("Qwen embedding vector values are invalid")
+                try:
+                    numeric_value = float(value)
+                except (OverflowError, ValueError):
+                    raise ProviderUnavailable("Qwen embedding vector values are invalid") from None
+                if not math.isfinite(numeric_value):
+                    raise ProviderUnavailable("Qwen embedding vector values are invalid")
+                vector.append(numeric_value)
+            vectors.append(vector)
+        if dimension is None or dimension == 0:
+            raise ProviderUnavailable("Qwen embedding dimension must be non-zero")
+        usage = response.get("usage")
+        if usage is not None and not isinstance(usage, dict):
+            raise ProviderUnavailable("Qwen embedding response usage is invalid")
+        prompt_tokens = _validated_token_count(usage or {}, "prompt_tokens")
+        response_model = response.get("model")
+        revision = response_model if isinstance(response_model, str) and response_model else model
         return EmbeddingBatch(
             vectors,
             dimension,
             False,
             model,
             revision,
-            f"qwen:{model}:{revision}:{dimension}:configured-endpoint",
-            {"input_tokens": int(usage.get("prompt_tokens", 0)), "count_kind": "exact" if usage else "unavailable"},
+            f"qwen-local:{model}:{revision}:{dimension}:configured-loopback-endpoint",
+            {
+                "input_tokens": prompt_tokens if prompt_tokens is not None else 0,
+                "count_kind": "exact" if prompt_tokens is not None else "unavailable",
+            },
         )
+
+    @classmethod
+    def _validate_loopback_endpoint(cls, base_url: str) -> str:
+        try:
+            parsed = urllib.parse.urlsplit(base_url)
+            hostname = (parsed.hostname or "").casefold().rstrip(".")
+            parsed.port  # Validate malformed ports before any request can be attempted.
+        except ValueError:
+            raise ProviderUnavailable("Qwen embedding endpoint URL is invalid") from None
+        if (
+            parsed.scheme.casefold() not in {"http", "https"}
+            or hostname not in cls._LOOPBACK_HOSTS
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ProviderUnavailable("Qwen embedding endpoint must be an HTTP(S) loopback URL")
+        return base_url
 
 
 @dataclass(frozen=True)
@@ -237,34 +292,76 @@ class DeepSeekGenerationProvider:
         try:
             content = response["choices"][0]["message"]["content"]
             parsed = json.loads(content)
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            raise ProviderUnavailable("DeepSeek response did not match the JSON contract") from exc
-        usage = response.get("usage", {})
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+            raise ProviderUnavailable("DeepSeek response did not match the JSON contract") from None
+        if not isinstance(parsed, dict):
+            raise ProviderUnavailable("DeepSeek response did not match the JSON contract")
+        usage = response.get("usage")
+        if usage is not None and not isinstance(usage, dict):
+            raise ProviderUnavailable("DeepSeek response usage is invalid")
+        usage = usage or {}
+        prompt_tokens = _validated_token_count(usage, "prompt_tokens")
+        completion_tokens = _validated_token_count(usage, "completion_tokens")
+        usage_is_exact = prompt_tokens is not None and completion_tokens is not None
+        response_model = response.get("model")
+        revision = response_model if isinstance(response_model, str) and response_model else model
         return LLMResult(
             parsed,
             model,
-            str(response.get("model", model)),
+            revision,
             {
-                "input_tokens": int(usage.get("prompt_tokens", 0)),
-                "output_tokens": int(usage.get("completion_tokens", 0)),
-                "count_kind": "exact" if usage else "unavailable",
+                "input_tokens": prompt_tokens if prompt_tokens is not None else 0,
+                "output_tokens": completion_tokens if completion_tokens is not None else 0,
+                "count_kind": "exact" if usage_is_exact else "unavailable",
             },
             str(response.get("id")) if response.get("id") else None,
         )
 
 
-def _post_json(url: str, payload: dict[str, Any], api_key: str, timeout: float) -> dict[str, Any]:
+def _validated_token_count(usage: dict[str, Any], field: str) -> int | None:
+    value = usage.get(field)
+    if value is None:
+        return None
+    if type(value) is not int or value < 0:
+        raise ProviderUnavailable("provider response usage is invalid")
+    return value
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_json_request(request: urllib.request.Request, timeout: float, *, local_only: bool):
+    if local_only:
+        # Do not let proxy settings or redirects turn a loopback request into egress.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
+        return opener.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
+def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    api_key: str | None,
+    timeout: float,
+    *,
+    local_only: bool = False,
+) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         url,
         data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_json_request(request, timeout=timeout, local_only=local_only) as response:
             result = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         # Never attach headers, endpoint query parameters, response body, or credentials.
         raise ProviderUnavailable(f"configured provider request failed: {type(exc).__name__}") from None
     if not isinstance(result, dict):
