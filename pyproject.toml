@@ -1,27 +1,78 @@
+[build-system]
+requires = ["setuptools>=70,<82"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "knowledgeweaver-p1-python-validation"
+name = "knowledgeweaver"
 version = "0.1.0"
-description = "Isolated P1 Python and Docling environment verification"
+description = "Evidence-grounded repository and document investigation"
 requires-python = "==3.11.*"
 dependencies = [
-    "docling>=2,<3",
+    "httpx>=0.28,<1",
+    "jsonschema>=4.24,<5",
+    "pydantic>=2.11,<3",
 ]
+
+[project.optional-dependencies]
+b01-ingestion = [
+    "docling>=2,<3",
+    "markdown-it-py>=4,<5",
+    "python-docx>=1.2,<2",
+]
+b03-storage = [
+    "alembic>=1.13,<2",
+    "psycopg[binary]>=3.2,<4",
+    "qdrant-client>=1.17,<2",
+    "sqlalchemy>=2,<3",
+]
+b02-extraction = []
+b04-retrieval = ["rank-bm25>=0.2,<1"]
+b05-graph = ["networkx>=3.4,<4"]
+b06-agent = []
+b07-prep = []
+b07-final = ["numpy>=2,<3"]
+b08-app = [
+    "fastapi>=0.115,<1",
+    "streamlit>=1.4,<2",
+    "uvicorn[standard]>=0.30,<1",
+]
+local-embedding = ["sentence-transformers>=3,<6"]
 
 [dependency-groups]
 dev = [
+    "docling>=2,<3",
+    "mypy>=1,<2",
     "psutil>=7,<8",
     "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<2",
     "ruff>=0.14,<1",
 ]
 
 [tool.uv]
-package = false
+package = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["verification/environment/python/tests"]
-pythonpath = ["."]
+testpaths = ["tests", "verification/environment/python/tests"]
+pythonpath = ["src", "."]
 addopts = ["-ra"]
+markers = [
+    "unit: deterministic local unit tests",
+    "contract: public DTO and port contract tests",
+    "service: tests requiring PostgreSQL or Qdrant",
+    "live_model: tests that call a real model provider",
+    "e2e: end-to-end workflow tests",
+]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+files = ["src/knowledge_weaver"]
+strict = true
+ignore_missing_imports = true

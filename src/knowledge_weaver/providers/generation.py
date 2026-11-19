@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+from knowledge_weaver.core.budget import BudgetLedger, BudgetReservation
+from knowledge_weaver.core.config import RemoteUseApproval, RuntimeSettings
+from knowledge_weaver.core.errors import ProviderUnavailable
+from knowledge_weaver.models import LLMRequest, LLMResult
+
+from ._common import auth_headers, estimate_tokens, parse_token_usage, validate_json_response
+from ._retry import post_with_retries
+from .http import HttpxJsonTransport, JsonTransport
+from .profiles import OpenAIChatProfile
+
+
+class CloudGenerationProvider:
+    """Profile-bound chat completion adapter; live use requires all explicit gates."""
+
+    def __init__(
+        self,
+        profile: OpenAIChatProfile,
+        approval: RemoteUseApproval,
+        budget: BudgetLedger,
+        *,
+        settings: RuntimeSettings | None = None,
+        transport: JsonTransport | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self.profile = profile
+        self.approval = approval
+        self.settings = settings or RuntimeSettings.from_environment()
+        self.budget = budget
+        self.transport = transport or HttpxJsonTransport()
+        self.sleep = sleep
+
+    async def generate(self, request: LLMRequest) -> LLMResult:
+        self.approval.require_open(self.settings)
+        headers = auth_headers(
+            self.profile.api_key,
+            header_name=self.profile.auth_header,
+            scheme=self.profile.auth_scheme,
+        )
+        payload: dict[str, Any] = {
+            self.profile.model_field: self.profile.model,
+            self.profile.messages_field: [
+                {"role": "system", "content": request.system_instruction},
+                {"role": "user", "content": request.untrusted_context},
+            ],
+            self.profile.max_tokens_field: request.max_output_tokens,
+        }
+        if self.profile.json_mode == "json_object":
+            payload[self.profile.response_format_field] = {"type": "json_object"}
+        elif self.profile.json_mode == "json_schema":
+            payload[self.profile.response_format_field] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "knowledgeweaver_response",
+                    "strict": True,
+                    "schema": request.response_schema,
+                },
+            }
+
+        input_estimate = estimate_tokens(request.system_instruction + request.untrusted_context)
+
+        async def reserve() -> BudgetReservation:
+            return await self.budget.reserve_llm_call(
+                input_tokens_estimate=input_estimate,
+                max_output_tokens=request.max_output_tokens,
+            )
+
+        body, reservation = await post_with_retries(
+            self.transport,
+            self.profile.endpoint_url,
+            payload,
+            headers,
+            timeout_seconds=min(request.timeout_seconds, self.profile.timeout_seconds),
+            max_attempts=self.profile.max_attempts,
+            backoff_seconds=self.profile.retry_backoff_seconds,
+            reserve=reserve,
+            sleep=self.sleep,
+        )
+        try:
+            content = body["choices"][0]["message"]["content"]
+            if not isinstance(content, str):
+                raise TypeError
+            parsed: Any = json.loads(content)
+            parsed = validate_json_response(parsed, request.response_schema)
+            usage = parse_token_usage(body.get("usage"))
+            revision_value = body.get("model")
+            revision = (
+                revision_value
+                if isinstance(revision_value, str) and revision_value
+                else self.profile.model
+            )
+            result = LLMResult(
+                parsed_json=parsed,
+                usage=usage,
+                provider_request_id=body.get("id") if isinstance(body.get("id"), str) else None,
+                model=self.profile.model,
+                revision=revision,
+            )
+        except ProviderUnavailable:
+            await reservation.finish(None)
+            raise
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+            await reservation.finish(None)
+            raise ProviderUnavailable(
+                "provider response did not match the JSON object contract",
+                category="response_invalid",
+                retryable=False,
+            ) from None
+        except (ValueError, OverflowError):
+            await reservation.finish(None)
+            raise ProviderUnavailable(
+                "provider response could not be validated",
+                category="response_invalid",
+                retryable=False,
+            ) from None
+        await reservation.finish(usage)
+        return result

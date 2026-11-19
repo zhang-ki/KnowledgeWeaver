@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "context": {"schema_version":1,"corpus_id":"11111111-1111-4111-8111-111111111111","generation_id":"22222222-2222-4222-8222-222222222222","request_id":"33333333-3333-4333-8333-333333333333","deadline_utc":"2026-11-20T00:00:00Z","source_ids":null,"include_inferred":false},
+  "entities": [
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000004001","corpus_id":"11111111-1111-4111-8111-111111111111","kind":"concept","canonical_name":"Pipeline","namespace":"doc-a","identity_key":"pipeline","aliases":[]},
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000004002","corpus_id":"11111111-1111-4111-8111-111111111111","kind":"concept","canonical_name":"Evidence","namespace":"doc-a","identity_key":"evidence","aliases":[]},
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000004003","corpus_id":"11111111-1111-4111-8111-111111111111","kind":"concept","canonical_name":"SourceSpan","namespace":"repo","identity_key":"source-span","aliases":[]}
+  ],
+  "mentions": [
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000005001","entity_id":"00000000-0000-4000-8000-000000004001","evidence_id":"00000000-0000-4000-8000-000000006001","surface_form":"Pipeline"},
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000005002","entity_id":"00000000-0000-4000-8000-000000004002","evidence_id":"00000000-0000-4000-8000-000000006001","surface_form":"Evidence"},
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000005003","entity_id":"00000000-0000-4000-8000-000000004002","evidence_id":"00000000-0000-4000-8000-000000006002","surface_form":"Evidence"},
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000005004","entity_id":"00000000-0000-4000-8000-000000004003","evidence_id":"00000000-0000-4000-8000-000000006002","surface_form":"SourceSpan"}
+  ],
+  "relations": [
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000009001","subject_id":"00000000-0000-4000-8000-000000004001","predicate":"USES","object_id":"00000000-0000-4000-8000-000000004002","polarity":"positive","qualifiers":{},"provenance_id":"00000000-0000-4000-8000-000000007001","evidence_ids":["00000000-0000-4000-8000-000000006001"]},
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000009002","subject_id":"00000000-0000-4000-8000-000000004002","predicate":"DEFINES","object_id":"00000000-0000-4000-8000-000000004003","polarity":"positive","qualifiers":{},"provenance_id":"00000000-0000-4000-8000-000000007002","evidence_ids":["00000000-0000-4000-8000-000000006002"]}
+  ],
+  "evidence": [
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000006001","chunk_id":"00000000-0000-4000-8000-000000008001","start":0,"end":12,"quote":"has evidence","locator":{"kind":"markdown","path":"architecture.md","line_start":1,"line_end":1},"provenance_id":"00000000-0000-4000-8000-000000007001"},
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000006002","chunk_id":"00000000-0000-4000-8000-000000008002","start":0,"end":14,"quote":"supports claim","locator":{"kind":"python","path":"src/evidence.py","line_start":1,"line_end":1,"qualname":"EvidenceRecord","col_start":0,"col_end":14},"provenance_id":"00000000-0000-4000-8000-000000007002"}
+  ],
+  "provenance": [
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000007001","method":"PARSER_EXCERPT","producer_fingerprint":"fixture-parser-v1","source_id":"00000000-0000-4000-8000-000000000004","document_id":"00000000-0000-4000-8000-000000000104","premise_relation_ids":[]},
+    {"schema_version":1,"id":"00000000-0000-4000-8000-000000007002","method":"PARSER_EXCERPT","producer_fingerprint":"fixture-parser-v1","source_id":"00000000-0000-4000-8000-000000000001","document_id":"00000000-0000-4000-8000-000000000101","premise_relation_ids":[]}
+  ],
+  "snapshot_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "path": {"schema_version":1,"id":"00000000-0000-4000-8000-00000000a001","entity_ids":["00000000-0000-4000-8000-000000004001","00000000-0000-4000-8000-000000004002","00000000-0000-4000-8000-000000004003"],"steps":[{"schema_version":1,"relation_id":"00000000-0000-4000-8000-000000009001","from_id":"00000000-0000-4000-8000-000000004001","to_id":"00000000-0000-4000-8000-000000004002","traversed_reverse":false,"evidence_ids":["00000000-0000-4000-8000-000000006001"]},{"schema_version":1,"relation_id":"00000000-0000-4000-8000-000000009002","from_id":"00000000-0000-4000-8000-000000004002","to_id":"00000000-0000-4000-8000-000000004003","traversed_reverse":false,"evidence_ids":["00000000-0000-4000-8000-000000006002"]}]}
+}
