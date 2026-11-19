@@ -364,6 +364,8 @@ def test_deepseek_cloud_provider_remains_closed_without_remote_approval(monkeypa
     with pytest.raises(ProviderUnavailable, match="gate is closed") as error:
         _run(DeepSeekGenerationProvider(RemoteUseApproval()).generate(_llm_request()))
     assert not called
+    assert error.value.category == "approval_gate"
+    assert error.value.retryable is False
     assert "unit-test-cloud-placeholder" not in str(error.value)
 
 
@@ -463,6 +465,99 @@ def test_mock_deepseek_missing_usage_is_marked_unavailable(monkeypatch: pytest.M
     assert result.usage == {"input_tokens": 0, "output_tokens": 0, "count_kind": "unavailable"}
 
 
+@pytest.mark.parametrize("missing_variable", ["KW_LLM_BASE_URL", "KW_LLM_MODEL", "KW_LLM_API_KEY"])
+def test_mock_deepseek_missing_configuration_is_classified_without_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_variable: str,
+):
+    _immediate_thread_call(monkeypatch)
+    monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+    monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+    monkeypatch.setenv("KW_LLM_BASE_URL", "https://api.deepseek.example/v1?mock-private-query")
+    monkeypatch.setenv("KW_LLM_MODEL", "mock-private-model")
+    monkeypatch.setenv("KW_LLM_API_KEY", "unit-test-cloud-placeholder")
+    monkeypatch.delenv(missing_variable, raising=False)
+    called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("missing DeepSeek configuration must fail before transport")
+
+    monkeypatch.setattr(provider_module, "_post_json", fail_if_called)
+    with pytest.raises(ProviderUnavailable) as error:
+        _run(DeepSeekGenerationProvider(_open_remote_approval()).generate(_llm_request()))
+    assert not called
+    assert error.value.category == "configuration_missing"
+    assert error.value.retryable is False
+    for private_value in ("mock-private-query", "mock-private-model", "unit-test-cloud-placeholder"):
+        assert private_value not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "mock-private-response-not-json unit-test-cloud-placeholder",
+        "[]",
+    ],
+)
+def test_mock_deepseek_invalid_json_content_is_classified_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+):
+    _immediate_thread_call(monkeypatch)
+    monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+    monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+    monkeypatch.setenv("KW_LLM_BASE_URL", "https://api.deepseek.example/v1")
+    monkeypatch.setenv("KW_LLM_MODEL", "deepseek-chat")
+    monkeypatch.setenv("KW_LLM_API_KEY", "unit-test-cloud-placeholder")
+    monkeypatch.setattr(
+        provider_module,
+        "_post_json",
+        lambda *args, **kwargs: {"choices": [{"message": {"content": content}}]},
+    )
+    with pytest.raises(ProviderUnavailable) as error:
+        _run(DeepSeekGenerationProvider(_open_remote_approval()).generate(_llm_request()))
+    assert error.value.category == "response_invalid"
+    assert error.value.retryable is False
+    assert "mock-private-response-not-json" not in str(error.value)
+    assert "unit-test-cloud-placeholder" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        "mock-private-usage unit-test-cloud-placeholder",
+        {"prompt_tokens": -1, "completion_tokens": 2},
+        {"prompt_tokens": "mock-private-token-count"},
+    ],
+)
+def test_mock_deepseek_invalid_usage_is_classified_and_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    usage: Any,
+):
+    _immediate_thread_call(monkeypatch)
+    monkeypatch.setenv("KW_ALLOW_REMOTE", "true")
+    monkeypatch.setenv("KW_MODEL_OFFLINE", "false")
+    monkeypatch.setenv("KW_LLM_BASE_URL", "https://api.deepseek.example/v1")
+    monkeypatch.setenv("KW_LLM_MODEL", "deepseek-chat")
+    monkeypatch.setenv("KW_LLM_API_KEY", "unit-test-cloud-placeholder")
+    monkeypatch.setattr(
+        provider_module,
+        "_post_json",
+        lambda *args, **kwargs: {
+            "choices": [{"message": {"content": '{"status":"answered"}'}}],
+            "usage": usage,
+        },
+    )
+    with pytest.raises(ProviderUnavailable) as error:
+        _run(DeepSeekGenerationProvider(_open_remote_approval()).generate(_llm_request()))
+    assert error.value.category == "usage_invalid"
+    assert error.value.retryable is False
+    for private_value in ("mock-private-usage", "unit-test-cloud-placeholder", "mock-private-token-count"):
+        assert private_value not in str(error.value)
+
+
 def test_mock_deepseek_parse_and_transport_errors_are_sanitized(monkeypatch: pytest.MonkeyPatch):
     """All error responses are mock fixtures; request bodies and tokens stay out of errors."""
     _immediate_thread_call(monkeypatch)
@@ -505,6 +600,9 @@ def test_mock_deepseek_parse_and_transport_errors_are_sanitized(monkeypatch: pyt
     ("status", "category", "retryable"),
     [
         (401, "http_auth", False),
+        (403, "http_auth", False),
+        (408, "http_transient", True),
+        (425, "http_transient", True),
         (429, "http_transient", True),
         (503, "http_server_error", True),
         (400, "http_client_error", False),

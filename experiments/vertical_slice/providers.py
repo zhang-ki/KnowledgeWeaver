@@ -51,7 +51,11 @@ class RemoteUseApproval:
             and os.environ.get("KW_ALLOW_REMOTE", "false").casefold() == "true"
             and os.environ.get("KW_MODEL_OFFLINE", "true").casefold() == "false"
         ):
-            raise ProviderUnavailable("external model gate is closed")
+            raise ProviderUnavailable(
+                "external model gate is closed",
+                category="approval_gate",
+                retryable=False,
+            )
 
 
 @dataclass(frozen=True)
@@ -290,7 +294,11 @@ class DeepSeekGenerationProvider:
         model = os.environ.get("KW_LLM_MODEL", "").strip()
         api_key = os.environ.get("KW_LLM_API_KEY", "")
         if not base_url or not model or not api_key:
-            raise ProviderUnavailable("DeepSeek endpoint, model, or credential is missing")
+            raise ProviderUnavailable(
+                "DeepSeek endpoint, model, or credential is missing",
+                category="configuration_missing",
+                retryable=False,
+            )
         payload = {
             "model": model,
             "messages": [
@@ -305,12 +313,24 @@ class DeepSeekGenerationProvider:
             content = response["choices"][0]["message"]["content"]
             parsed = json.loads(content)
         except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-            raise ProviderUnavailable("DeepSeek response did not match the JSON contract") from None
+            raise ProviderUnavailable(
+                "DeepSeek response did not match the JSON contract",
+                category="response_invalid",
+                retryable=False,
+            ) from None
         if not isinstance(parsed, dict):
-            raise ProviderUnavailable("DeepSeek response did not match the JSON contract")
+            raise ProviderUnavailable(
+                "DeepSeek response did not match the JSON contract",
+                category="response_invalid",
+                retryable=False,
+            )
         usage = response.get("usage")
         if usage is not None and not isinstance(usage, dict):
-            raise ProviderUnavailable("DeepSeek response usage is invalid")
+            raise ProviderUnavailable(
+                "DeepSeek response usage is invalid",
+                category="usage_invalid",
+                retryable=False,
+            )
         usage = usage or {}
         prompt_tokens = _validated_token_count(usage, "prompt_tokens")
         completion_tokens = _validated_token_count(usage, "completion_tokens")
@@ -350,7 +370,11 @@ def _validated_token_count(usage: dict[str, Any], field: str) -> int | None:
     if value is None:
         return None
     if type(value) is not int or value < 0:
-        raise ProviderUnavailable("provider response usage is invalid")
+        raise ProviderUnavailable(
+            "provider response usage is invalid",
+            category="usage_invalid",
+            retryable=False,
+        )
     return value
 
 
