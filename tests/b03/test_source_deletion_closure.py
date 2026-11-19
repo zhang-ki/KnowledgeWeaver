@@ -46,9 +46,11 @@ EVIDENCE_B = "00000000-0000-0000-0000-000000000011"
 PROVENANCE_A = "00000000-0000-0000-0000-000000000012"
 PROVENANCE_B = "00000000-0000-0000-0000-000000000013"
 SHARED_ENTITY = "00000000-0000-0000-0000-000000000014"
+SOURCE_A_ONLY_ENTITY = "00000000-0000-0000-0000-000000000020"
 MENTION_A = "00000000-0000-0000-0000-000000000015"
 MENTION_B = "00000000-0000-0000-0000-000000000016"
 RELATION_A = "00000000-0000-0000-0000-000000000017"
+RELATION_B = "00000000-0000-0000-0000-000000000021"
 GENERATION = "00000000-0000-0000-0000-000000000018"
 
 
@@ -61,13 +63,24 @@ class ScalarResult:
 
 
 class RemovalSession:
-    def __init__(self, mention_a: object, mention_b: object) -> None:
+    def __init__(
+        self,
+        mention_a: object,
+        mention_b: object,
+        *,
+        relation_evidence_ids: list[str] | None = None,
+        relation_rows: list[object] | None = None,
+    ) -> None:
         self.versions = [
             SimpleNamespace(id=VERSION_A, source_id=SOURCE_A),
             SimpleNamespace(id=VERSION_B, source_id=SOURCE_B),
         ]
         self.mention_a = mention_a
         self.mention_b = mention_b
+        self.relation_evidence_ids = [RELATION_A] if relation_evidence_ids is None else relation_evidence_ids
+        self.relation_rows = relation_rows or []
+        self.mention_entity_calls = 0
+        self.relation_rows_queried = False
         text = "remaining source supports shared entity"
         locator = MarkdownLocator(path="b.md", line_start=1, line_end=1)
         chunk = Chunk(
@@ -119,13 +132,18 @@ class RemovalSession:
         elif model is MentionRow and column == "id":
             rows = [MENTION_A]
         elif model is MentionRow and column == "entity_id":
-            rows = [SHARED_ENTITY]
+            self.mention_entity_calls += 1
+            if self.mention_entity_calls == 1:
+                rows = [self.mention_a.entity_id]
+            else:
+                rows = [self.mention_b.entity_id] if self.mention_b.entity_id == self.mention_a.entity_id else []
         elif model is MentionRow:
             rows = [self.mention_b]
         elif model is RelationEvidenceRow:
-            rows = [RELATION_A]
+            rows = self.relation_evidence_ids
         elif model is RelationRow:
-            rows = []
+            self.relation_rows_queried = True
+            rows = self.relation_rows
         else:
             raise AssertionError(f"Unexpected query: {model.__name__}.{column}")
         return ScalarResult(rows)
@@ -158,6 +176,44 @@ async def test_remove_source_keeps_shared_entity_and_validates_remaining_generat
     assert members["provenance"] == {PROVENANCE_B}
     assert members["entity"] == {SHARED_ENTITY}
     assert members["mention"] == {MENTION_B}
+    assert members["relation"] == set()
+
+
+@pytest.mark.asyncio
+async def test_remove_source_prunes_relation_with_deleted_only_entity_endpoint() -> None:
+    mention_a = SimpleNamespace(id=MENTION_A, entity_id=SOURCE_A_ONLY_ENTITY, evidence_id=EVIDENCE_A)
+    mention_b = SimpleNamespace(id=MENTION_B, entity_id=SHARED_ENTITY, evidence_id=EVIDENCE_B)
+    relation_b = SimpleNamespace(
+        id=RELATION_B,
+        subject_id=SOURCE_A_ONLY_ENTITY,
+        object_id=SHARED_ENTITY,
+        provenance_id=PROVENANCE_B,
+    )
+    session = RemovalSession(
+        mention_a,
+        mention_b,
+        relation_evidence_ids=[],
+        relation_rows=[relation_b],
+    )
+    pipeline = object.__new__(PipelineService)
+    old_members = {
+        "source_version": {VERSION_A, VERSION_B},
+        "document": {DOCUMENT_A, DOCUMENT_B},
+        "chunk": {CHUNK_A, CHUNK_B},
+        "evidence": {EVIDENCE_A, EVIDENCE_B},
+        "provenance": {PROVENANCE_A, PROVENANCE_B},
+        "entity": {SOURCE_A_ONLY_ENTITY, SHARED_ENTITY},
+        "mention": {MENTION_A, MENTION_B},
+        "relation": {RELATION_B},
+    }
+
+    members = await PipelineService._replace_source_members(pipeline, session, old_members, SOURCE_A, GENERATION)
+    await PipelineService._validate_generation(pipeline, session, members)
+
+    assert session.relation_rows_queried
+    assert members["entity"] == {SHARED_ENTITY}
+    assert members["mention"] == {MENTION_B}
+    assert members["evidence"] == {EVIDENCE_B}
     assert members["relation"] == set()
 
 
