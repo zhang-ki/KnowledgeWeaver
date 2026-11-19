@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -18,7 +17,6 @@ from experiments.vertical_slice.retrieval import (
     detect_relation_conflicts,
     tokenize,
 )
-
 
 SYMBOLS = ("EvidenceRecord", "SourceSpan", "DemoLookupCache", "bind_source_span")
 POLICY_FINGERPRINT = "p3-public-prior-v1;features=12;lambda_cost=0.3;tau=0"
@@ -307,7 +305,7 @@ class VerticalSliceAgent:
             generated = await self.generator.generate(request)
         except TimeoutError:
             return self._result("insufficient", "The answer provider timed out; no generated claim is trusted.", [], [], ["Answer generation timed out."], conflicts, routes, actions, tool_calls, llm_calls, tokens, "deadline_exceeded")
-        except Exception as exc:  # provider failures do not become empty successful answers
+        except Exception as exc:  # noqa: BLE001 - every adapter failure must fail closed
             return self._result("insufficient", "The answer provider failed; no generated claim is trusted.", [], [], [f"Provider failure: {type(exc).__name__}."], conflicts, routes, actions, tool_calls, llm_calls, tokens, "provider_unavailable")
 
         relation_ids = [item for path in paths for item in path["relation_ids"]]

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
-import asyncio
 import urllib.error
 import urllib.parse
 import urllib.request

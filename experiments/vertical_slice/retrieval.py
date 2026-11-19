@@ -11,7 +11,6 @@ from typing import Any
 from experiments.vertical_slice.models import Corpus, derived_id
 from experiments.vertical_slice.providers import FakeEmbeddingProvider
 
-
 STOPWORDS = {"a", "an", "and", "are", "does", "how", "is", "of", "or", "the", "to", "what", "which"}
 
 
