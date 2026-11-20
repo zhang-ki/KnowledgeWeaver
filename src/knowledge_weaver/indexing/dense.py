@@ -37,11 +37,20 @@ class QdrantDenseIndex:
     async def publish(self, corpus_id: str, generation_id: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         texts = [row["text"] for row in rows]
         if not texts:
-            self._metadata[(corpus_id, generation_id)] = {"dimension": None, "model": None, "revision": None, "fingerprint": None}
+            self._metadata[(corpus_id, generation_id)] = {
+                "dimension": None,
+                "model": None,
+                "revision": None,
+                "fingerprint": None,
+                "configuration_fingerprint": None,
+                "mode_pair": ["document", "query"],
+            }
             return self._metadata[(corpus_id, generation_id)]
         batch = await self.provider.embed(texts, "document")
         if len(batch.vectors) != len(rows):
             raise ValueError("embedding count does not match chunks")
+        if not batch.configuration_fingerprint:
+            raise ValueError("document embedding configuration fingerprint is required")
         collection = self.collection(corpus_id)
         if not await self.client.collection_exists(collection):
             await self.client.create_collection(collection, vectors_config=models.VectorParams(size=batch.dimension, distance=models.Distance.COSINE))
@@ -54,9 +63,30 @@ class QdrantDenseIndex:
         points = []
         for row, vector in zip(rows, batch.vectors, strict=True):
             point_id = str(uuid.uuid5(uuid.UUID(generation_id), json.dumps([row["chunk_id"], batch.fingerprint], separators=(",", ":"))))
-            points.append(models.PointStruct(id=point_id, vector=vector, payload={"corpus_id": corpus_id, "generation_id": generation_id, "source_id": row["source_id"], "chunk_id": row["chunk_id"], "embedding_fingerprint": batch.fingerprint, "embedding_mode": "document", "normalized": batch.normalized, "model": batch.model, "revision": batch.revision, "dimension": batch.dimension}))
+            points.append(models.PointStruct(id=point_id, vector=vector, payload={
+                "corpus_id": corpus_id,
+                "generation_id": generation_id,
+                "source_id": row["source_id"],
+                "chunk_id": row["chunk_id"],
+                "embedding_fingerprint": batch.fingerprint,
+                "configuration_fingerprint": batch.configuration_fingerprint,
+                "embedding_mode": "document",
+                "declared_mode_pair": ["document", "query"],
+                "normalized": batch.normalized,
+                "model": batch.model,
+                "revision": batch.revision,
+                "dimension": batch.dimension,
+            }))
         await self.client.upsert(collection, points, wait=True)
-        meta = {"dimension": batch.dimension, "model": batch.model, "revision": batch.revision, "fingerprint": batch.fingerprint, "collection": collection}
+        meta = {
+            "dimension": batch.dimension,
+            "model": batch.model,
+            "revision": batch.revision,
+            "fingerprint": batch.fingerprint,
+            "configuration_fingerprint": batch.configuration_fingerprint,
+            "mode_pair": ["document", "query"],
+            "collection": collection,
+        }
         self._metadata[(corpus_id, generation_id)] = meta
         return meta
 
@@ -66,6 +96,8 @@ class QdrantDenseIndex:
         if query.context.source_ids == []:
             return []
         batch = await self.provider.embed([query.text], "query")
+        if not batch.configuration_fingerprint:
+            raise ValueError("query embedding configuration fingerprint is required")
         collection = self.collection(query.context.corpus_id)
         if not await self.client.collection_exists(collection):
             return []
@@ -80,9 +112,26 @@ class QdrantDenseIndex:
         scores = []
         for point in points.points:
             payload = point.payload or {}
-            if payload.get("embedding_mode") != "document" or payload.get("dimension") != batch.dimension or payload.get("normalized") != batch.normalized or payload.get("model") != batch.model or payload.get("revision") != batch.revision:
-                raise ValueError("query embedding does not match published document embedding fingerprint")
+            if payload.get("embedding_mode") != "document" or payload.get("declared_mode_pair") != ["document", "query"]:
+                raise ValueError("published document embedding does not declare the document-to-query mode pair")
+            if not payload.get("embedding_fingerprint"):
+                raise ValueError("published document embedding fingerprint is missing")
+            if (
+                payload.get("configuration_fingerprint") != batch.configuration_fingerprint
+                or payload.get("dimension") != batch.dimension
+                or payload.get("normalized") != batch.normalized
+                or payload.get("model") != batch.model
+                or payload.get("revision") != batch.revision
+            ):
+                raise ValueError("query embedding does not match published document embedding configuration")
             scores.append((payload["chunk_id"], float(point.score)))
+        if points.points:
+            await self.client.set_payload(
+                collection,
+                payload={"query_embedding_fingerprint": batch.fingerprint, "query_embedding_mode": "query"},
+                points=[point.id for point in points.points],
+                wait=True,
+            )
         return [IndexCandidate(chunk_id=chunk_id, rank=i, raw_score=score, score_direction=ScoreDirection.higher) for i, (chunk_id, score) in enumerate(scores, 1)]
 
     async def delete_generation(self, corpus_id: str, generation_id: str) -> None:

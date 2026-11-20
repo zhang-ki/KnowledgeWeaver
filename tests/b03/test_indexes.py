@@ -40,6 +40,18 @@ def _run_pure_async(coroutine):
     raise AssertionError("local index operation unexpectedly awaited I/O")
 
 
+class _ConfiguredFakeEmbeddingProvider:
+    def __init__(self, dimension: int) -> None:
+        self.provider = FakeEmbeddingProvider(dimension)
+        self.configuration_fingerprint = f"fake-hash-config-{dimension}-l2"
+        self.last_batch = None
+
+    async def embed(self, texts, mode):
+        batch = await self.provider.embed(texts, mode)
+        self.last_batch = batch.model_copy(update={"configuration_fingerprint": self.configuration_fingerprint})
+        return self.last_batch
+
+
 def test_bm25_tokenizer_is_fixed_for_latin_identifiers_and_cjk() -> None:
     assert TOKENIZER_VERSION == "kw-bm25-latin-camel-snake-cjk-char-v1"
     assert tokenize("parseHTTPResponse foo_bar 中文知识") == [
@@ -90,6 +102,7 @@ def test_symbol_exact_prefix_and_entity_alias_scoping(short_tmp_path) -> None:
     [
         pytest.param({"dimension": 3}, id="dimension"),
         pytest.param({"model": "different-model"}, id="metadata"),
+        pytest.param({"configuration_fingerprint": "other-configuration"}, id="configuration"),
     ],
 )
 @pytest.mark.asyncio
@@ -105,6 +118,9 @@ async def test_dense_search_rejects_published_dimension_and_metadata_mismatch(pa
             self.queried = True
             payload = {
                 "embedding_mode": "document",
+                "declared_mode_pair": ["document", "query"],
+                "embedding_fingerprint": "full-document-fingerprint",
+                "configuration_fingerprint": "fake-hash-config-4-l2",
                 "dimension": 4,
                 "normalized": True,
                 "model": "fake-hash-embedding-v1",
@@ -118,7 +134,7 @@ async def test_dense_search_rejects_published_dimension_and_metadata_mismatch(pa
             return None
 
     corpus, generation = str(uuid4()), str(uuid4())
-    index = QdrantDenseIndex("http://127.0.0.1:1", FakeEmbeddingProvider(4))
+    index = QdrantDenseIndex("http://127.0.0.1:1", _ConfiguredFakeEmbeddingProvider(4))
     client = QueryClient()
     index.client = client
     query = IndexQuery(
@@ -128,8 +144,133 @@ async def test_dense_search_rejects_published_dimension_and_metadata_mismatch(pa
         top_k=1,
     )
 
-    with pytest.raises(ValueError, match="query embedding does not match published document embedding fingerprint"):
+    with pytest.raises(ValueError, match="does not match published document embedding configuration"):
         await index.search(query)
 
     assert client.queried
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_dense_search_requires_declared_pair_and_persists_both_full_fingerprints() -> None:
+    document_fingerprint = "full-document-fingerprint"
+
+    class QueryClient:
+        def __init__(self) -> None:
+            self.payload_updates = []
+
+        async def collection_exists(self, _collection: str) -> bool:
+            return True
+
+        async def query_points(self, *_args, **_kwargs):
+            payload = {
+                "embedding_mode": "document",
+                "declared_mode_pair": ["document", "query"],
+                "embedding_fingerprint": document_fingerprint,
+                "configuration_fingerprint": "fake-hash-config-4-l2",
+                "dimension": 4,
+                "normalized": True,
+                "model": "fake-hash-embedding-v1",
+                "revision": "fixed-v1",
+                "chunk_id": str(uuid4()),
+            }
+            return SimpleNamespace(points=[SimpleNamespace(id="point-1", payload=payload, score=0.9)])
+
+        async def set_payload(self, _collection, *, payload, points, wait):
+            self.payload_updates.append((payload, points, wait))
+
+        async def close(self) -> None:
+            return None
+
+    index = QdrantDenseIndex("http://127.0.0.1:1", _ConfiguredFakeEmbeddingProvider(4))
+    client = QueryClient()
+    index.client = client
+    query = IndexQuery(
+        channel=IndexChannel.dense,
+        context=_context(str(uuid4()), str(uuid4())),
+        text="sample query",
+        top_k=1,
+    )
+
+    candidates = await index.search(query)
+
+    assert len(candidates) == 1
+    assert client.payload_updates == [(
+        {"query_embedding_fingerprint": index.provider.last_batch.fingerprint, "query_embedding_mode": "query"},
+        ["point-1"],
+        True,
+    )]
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_dense_publish_persists_document_fingerprints_and_declared_pair() -> None:
+    class PublishClient:
+        def __init__(self) -> None:
+            self.points = []
+
+        async def collection_exists(self, _collection: str) -> bool:
+            return False
+
+        async def create_collection(self, *_args, **_kwargs) -> None:
+            return None
+
+        async def get_collection(self, _collection: str):
+            return SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(vectors=SimpleNamespace(size=4))))
+
+        async def upsert(self, _collection, points, *, wait):
+            assert wait
+            self.points.extend(points)
+
+        async def close(self) -> None:
+            return None
+
+    index = QdrantDenseIndex("http://127.0.0.1:1", _ConfiguredFakeEmbeddingProvider(4))
+    client = PublishClient()
+    index.client = client
+    corpus_id, generation_id, chunk_id, source_id = (str(uuid4()) for _ in range(4))
+
+    metadata = await index.publish(corpus_id, generation_id, [{"chunk_id": chunk_id, "source_id": source_id, "text": "published document"}])
+
+    payload = client.points[0].payload
+    assert payload["embedding_fingerprint"] == metadata["fingerprint"]
+    assert payload["configuration_fingerprint"] == metadata["configuration_fingerprint"]
+    assert payload["declared_mode_pair"] == ["document", "query"]
+    assert metadata["mode_pair"] == ["document", "query"]
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_dense_search_rejects_undeclared_document_to_query_pair() -> None:
+    class QueryClient:
+        async def collection_exists(self, _collection: str) -> bool:
+            return True
+
+        async def query_points(self, *_args, **_kwargs):
+            return SimpleNamespace(points=[SimpleNamespace(payload={
+                "embedding_mode": "document",
+                "declared_mode_pair": ["document", "rerank"],
+                "embedding_fingerprint": "full-document-fingerprint",
+                "configuration_fingerprint": "fake-hash-config-4-l2",
+                "dimension": 4,
+                "normalized": True,
+                "model": "fake-hash-embedding-v1",
+                "revision": "fixed-v1",
+                "chunk_id": str(uuid4()),
+            }, score=0.9)])
+
+        async def close(self) -> None:
+            return None
+
+    index = QdrantDenseIndex("http://127.0.0.1:1", _ConfiguredFakeEmbeddingProvider(4))
+    index.client = QueryClient()
+    query = IndexQuery(
+        channel=IndexChannel.dense,
+        context=_context(str(uuid4()), str(uuid4())),
+        text="sample query",
+        top_k=1,
+    )
+
+    with pytest.raises(ValueError, match="does not declare the document-to-query mode pair"):
+        await index.search(query)
     await index.close()

@@ -56,7 +56,7 @@ async def live_pipeline(short_tmp_path):
         allowed_roots=[short_tmp_path],
         qdrant_url=qdrant_url,
         qdrant_api_key=qdrant_api_key,
-        embedding_provider=FakeEmbeddingProvider(16),
+        embedding_provider=_ConfiguredFakeEmbeddingProvider(16),
     )
     pipeline._test_corpus_ids = []
     yield pipeline
@@ -91,6 +91,16 @@ def _source(root: Path, corpus_id: str, source_id: str) -> Source:
         display_name="synthetic B03 source",
         created_at=datetime.now(UTC),
     )
+
+
+class _ConfiguredFakeEmbeddingProvider:
+    def __init__(self, dimension: int) -> None:
+        self.provider = FakeEmbeddingProvider(dimension)
+        self.configuration_fingerprint = f"fake-hash-config-{dimension}-l2"
+
+    async def embed(self, texts, mode):
+        batch = await self.provider.embed(texts, mode)
+        return batch.model_copy(update={"configuration_fingerprint": self.configuration_fingerprint})
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,13 @@ def _batch(
     usage: ModelTokenUsage,
     mode: EmbeddingMode,
     endpoint_url: str,
+    provider_identity: str,
+    model_field: str,
+    input_field: str,
+    dimensions_field: str | None,
+    configured_dimensions: int | None,
+    query_prefix: str,
+    document_prefix: str,
 ) -> EmbeddingBatch:
     items = body.get("data")
     if not isinstance(items, list) or len(items) != len(texts):
@@ -119,6 +126,22 @@ def _batch(
         endpoint_url,
         "l2" if normalized else "raw",
     )
+    configuration_fingerprint = config_fingerprint(
+        "embedding-configuration-v1",
+        provider_identity,
+        profile_id,
+        model,
+        revision,
+        str(dimension),
+        "l2" if normalized else "raw",
+        endpoint_url,
+        model_field,
+        input_field,
+        dimensions_field or "",
+        str(configured_dimensions) if configured_dimensions is not None else "",
+        query_prefix,
+        document_prefix,
+    )
     try:
         return EmbeddingBatch(
             vectors=vectors,
@@ -127,6 +150,7 @@ def _batch(
             model=model,
             revision=revision,
             fingerprint=fingerprint,
+            configuration_fingerprint=configuration_fingerprint,
             usage=usage,
         )
     except ValueError:
@@ -194,6 +218,13 @@ async def _embed(
             usage=usage,
             mode=mode,
             endpoint_url=profile.endpoint_url,
+            provider_identity="local-qwen-embedding" if local_only else "cloud-openai-embedding",
+            model_field=profile.model_field,
+            input_field=profile.input_field,
+            dimensions_field=profile.dimensions_field,
+            configured_dimensions=profile.dimensions,
+            query_prefix=profile.query_prefix,
+            document_prefix=profile.document_prefix,
         )
     except ProviderUnavailable:
         await reservation.finish(None)

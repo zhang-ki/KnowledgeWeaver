@@ -982,6 +982,7 @@ class EmbeddingBatch(SchemaModel):
     model: NonEmptyText
     revision: NonEmptyText
     fingerprint: Fingerprint
+    configuration_fingerprint: Fingerprint | None = None
     usage: ModelTokenUsage
 
     @field_validator("vectors", mode="before")
