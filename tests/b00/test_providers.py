@@ -185,9 +185,48 @@ async def test_local_qwen_embedding_is_loopback_only_and_budgeted_at_zero_cost()
     assert batch.dimension == 2
     assert batch.normalized is False
     assert batch.revision == "qwen-revision"
+    assert batch.configuration_fingerprint
     assert usage.llm_calls == 1
     assert usage.currency_cost is None
     assert usage.count_kind == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_embedding_fingerprints_preserve_mode_and_share_secret_free_configuration() -> None:
+    seen_inputs: list[list[str]] = []
+
+    class EmbeddingTransport:
+        async def post_json(self, _endpoint_url, payload, _headers, **_kwargs):
+            seen_inputs.append(payload["input"])
+            return {"model": "resolved-qwen-revision", "data": [{"index": 0, "embedding": [3, 4]}]}
+
+    async def embed_with(profile: LocalQwenProfile, mode: str):
+        provider = LocalQwenEmbeddingProvider(profile, ledger(), transport=EmbeddingTransport())
+        return await provider.embed(["same text"], mode)
+
+    base = LocalQwenProfile(
+        endpoint_url="http://127.0.0.1:8080/v1/embeddings",
+        model="qwen-local",
+        local_api_key=SecretStr("first-secret"),
+        query_prefix="query: ",
+        document_prefix="passage: ",
+    )
+    query_batch = await embed_with(base, "query")
+    document_batch = await embed_with(base, "document")
+    different_secret_batch = await embed_with(
+        base.model_copy(update={"local_api_key": SecretStr("second-secret")}), "query"
+    )
+    different_prefix_batch = await embed_with(
+        base.model_copy(update={"document_prefix": "document: "}), "query"
+    )
+
+    assert seen_inputs[:2] == [["query: same text"], ["passage: same text"]]
+    assert query_batch.fingerprint != document_batch.fingerprint
+    assert query_batch.fingerprint == "8740fce7cb8045f249b146920f766b61c303409deb738198263f901f15d89b63"
+    assert document_batch.fingerprint == "3808d92eaf771e7c00bf896a4834b780c66ad7149d1a7795ca1c2924ea77c98a"
+    assert query_batch.configuration_fingerprint == document_batch.configuration_fingerprint
+    assert query_batch.configuration_fingerprint == different_secret_batch.configuration_fingerprint
+    assert query_batch.configuration_fingerprint != different_prefix_batch.configuration_fingerprint
 
 
 async def _no_sleep(seconds: float) -> None:
