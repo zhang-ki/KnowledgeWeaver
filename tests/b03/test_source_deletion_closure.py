@@ -68,7 +68,7 @@ class RemovalSession:
         mention_a: object,
         mention_b: object,
         *,
-        relation_evidence_ids: list[str] | None = None,
+        relation_evidence_rows: list[object] | None = None,
         relation_rows: list[object] | None = None,
     ) -> None:
         self.versions = [
@@ -77,7 +77,11 @@ class RemovalSession:
         ]
         self.mention_a = mention_a
         self.mention_b = mention_b
-        self.relation_evidence_ids = [RELATION_A] if relation_evidence_ids is None else relation_evidence_ids
+        self.relation_evidence_rows = relation_evidence_rows or [
+            SimpleNamespace(relation_id=RELATION_A, evidence_id=EVIDENCE_A)
+        ]
+        self.removed_evidence_ids = {EVIDENCE_A}
+        self.deleted_evidence_relation_ids: list[str] | None = None
         self.relation_rows = relation_rows or []
         self.mention_entity_calls = 0
         self.relation_rows_queried = False
@@ -140,7 +144,15 @@ class RemovalSession:
         elif model is MentionRow:
             rows = [self.mention_b]
         elif model is RelationEvidenceRow:
-            rows = self.relation_evidence_ids
+            if column == "relation_id":
+                rows = [
+                    relation_evidence.relation_id
+                    for relation_evidence in self.relation_evidence_rows
+                    if relation_evidence.evidence_id in self.removed_evidence_ids
+                ]
+                self.deleted_evidence_relation_ids = rows
+            else:
+                rows = self.relation_evidence_rows
         elif model is RelationRow:
             self.relation_rows_queried = True
             rows = self.relation_rows
@@ -189,10 +201,11 @@ async def test_remove_source_prunes_relation_with_deleted_only_entity_endpoint()
         object_id=SHARED_ENTITY,
         provenance_id=PROVENANCE_B,
     )
+    relation_evidence_b = SimpleNamespace(relation_id=RELATION_B, evidence_id=EVIDENCE_B)
     session = RemovalSession(
         mention_a,
         mention_b,
-        relation_evidence_ids=[],
+        relation_evidence_rows=[relation_evidence_b],
         relation_rows=[relation_b],
     )
     pipeline = object.__new__(PipelineService)
@@ -210,6 +223,8 @@ async def test_remove_source_prunes_relation_with_deleted_only_entity_endpoint()
     members = await PipelineService._replace_source_members(pipeline, session, old_members, SOURCE_A, GENERATION)
     await PipelineService._validate_generation(pipeline, session, members)
 
+    assert session.deleted_evidence_relation_ids == []
+    assert relation_evidence_b.evidence_id == EVIDENCE_B
     assert session.relation_rows_queried
     assert members["entity"] == {SHARED_ENTITY}
     assert members["mention"] == {MENTION_B}
