@@ -102,11 +102,14 @@ def test_symbol_exact_prefix_and_entity_alias_scoping(short_tmp_path) -> None:
     [
         pytest.param({"dimension": 3}, id="dimension"),
         pytest.param({"model": "different-model"}, id="metadata"),
+        pytest.param({"revision": "different-revision"}, id="resolved-revision"),
+        pytest.param({"normalized": False}, id="normalization"),
         pytest.param({"configuration_fingerprint": "other-configuration"}, id="configuration"),
+        pytest.param({"configuration_fingerprint": None}, id="missing-document-configuration"),
     ],
 )
 @pytest.mark.asyncio
-async def test_dense_search_rejects_published_dimension_and_metadata_mismatch(payload_update) -> None:
+async def test_dense_search_rejects_published_configuration_mismatch(payload_update) -> None:
     class QueryClient:
         def __init__(self) -> None:
             self.queried = False
@@ -148,6 +151,36 @@ async def test_dense_search_rejects_published_dimension_and_metadata_mismatch(pa
         await index.search(query)
 
     assert client.queried
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_dense_search_rejects_missing_query_configuration_fingerprint() -> None:
+    class QueryClient:
+        def __init__(self) -> None:
+            self.collection_checks = 0
+
+        async def collection_exists(self, _collection: str) -> bool:
+            self.collection_checks += 1
+            return True
+
+        async def close(self) -> None:
+            return None
+
+    index = QdrantDenseIndex("http://127.0.0.1:1", FakeEmbeddingProvider(4))
+    client = QueryClient()
+    index.client = client
+    query = IndexQuery(
+        channel=IndexChannel.dense,
+        context=_context(str(uuid4()), str(uuid4())),
+        text="sample query",
+        top_k=1,
+    )
+
+    with pytest.raises(ValueError, match="query embedding configuration fingerprint is required"):
+        await index.search(query)
+
+    assert client.collection_checks == 0
     await index.close()
 
 
@@ -237,6 +270,34 @@ async def test_dense_publish_persists_document_fingerprints_and_declared_pair() 
     assert payload["configuration_fingerprint"] == metadata["configuration_fingerprint"]
     assert payload["declared_mode_pair"] == ["document", "query"]
     assert metadata["mode_pair"] == ["document", "query"]
+    await index.close()
+
+
+@pytest.mark.asyncio
+async def test_dense_publish_rejects_missing_document_configuration_fingerprint() -> None:
+    class PublishClient:
+        def __init__(self) -> None:
+            self.collection_checks = 0
+
+        async def collection_exists(self, _collection: str) -> bool:
+            self.collection_checks += 1
+            return False
+
+        async def close(self) -> None:
+            return None
+
+    index = QdrantDenseIndex("http://127.0.0.1:1", FakeEmbeddingProvider(4))
+    client = PublishClient()
+    index.client = client
+
+    with pytest.raises(ValueError, match="document embedding configuration fingerprint is required"):
+        await index.publish(
+            str(uuid4()),
+            str(uuid4()),
+            [{"chunk_id": str(uuid4()), "source_id": str(uuid4()), "text": "published document"}],
+        )
+
+    assert client.collection_checks == 0
     await index.close()
 
 

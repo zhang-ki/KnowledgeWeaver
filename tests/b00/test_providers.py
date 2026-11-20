@@ -222,6 +222,8 @@ async def test_embedding_fingerprints_preserve_mode_and_share_secret_free_config
 
     assert seen_inputs[:2] == [["query: same text"], ["passage: same text"]]
     assert query_batch.fingerprint != document_batch.fingerprint
+    assert query_batch.fingerprint == "8740fce7cb8045f249b146920f766b61c303409deb738198263f901f15d89b63"
+    assert document_batch.fingerprint == "3808d92eaf771e7c00bf896a4834b780c66ad7149d1a7795ca1c2924ea77c98a"
     assert query_batch.configuration_fingerprint == document_batch.configuration_fingerprint
     assert query_batch.configuration_fingerprint == different_secret_batch.configuration_fingerprint
     assert query_batch.configuration_fingerprint != different_prefix_batch.configuration_fingerprint
