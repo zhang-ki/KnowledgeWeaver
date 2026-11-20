@@ -849,18 +849,38 @@ class AgentServiceImpl(AgentService):
                             }
                         )
                         matrix = None
-                        if new_ids:
-                            new_evidence = evidence_ledger.support_evidence(new_ids[:40])
+                        verification_ids = list(new_ids[:40])
+                        if action.tool is ActionTool.graph and result.paths:
+                            # A graph action can add path structure over evidence
+                            # already in the ledger; reverify those path citations.
+                            path_evidence_ids = [
+                                evidence_id
+                                for path in result.paths
+                                for step in path.steps
+                                for evidence_id in step.evidence_ids
+                            ]
+                            verification_ids = list(
+                                dict.fromkeys([*path_evidence_ids, *verification_ids])
+                            )[:40]
+                        verification_ids = [
+                            evidence_id
+                            for evidence_id in verification_ids
+                            if evidence_id in evidence_ledger.entries
+                        ]
+                        if verification_ids:
+                            evidence_to_verify = evidence_ledger.support_evidence(
+                                verification_ids
+                            )
                             paths = _active_paths(
                                 evidence_ledger,
-                                set(new_ids[:40]),
+                                set(verification_ids),
                             ) if flags["enable_relation_semantic_verification"] else []
                             try:
                                 matrix = await verifier.evaluate(
                                     VerifyRequest(
                                         query=state.query,
                                         facets=state.subquestions,
-                                        evidence=new_evidence,
+                                        evidence=evidence_to_verify,
                                         paths=paths,
                                     )
                                 )
