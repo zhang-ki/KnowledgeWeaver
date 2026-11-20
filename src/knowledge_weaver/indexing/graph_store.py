@@ -44,10 +44,11 @@ class PostgresGraphStore:
             if generation is None or generation.corpus_id != context.corpus_id or generation.state not in {"READY", "RETIRED"}:
                 raise KnowledgeWeaverError(ErrorCode.NO_READY_GENERATION, "Requested graph generation is unavailable.", request_id=context.request_id)
             members = await self.knowledge_store._members(session, context.generation_id, "entity")
+            mention_ids = await self.knowledge_store._members(session, context.generation_id, "mention")
             relations_ids = await self.knowledge_store._members(session, context.generation_id, "relation")
             evidence_members = await self.knowledge_store._members(session, context.generation_id, "evidence")
             entities = [Entity.model_validate(row.payload) for row in (await session.scalars(select(EntityRow).where(EntityRow.id.in_(members)))).all()] if members else []
-            mentions_raw = (await session.scalars(select(MentionRow).where(MentionRow.entity_id.in_(members)))).all() if members else []
+            mentions_raw = (await session.scalars(select(MentionRow).where(MentionRow.id.in_(mention_ids), MentionRow.entity_id.in_(members)))).all() if mention_ids and members else []
             relation_rows = (await session.scalars(select(RelationRow).where(RelationRow.id.in_(relations_ids)))).all() if relations_ids else []
             edge_evidence = set((await session.scalars(select(RelationEvidenceRow.evidence_id).where(RelationEvidenceRow.relation_id.in_(relations_ids)))).all()) if relations_ids else set()
             evidence_ids = evidence_members & (edge_evidence | {m.evidence_id for m in mentions_raw})

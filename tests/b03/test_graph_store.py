@@ -28,6 +28,7 @@ from knowledge_weaver.storage.schema import (
     EvidenceRow,
     GenerationEntityRow,
     GenerationEvidenceRow,
+    GenerationMentionRow,
     GenerationRelationRow,
     GenerationRow,
     MentionRow,
@@ -46,7 +47,7 @@ class GraphSession:
         self.provenance_a, self.provenance_b = str(uuid4()), str(uuid4())
         self.entity_a, self.entity_b = str(uuid4()), str(uuid4())
         self.evidence_a, self.evidence_b, self.evidence_outside = (str(uuid4()) for _ in range(3))
-        self.mention_a, self.mention_b = str(uuid4()), str(uuid4())
+        self.mention_a, self.mention_b, self.old_mention = (str(uuid4()) for _ in range(3))
         self.relation_cross_source, self.relation_outside_generation = str(uuid4()), str(uuid4())
         self.generation = GenerationRow(
             id=self.generation_id,
@@ -111,6 +112,7 @@ class GraphSession:
         )
         mention_a = Mention(id=self.mention_a, entity_id=self.entity_a, evidence_id=self.evidence_a, surface_form="A")
         mention_b = Mention(id=self.mention_b, entity_id=self.entity_b, evidence_id=self.evidence_b, surface_form="B")
+        old_mention = Mention(id=self.old_mention, entity_id=self.entity_a, evidence_id=self.evidence_a, surface_form="A (old generation)")
         relation_cross_source = Relation(
             id=self.relation_cross_source,
             subject_id=self.entity_a,
@@ -137,6 +139,7 @@ class GraphSession:
             MentionRow: [
                 SimpleNamespace(id=self.mention_a, entity_id=self.entity_a, evidence_id=self.evidence_a, payload=mention_a.model_dump(mode="json")),
                 SimpleNamespace(id=self.mention_b, entity_id=self.entity_b, evidence_id=self.evidence_b, payload=mention_b.model_dump(mode="json")),
+                SimpleNamespace(id=self.old_mention, entity_id=self.entity_a, evidence_id=self.evidence_a, payload=old_mention.model_dump(mode="json")),
             ],
             RelationRow: [
                 SimpleNamespace(id=self.relation_cross_source, payload=relation_cross_source.model_dump(mode="json")),
@@ -165,6 +168,7 @@ class GraphSession:
         }
         self.members = {
             "entity": {self.entity_a, self.entity_b},
+            "mention": {self.mention_a, self.mention_b},
             "relation": {self.relation_cross_source, self.relation_outside_generation},
             "evidence": {self.evidence_a, self.evidence_b},
         }
@@ -186,12 +190,24 @@ class GraphSession:
         column = description["name"] if description["name"] != model.__name__ else None
         if model is GenerationEntityRow and column == "entity_id":
             rows = self.members["entity"]
+        elif model is GenerationMentionRow and column == "mention_id":
+            rows = self.members["mention"]
         elif model is GenerationRelationRow and column == "relation_id":
             rows = self.members["relation"]
         elif model is GenerationEvidenceRow and column == "evidence_id":
             rows = self.members["evidence"]
         elif model is RelationEvidenceRow and column == "evidence_id":
             rows = [row.evidence_id for row in self.rows[RelationEvidenceRow]]
+        elif model is MentionRow:
+            member_filters = [
+                set(value)
+                for value in statement.compile().params.values()
+                if isinstance(value, (list, tuple, set))
+            ]
+            if self.members["mention"] in member_filters:
+                rows = [row for row in self.rows[MentionRow] if row.id in self.members["mention"]]
+            else:
+                rows = self.rows[MentionRow]
         else:
             rows = self.rows.get(model, [])
         return SimpleNamespace(all=lambda: rows)
@@ -227,6 +243,7 @@ async def test_graph_snapshot_closes_generation_and_filters_cross_source_facts()
     complete = await store.snapshot(context(None))
     assert {item.id for item in complete.evidence} == {session.evidence_a, session.evidence_b}
     assert {item.id for item in complete.mentions} == {session.mention_a, session.mention_b}
+    assert session.old_mention not in {item.id for item in complete.mentions}
     assert {item.id for item in complete.relations} == {session.relation_cross_source}
     assert session.relation_outside_generation not in {item.id for item in complete.relations}
 
