@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -38,6 +39,7 @@ from knowledge_weaver.agent.weights import (
     feature_schema_fingerprint,
     policy_fingerprint,
 )
+from knowledge_weaver.core.budget import BudgetLedger
 from knowledge_weaver.core.errors import KnowledgeWeaverError
 from knowledge_weaver.core.ids import deterministic_id
 from knowledge_weaver.models import (
@@ -63,6 +65,7 @@ from knowledge_weaver.models import (
     Usage,
     VerifyRequest,
 )
+from knowledge_weaver.retrieval import DenseRetriever
 
 
 def _state(
@@ -240,6 +243,35 @@ def test_cold_start_prior_is_frozen_and_a08_removes_source_signals() -> None:
     assert [item.predicted_gain for item in with_source_terms.candidate_scores] == [
         item.predicted_gain for item in without_source_terms.candidate_scores
     ]
+
+
+def test_dense_index_provider_must_use_the_investigation_ledger() -> None:
+    context = make_context()
+    investigation_ledger = BudgetLedger(make_budget(context))
+    stale_ingest_ledger = BudgetLedger(make_budget(context))
+
+    class BudgetedProvider:
+        def __init__(self, budget: BudgetLedger) -> None:
+            self.budget = budget
+
+    dense_index = SimpleNamespace(
+        provider=BudgetedProvider(stale_ingest_ledger),
+        embedding_provider=BudgetedProvider(investigation_ledger),
+    )
+    dense_retriever = DenseRetriever(dense_index, FakeStore({}, {}))  # type: ignore[arg-type]
+
+    with pytest.raises(KnowledgeWeaverError) as captured:
+        AgentServiceImpl._assert_budget_ownership(
+            {"dense": dense_retriever},
+            investigation_ledger,
+        )
+
+    assert captured.value.to_dict()["details"] == {
+        "component": "dense",
+        "budget_owner": "DenseRetriever.index.provider",
+    }
+    dense_index.provider = BudgetedProvider(investigation_ledger)
+    AgentServiceImpl._assert_budget_ownership({"dense": dense_retriever}, investigation_ledger)
 
 
 @pytest.mark.asyncio

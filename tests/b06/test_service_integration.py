@@ -244,7 +244,7 @@ async def test_agent_service_uses_real_pg_qdrant_qwen_and_b04_b05_assembly() -> 
             )
 
             def make_retrievers(ledger: BudgetLedger):
-                pipeline.dense.embedding_provider = LocalQwenEmbeddingProvider(profile, ledger)
+                pipeline.dense.provider = LocalQwenEmbeddingProvider(profile, ledger)
                 return {
                     "bm25": Bm25Retriever(pipeline.bm25, pipeline.knowledge_store),
                     "dense": DenseRetriever(pipeline.dense, pipeline.knowledge_store),
