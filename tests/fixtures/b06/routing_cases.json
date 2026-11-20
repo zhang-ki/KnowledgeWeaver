@@ -1,0 +1,14 @@
+{
+  "symbol": {
+    "question": "How does `build_index` update the graph?",
+    "required_source_types": ["python_repo"]
+  },
+  "multihop": {
+    "question": "How does Pipeline connect to Evidence through the repository?",
+    "required_source_types": ["markdown", "python_repo"]
+  },
+  "lexical": {
+    "question": "List the exact configuration keys for the cache.",
+    "required_source_types": ["markdown"]
+  }
+}
