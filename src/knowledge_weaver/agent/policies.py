@@ -95,21 +95,30 @@ def _training_count(state: InvestigationState, family: str) -> int:
     return sum(1 for record in state.history if record.action.tool.value == family)
 
 
-def _preferred_rule(state: InvestigationState, action: Action) -> tuple[float, str]:
+def _preferred_rule(
+    state: InvestigationState,
+    action: Action,
+    *,
+    enable_source_features: bool = True,
+) -> tuple[float, str]:
     query = action.query or state.query.text
     required_types: set[str] = set()
     if action.facet_id:
         facet = next((item for item in state.subquestions if item.id == action.facet_id), None)
         if facet:
-            required_types = {item.value for item in facet.required_source_types}
+            if enable_source_features:
+                required_types = {item.value for item in facet.required_source_types}
             query = facet.text
-    exact = extract_exact_symbol(query) is not None
-    multihop = _MULTIHOP.search(query) is not None or len(required_types) > 1
+    exact = enable_source_features and extract_exact_symbol(query) is not None
+    multihop = _MULTIHOP.search(query) is not None or (
+        enable_source_features and len(required_types) > 1
+    )
     if action.tool is ActionTool.symbol:
         symbol_match = exact and not multihop
         return (1.0 if symbol_match else 0.1, "exact_symbol" if symbol_match else "symbol_fallback")
     if action.tool is ActionTool.graph:
-        return (1.0 if multihop or state.paths else 0.2, "multi_hop_or_seed" if multihop or state.paths else "graph_prior")
+        has_seed = enable_source_features and bool(state.paths)
+        return (1.0 if multihop or has_seed else 0.2, "multi_hop_or_seed" if multihop or has_seed else "graph_prior")
     if action.tool is ActionTool.bm25:
         return (0.85 if not exact else 0.55, "lexical_match")
     if action.tool is ActionTool.dense:
@@ -211,7 +220,11 @@ class RulePolicy(_StatePolicy):
             return _stop_decision(StopReason.actions_exhausted, self.policy_fingerprint)
         scored: list[tuple[float, tuple[object, ...], Action, float, float, str]] = []
         for action in candidates:
-            gain, reason = _preferred_rule(state, action)
+            gain, reason = _preferred_rule(
+                state,
+                action,
+                enable_source_features=self.enable_source_features,
+            )
             # Rule routing is a comparator: it uses intent/source heuristics but no learned EMA.
             cost = min(1.0, (action.estimated_tokens / max(1, state.remaining_budget.max_total_tokens) + action.estimated_ms / 60_000) / 2)
             utility = gain - 0.1 * cost
@@ -296,16 +309,23 @@ class SegrPolicy(_StatePolicy):
             ema = float(ema_values.get(family, 0.0)) if isinstance(ema_values, Mapping) else 0.0
             return max(-1.0, min(1.0, 0.8 * linear + 0.2 * ema)), "learned"
 
-        # Published cold-start prior: exact symbols, source match, then a small general prior.
-        source_match = vector[2]
-        exact_symbol = vector[8] >= 0.5 and action.tool is ActionTool.symbol
-        gain = 0.6 if exact_symbol else 0.4 * source_match + 0.2 * vector[1]
-        if not source_match and not exact_symbol:
+        # Frozen cold-start prior: exact symbol, source match, then other.
+        # Source features disabled by A08 are fully neutral in both feature and prior paths.
+        if not self.enable_source_features:
             gain = 0.2
-        if self.enable_learned_gain:
-            ema_values = state.policy_memory.get("gain_ema", {})
-            ema = float(ema_values.get(family, 0.0)) if isinstance(ema_values, Mapping) else 0.0
-            gain = 0.8 * gain + 0.2 * ema
+        elif vector[8] >= 0.5 and action.tool is ActionTool.symbol:
+            gain = 0.6
+        elif vector[2] >= 0.8 and action.tool is not ActionTool.rerank:
+            gain = 0.4
+        else:
+            gain = 0.2
+        ema_values = state.policy_memory.get("gain_ema", {})
+        if (
+            self.enable_learned_gain
+            and isinstance(ema_values, Mapping)
+            and family in ema_values
+        ):
+            gain = 0.8 * gain + 0.2 * float(ema_values[family])
         return max(-1.0, min(1.0, gain)), "prior"
 
     def choose(self, state: InvestigationState, candidates: list[Action]) -> Decision:

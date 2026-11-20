@@ -26,13 +26,19 @@ from knowledge_weaver.agent import (
     load_policy_weights,
 )
 from knowledge_weaver.agent.features import extract_exact_symbol, feature_vector
-from knowledge_weaver.agent.service import _build_candidates, _safe_features
+from knowledge_weaver.agent.service import (
+    _build_candidates,
+    _gain_reward,
+    _metrics,
+    _safe_features,
+)
 from knowledge_weaver.agent.verifier import StructuredEvidenceVerifier
 from knowledge_weaver.agent.weights import (
     ActionCostMedian,
     feature_schema_fingerprint,
     policy_fingerprint,
 )
+from knowledge_weaver.core.errors import KnowledgeWeaverError
 from knowledge_weaver.core.ids import deterministic_id
 from knowledge_weaver.models import (
     Action,
@@ -42,6 +48,8 @@ from knowledge_weaver.models import (
     IndexChannel,
     InvestigationRequest,
     InvestigationState,
+    LLMResult,
+    ModelTokenUsage,
     Observation,
     PolicyKind,
     QueryContext,
@@ -50,6 +58,8 @@ from knowledge_weaver.models import (
     RetrievalResult,
     SourceKind,
     StopReason,
+    SupportMatrix,
+    SupportRow,
     Usage,
     VerifyRequest,
 )
@@ -194,6 +204,76 @@ def test_12d_features_and_query_ema_cost_are_hand_calculable() -> None:
     assert "profile=prior" in (score.reason or "")
 
 
+def test_cold_start_prior_is_frozen_and_a08_removes_source_signals() -> None:
+    context = make_context()
+    exact = _state(context, "What does `build_index` do?", required=[SourceKind.python_repo])
+    exact_action = _action(context, ActionTool.symbol, facet_id=exact.subquestions[0].id)
+    plain = _state(context, "Describe the repository behavior.", required=[SourceKind.python_repo])
+    source_action = _action(context, ActionTool.dense, facet_id=plain.subquestions[0].id)
+    other = _state(context, "Describe the behavior.")
+    other_action = _action(context, ActionTool.bm25, facet_id=other.subquestions[0].id)
+
+    policy = SegrPolicy()
+    assert policy._predicted_gain(exact, exact_action, feature_vector(exact, exact_action))[0] == pytest.approx(0.6)
+    assert policy._predicted_gain(plain, source_action, feature_vector(plain, source_action))[0] == pytest.approx(0.4)
+    assert policy._predicted_gain(other, other_action, feature_vector(other, other_action))[0] == pytest.approx(0.2)
+
+    seeded_exact = exact.model_copy(
+        update={"policy_memory": {**exact.policy_memory, "seed_available": True}}
+    )
+    disabled_vector = feature_vector(
+        seeded_exact,
+        exact_action,
+        enable_source_features=False,
+    )
+    assert disabled_vector[2] == disabled_vector[5] == disabled_vector[8] == disabled_vector[9] == 0.0
+    disabled = SegrPolicy(enable_source_features=False)
+    assert disabled._predicted_gain(seeded_exact, exact_action, disabled_vector)[0] == pytest.approx(0.2)
+
+    no_source_state = _state(context, "Describe the repository behavior.")
+    rule_actions = [
+        _action(context, tool, facet_id=plain.subquestions[0].id)
+        for tool in (ActionTool.symbol, ActionTool.entity, ActionTool.bm25)
+    ]
+    with_source_terms = RulePolicy(enable_source_features=False).choose(plain, rule_actions)
+    without_source_terms = RulePolicy(enable_source_features=False).choose(no_source_state, rule_actions)
+    assert [item.predicted_gain for item in with_source_terms.candidate_scores] == [
+        item.predicted_gain for item in without_source_terms.candidate_scores
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a08_disables_source_diversity_reward(evidence_bundle: Any) -> None:
+    context = make_context()
+    store, chunk, evidence = evidence_bundle
+    ledger = EvidenceLedger()
+    await ledger.absorb(_result_for(chunk, evidence, context), store, context)
+    base_state = _state(
+        context,
+        "Describe the evidence.",
+        required=[SourceKind.markdown, SourceKind.python_repo],
+    )
+    state = base_state.model_copy(
+        update={
+            "policy_memory": {
+                **base_state.policy_memory,
+                "enable_source_features": False,
+                "support_rows": [
+                    {
+                        "facet_id": base_state.subquestions[0].id,
+                        "evidence_id": evidence.id,
+                        "support": 1.0,
+                        "conflict": False,
+                        "source_kind": "markdown",
+                    }
+                ],
+            }
+        }
+    )
+
+    assert _metrics(state, ledger, state.policy_memory["support_rows"])[1] == 0.0
+
+
 def test_learned_tie_is_resolved_by_stable_action_key() -> None:
     context = make_context()
     state = _state(context)
@@ -214,12 +294,105 @@ def test_rule_policy_routes_symbol_and_multihop_gaps_differently() -> None:
     ]
     assert RulePolicy().choose(symbol_state, symbol_actions).action.tool is ActionTool.symbol
 
-    graph_state = _state(context, "How does Pipeline connect to Evidence through Repository?", required=[SourceKind.markdown, SourceKind.python_repo])
+    graph_state = _state(
+        context,
+        "How does Pipeline connect to Evidence through Repository?",
+        required=[SourceKind.markdown, SourceKind.python_repo],
+        memory={"seed_available": True},
+    )
     graph_actions = [
         _action(context, ActionTool.symbol, facet_id=graph_state.subquestions[0].id),
         _action(context, ActionTool.graph, facet_id=graph_state.subquestions[0].id),
     ]
     assert RulePolicy().choose(graph_state, graph_actions).action.tool is ActionTool.graph
+
+
+@pytest.mark.asyncio
+async def test_graph_actions_require_entity_seed_for_generation_and_execution(
+    evidence_bundle: Any,
+) -> None:
+    context = make_context()
+    store, chunk, evidence = evidence_bundle
+    result = _result_for(chunk, evidence, context)
+    retrievers = _fake_registry(context, result)
+    state = _state(context, "How does Pipeline connect to Evidence?")
+    actions, _ = _build_candidates(
+        state,
+        EvidenceLedger(),
+        retrievers,
+        _safe_features({"enable_expansion": False}),
+        None,
+        make_budget(context),
+        0,
+        0,
+        False,
+    )
+    assert all(action.tool is not ActionTool.graph for action in actions)
+
+    service = AgentServiceImpl(store, retrievers, RecordingProvider())
+    graph_action = _action(context, ActionTool.graph, facet_id=state.subquestions[0].id)
+    request = _request(context)
+    with pytest.raises(KnowledgeWeaverError, match="requires a resolved entity seed"):
+        await service._run_retriever(
+            graph_action,
+            request,
+            retrievers,
+            request.budget,
+            request.budget.deadline_utc,
+            state,
+        )
+    assert retrievers["graph"].queries == []
+
+    seeded = state.model_copy(
+        update={"policy_memory": {**state.policy_memory, "seed_available": True}}
+    )
+    seeded_actions, _ = _build_candidates(
+        seeded,
+        EvidenceLedger(),
+        retrievers,
+        _safe_features({"enable_expansion": False}),
+        None,
+        make_budget(context),
+        0,
+        0,
+        False,
+    )
+    assert any(action.tool is ActionTool.graph for action in seeded_actions)
+    await service._run_retriever(
+        graph_action,
+        request,
+        retrievers,
+        request.budget,
+        request.budget.deadline_utc,
+        seeded,
+    )
+    assert len(retrievers["graph"].queries) == 1
+
+    multihop_query = make_query(
+        context,
+        "How does `build_index` connect to the repository?",
+        required_source_types=[SourceKind.python_repo],
+    )
+    seeded_service = AgentServiceImpl(
+        store,
+        retrievers,
+        RecordingProvider(),
+        verifier_factory=lambda _generate: FakeVerifier(support=0.0),
+    )
+    investigation = _request(
+        context,
+        policy=PolicyKind.rule,
+        features={"enable_expansion": False, "enable_reranker": False},
+        budget=make_budget(context, max_steps=4),
+    ).model_copy(update={"query": multihop_query})
+    seeded_answer = await seeded_service.investigate(investigation)
+    selected_tools = [
+        (entry.get("selected_action") or {}).get("tool")
+        for entry in seeded_service.get_trace(seeded_answer.investigation_id)
+        if entry.get("selected_action")
+    ]
+    assert selected_tools[:2] == ["entity", "graph"]
+    assert len(retrievers["graph"].queries) == 2
 
 
 def test_policy_loader_validates_b07_artifact_fingerprint(tmp_path: Path) -> None:
@@ -307,7 +480,10 @@ async def test_real_b04_channels_and_b05_graph_retriever_are_assembled(
 
 
 @pytest.mark.asyncio
-async def test_b05_graph_action_uses_entity_index_seed_port(real_b04_retrievers: Any, evidence_bundle: Any) -> None:
+async def test_graph_action_is_omitted_when_entity_retrieval_has_no_seed(
+    real_b04_retrievers: Any,
+    evidence_bundle: Any,
+) -> None:
     context = make_context()
     store, _, _ = evidence_bundle
     tools, _, graph_index = real_b04_retrievers
@@ -315,7 +491,7 @@ async def test_b05_graph_action_uses_entity_index_seed_port(real_b04_retrievers:
         store,
         tools,
         RecordingProvider(),
-        verifier_factory=lambda generate: FakeVerifier(),
+        verifier_factory=lambda generate: FakeVerifier(support=0.0),
     )
     query = make_query(
         context,
@@ -332,8 +508,11 @@ async def test_b05_graph_action_uses_entity_index_seed_port(real_b04_retrievers:
     answer = await service.investigate(request)
 
     assert answer.status is AnswerStatus.insufficient
-    assert len(graph_index.queries) == 1
-    assert graph_index.queries[0].channel is IndexChannel.entity
+    assert graph_index.queries == []
+    assert all(
+        (entry.get("selected_action") or {}).get("tool") != "graph"
+        for entry in service.get_trace(answer.investigation_id)
+    )
 
 
 @pytest.mark.asyncio
@@ -456,6 +635,7 @@ async def test_capability_flags_are_independent_and_expansion_is_bounded(evidenc
                 "initial_budget_ms": 30_000,
                 "initial_max_steps": 6,
                 "family_counts": {},
+                "seed_available": True,
                 "support_rows": [
                     {
                         "facet_id": facet.id,
@@ -549,6 +729,176 @@ async def test_fake_citation_id_is_rejected(evidence_bundle: Any) -> None:
 
     assert answer.status is AnswerStatus.insufficient
     assert answer.claims == []
+
+
+@pytest.mark.asyncio
+async def test_conflicts_need_both_sides_and_resolution_is_rewarded() -> None:
+    context = make_context()
+    support_chunk, support_evidence = make_chunk_evidence(
+        text="The cache remains enabled in the current release."
+    )
+    opposing_chunk, opposing_evidence = make_chunk_evidence(
+        text="The cache is disabled in the current release."
+    )
+    store = FakeStore(
+        {support_chunk.id: support_chunk, opposing_chunk.id: opposing_chunk},
+        {support_evidence.id: support_evidence, opposing_evidence.id: opposing_evidence},
+    )
+    result = RetrievalResult(
+        context=context,
+        hits=[
+            RetrievalHit(
+                chunk_id=support_chunk.id,
+                evidence_ids=[support_evidence.id],
+                score=1.0,
+                channel="bm25",
+                rank=1,
+            ),
+            RetrievalHit(
+                chunk_id=opposing_chunk.id,
+                evidence_ids=[opposing_evidence.id],
+                score=0.9,
+                channel="bm25",
+                rank=2,
+            ),
+        ],
+        usage=Usage(tool_calls=1, count_kind=CountKind.exact),
+    )
+    ledger = EvidenceLedger()
+    await ledger.absorb(result, store, context)
+    query = make_query(context, "What do these passages say?")
+    facet_id = query.subquestions[0].id
+    support_rows = [
+        {
+            "facet_id": facet_id,
+            "evidence_id": support_evidence.id,
+            "support": 1.0,
+            "conflict": False,
+            "duplicate_key": support_chunk.id,
+            "source_kind": "markdown",
+        },
+        {
+            "facet_id": facet_id,
+            "evidence_id": opposing_evidence.id,
+            "support": 0.0,
+            "conflict": True,
+            "duplicate_key": opposing_chunk.id,
+            "source_kind": "markdown",
+        },
+    ]
+    base_state = _state(context, "What do these passages say?")
+    unresolved_conflict = base_state.model_copy(
+        update={
+            "policy_memory": {
+                **base_state.policy_memory,
+                "conflict_facet_ids": [facet_id],
+                "support_rows": support_rows,
+            }
+        }
+    )
+    unresolved_metrics = _metrics(unresolved_conflict, ledger, support_rows)
+    assert unresolved_metrics[2] == 0.0
+    assert _gain_reward(
+        (unresolved_metrics[0], unresolved_metrics[1], 0.0),
+        unresolved_metrics,
+    ) == 0.0
+    resolved = unresolved_conflict.model_copy(
+        update={
+            "policy_memory": {
+                **unresolved_conflict.policy_memory,
+                "resolved_conflict_facet_ids": [facet_id],
+            }
+        }
+    )
+    resolved_metrics = _metrics(resolved, ledger, support_rows)
+    assert resolved_metrics[2] == 1.0
+    assert _gain_reward(unresolved_metrics, resolved_metrics) == pytest.approx(0.1)
+
+    class TwoSidedVerifier:
+        async def evaluate(self, request: VerifyRequest) -> SupportMatrix:
+            return SupportMatrix(
+                rows=[
+                    SupportRow(
+                        facet_id=facet.id,
+                        evidence_id=evidence.id,
+                        support=1.0 if evidence.id == support_evidence.id else 0.0,
+                        conflict=evidence.id == opposing_evidence.id,
+                        reason_code="supports" if evidence.id == support_evidence.id else "contradicts",
+                    )
+                    for facet in request.facets
+                    for evidence in request.evidence
+                ],
+                usage=Usage(count_kind=CountKind.exact),
+            )
+
+    class ConflictAnswerProvider:
+        def __init__(self, *, include_opposition: bool) -> None:
+            self.include_opposition = include_opposition
+
+        async def generate(self, request: Any) -> LLMResult:
+            payload = json.loads(request.untrusted_context)
+            evidence_ids = [item["id"] for item in payload["evidence"]]
+            refs = (
+                evidence_ids
+                if self.include_opposition
+                else [support_evidence.id] if support_evidence.id in evidence_ids else evidence_ids[:1]
+            )
+            return LLMResult(
+                parsed_json={
+                    "status": "conflicted",
+                    "claims": [
+                        {
+                            "text": "The sources conflict about the cache state.",
+                            "evidence_ids": refs,
+                            "relation_ids": [],
+                        }
+                    ],
+                    "unanswered": [],
+                },
+                usage=ModelTokenUsage(input_tokens=8, output_tokens=8, count_kind=CountKind.exact),
+                model="b06-test-provider",
+                revision="deterministic-v1",
+            )
+
+    request = _request(
+        context,
+        features={"enable_graph": False, "enable_expansion": False, "enable_reranker": False},
+        budget=make_budget(context, max_steps=4),
+    ).model_copy(update={"query": query})
+    retrievers = _fake_registry(context, result)
+    service = AgentServiceImpl(
+        store,
+        retrievers,
+        ConflictAnswerProvider(include_opposition=True),
+        verifier_factory=lambda _generate: TwoSidedVerifier(),
+    )
+    answer = await service.investigate(request)
+    assert answer.status is AnswerStatus.conflicted
+    assert set(answer.claims[0].evidence_ids) == {support_evidence.id, opposing_evidence.id}
+    assert "conflict" in answer.claims[0].text.casefold()
+    first_observation = next(
+        entry["observation"]
+        for entry in service.get_trace(answer.investigation_id)
+        if entry.get("observation") is not None
+    )
+    assert first_observation["conflict_resolution_reward"] == pytest.approx(0.1)
+    assert first_observation["reward"] == pytest.approx(0.8)
+
+    refusing_service = AgentServiceImpl(
+        store,
+        retrievers,
+        ConflictAnswerProvider(include_opposition=False),
+        verifier_factory=lambda _generate: TwoSidedVerifier(),
+    )
+    incomplete = await refusing_service.investigate(request)
+    assert incomplete.status is AnswerStatus.insufficient
+    assert incomplete.claims == []
+    last_observation = next(
+        entry["observation"]
+        for entry in refusing_service.get_trace(incomplete.investigation_id)
+        if entry.get("observation") is not None
+    )
+    assert "conflict_resolution_reward" not in last_observation
 
 
 @pytest.mark.asyncio

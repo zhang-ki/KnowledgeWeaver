@@ -146,8 +146,13 @@ def feature_vector(
     query = facet.text if facet else state.query.text
     tokens = _TOKEN.findall(query.casefold())
     lexical_specificity = clamp(len(set(tokens)) / 20.0)
-    symbol_flag = 1.0 if _exact_symbol(query) else 0.0
-    seed_available = 1.0 if state.policy_memory.get("seed_available") or state.paths else 0.0
+    symbol_flag = 1.0 if enable_source_features and _exact_symbol(query) else 0.0
+    seed_available = (
+        1.0
+        if enable_source_features
+        and (state.policy_memory.get("seed_available") or state.paths)
+        else 0.0
+    )
 
     return [
         1.0,
