@@ -104,6 +104,42 @@ class _ConfiguredFakeEmbeddingProvider:
 
 
 @pytest.mark.asyncio
+async def test_published_dense_fingerprints_persist_in_postgres(live_pipeline, short_tmp_path) -> None:
+    corpus_id, source_id = str(uuid4()), str(uuid4())
+    live_pipeline._test_corpus_ids.append(corpus_id)
+    assert live_pipeline.dense is not None
+    collection = live_pipeline.dense.collection(corpus_id)
+    if await live_pipeline.dense.client.collection_exists(collection):
+        pytest.fail("synthetic corpus collection already exists; refusing to alter it")
+    root = short_tmp_path / "persist"
+    root.mkdir()
+    (root / "note.md").write_text("synthetic persisted dense metadata", encoding="utf-8")
+    source = _source(root, corpus_id, source_id)
+
+    try:
+        report = await live_pipeline.ingest(IngestRequest(
+            corpus_id=corpus_id,
+            source_spec=source,
+            idempotency_key=f"b03-dense-persist-{uuid4()}",
+        ))
+        assert report.generation_id
+
+        async with live_pipeline.knowledge_store.database.session() as session:
+            stored_generation = await session.get(GenerationRow, report.generation_id)
+
+        assert stored_generation is not None
+        dense_manifest = stored_generation.index_manifest["dense"]
+        assert dense_manifest["fingerprint"]
+        assert len(dense_manifest["fingerprint"]) == 64
+        assert dense_manifest["configuration_fingerprint"] == "fake-hash-config-16-l2"
+        assert dense_manifest["mode_pair"] == ["document", "query"]
+        assert stored_generation.embedding_fingerprint == dense_manifest["fingerprint"]
+    finally:
+        if await live_pipeline.dense.client.collection_exists(collection):
+            await live_pipeline.dense.client.delete_collection(collection)
+
+
+@pytest.mark.asyncio
 async def test_generation_lifecycle_evidence_filter_delete_rebuild_and_lease(live_pipeline, short_tmp_path) -> None:
     corpus_id, source_id = str(uuid4()), str(uuid4())
     live_pipeline._test_corpus_ids.append(corpus_id)
