@@ -302,12 +302,16 @@ def validate_exploration_records(
     if any(record.split != expected_split for record in records):
         raise ValueError(f"{expected_split} pipeline cannot consume another split")
     grouped: dict[tuple[str, str], list[ActionExplorationRecord]] = defaultdict(list)
-    case_states: dict[str, set[tuple[str, int]]] = defaultdict(set)
+    states_by_case: dict[str, set[tuple[str, int]]] = defaultdict(set)
     for record in records:
         grouped[(record.case_id, record.trajectory_id)].append(record)
-        case_states[record.case_id].add((record.trajectory_id, record.state_index))
-    if any(len(states) > MAX_TRAIN_STATES_PER_CASE for states in case_states.values()):
-        raise ValueError("each query may contribute at most six explored states")
+        # Trajectory IDs distinguish states, but the six-state budget belongs to the case.
+        states_by_case[record.case_id].add((record.trajectory_id, record.state_index))
+    for case_id, states in states_by_case.items():
+        if len(states) > MAX_TRAIN_STATES_PER_CASE:
+            raise ValueError(
+                f"case {case_id} may contribute at most six explored states across trajectories"
+            )
     for rows in grouped.values():
         by_state: dict[int, list[ActionExplorationRecord]] = defaultdict(list)
         for row in rows:

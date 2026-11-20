@@ -19,7 +19,7 @@ from pydantic import (
 
 from knowledge_weaver.evaluation.contracts import PreparedBenchmarkCase
 from knowledge_weaver.evaluation.redaction import redact_text
-from knowledge_weaver.evaluation.scheduling import ExperimentSuite
+from knowledge_weaver.evaluation.scheduling import ExperimentSuite, valid_generation_binding
 
 NonEmpty = StringConstraints(strip_whitespace=True, min_length=1)
 CountKind = Literal["exact", "estimated", "unavailable"]
@@ -125,6 +125,8 @@ class QueryRunRecord(RunModel):
     seed: int
     ablation_id: str | None = None
     case_id: str
+    generation_id: str | None = None
+    generation_sha256: str | None = None
     split: Literal["train", "dev", "test"]
     answerable: bool
     cache_state: Literal["cold", "warm"]
@@ -151,6 +153,12 @@ class QueryRunRecord(RunModel):
 
     @model_validator(mode="after")
     def run_totals_match_attempts(self) -> QueryRunRecord:
+        if (self.generation_id is None) != (self.generation_sha256 is None):
+            raise ValueError("query result generation ID and SHA-256 must be recorded together")
+        if self.generation_id is not None and not valid_generation_binding(
+            self.generation_id, self.generation_sha256
+        ):
+            raise ValueError("query result generation ID or SHA-256 is invalid")
         if [item.attempt for item in self.attempts] != list(range(1, len(self.attempts) + 1)):
             raise ValueError("query attempts must be numbered sequentially from one")
         if any(item.cache_state != self.cache_state for item in self.attempts):
@@ -178,6 +186,8 @@ class QueryRunRecord(RunModel):
             or self.status != "complete"
             or self.measurements is None
             or self.budget_violations
+            or self.generation_id is None
+            or self.generation_sha256 is None
             or (
                 self.answerable
                 and (
@@ -251,6 +261,8 @@ async def run_query_with_retries(
     *,
     formal_dataset: bool,
     cache_state: Literal["cold", "warm"] = "cold",
+    generation_id: str | None = None,
+    generation_sha256: str | None = None,
     retry_delay_seconds: float = 0.25,
 ) -> QueryRunRecord:
     """Run one query sequentially; transient failures get at most three total attempts."""
@@ -260,6 +272,12 @@ async def run_query_with_retries(
         raise ValueError("mock/synthetic provider results cannot enter a formal run")
     if formal_dataset and case.case.split.value != "test":
         raise ValueError("formal query runs are restricted to the frozen test split")
+    if (generation_id is None) != (generation_sha256 is None):
+        raise ValueError("query execution generation ID and SHA-256 must be supplied together")
+    if formal_dataset and not valid_generation_binding(generation_id, generation_sha256):
+        raise ValueError("formal query runs require the bound actual generation ID and SHA-256")
+    if generation_id is not None and not valid_generation_binding(generation_id, generation_sha256):
+        raise ValueError("query execution generation ID or SHA-256 is invalid")
 
     attempts: list[AttemptOutcome] = []
     started = time.perf_counter()
@@ -349,6 +367,8 @@ async def run_query_with_retries(
         seed=suite.seed,
         ablation_id=suite.ablation_id,
         case_id=case.case.id,
+        generation_id=generation_id,
+        generation_sha256=generation_sha256,
         split=case.case.split.value,
         answerable=case.case.answerable,
         cache_state=cache_state,

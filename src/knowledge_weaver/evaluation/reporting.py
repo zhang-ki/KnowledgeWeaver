@@ -277,6 +277,33 @@ def build_report(
     matrix_manifest: Mapping[str, Any], records: Sequence[QueryRunRecord]
 ) -> dict[str, Any]:
     schedule = matrix_manifest.get("schedule", matrix_manifest)
+    manifest_generation_id = matrix_manifest.get("generation_id")
+    manifest_generation_sha256 = matrix_manifest.get("generation_sha256")
+    schedule_generation_id = schedule.get("generation_id")
+    schedule_generation_sha256 = schedule.get("generation_sha256")
+    if (
+        manifest_generation_id is not None
+        and schedule_generation_id is not None
+        and manifest_generation_id != schedule_generation_id
+    ):
+        raise ValueError("matrix manifest and schedule generation IDs differ")
+    if (
+        manifest_generation_sha256 is not None
+        and schedule_generation_sha256 is not None
+        and manifest_generation_sha256 != schedule_generation_sha256
+    ):
+        raise ValueError("matrix manifest and schedule generation SHA-256 values differ")
+    generation_id = manifest_generation_id or schedule_generation_id
+    generation_sha256 = manifest_generation_sha256 or schedule_generation_sha256
+    if records:
+        if not generation_id or not generation_sha256:
+            raise ValueError("matrix manifest is missing the generation identity for per-query results")
+        if any(
+            record.generation_id != generation_id
+            or record.generation_sha256 != generation_sha256
+            for record in records
+        ):
+            raise ValueError("per-query generation identity does not match the matrix manifest")
     suite_statuses = matrix_manifest.get("suite_statuses", [])
     blocked_count = sum(
         item.get("status") == "BLOCKED"
@@ -289,6 +316,8 @@ def build_report(
     report = {
         "schema_version": 1,
         "status": status,
+        "generation_id": generation_id,
+        "generation_sha256": generation_sha256,
         "protocol_id": schedule.get("protocol_id"),
         "formal_suite_count": schedule.get("formal_suite_count", len(schedule.get("suites", []))),
         "blocked_suite_count": blocked_count,

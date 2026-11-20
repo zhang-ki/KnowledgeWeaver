@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -19,6 +20,16 @@ REQUIRED_DEPENDENCIES: dict[str, str] = {
     "B06": "8a4ede85c363f4cf18e772dd57be9984f265153f",
 }
 MINIMUM_TEST_CASES = 40
+_GENERATION_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def valid_generation_binding(generation_id: str | None, generation_sha256: str | None) -> bool:
+    return bool(
+        generation_id
+        and generation_id.strip()
+        and generation_sha256
+        and _GENERATION_SHA256.fullmatch(generation_sha256)
+    )
 
 
 class SuiteStatus(StrEnum):
@@ -54,6 +65,8 @@ class MatrixSchedule:
     protocol_sha256: str
     dataset_sha256: str
     dataset_status: str
+    generation_id: str | None
+    generation_sha256: str | None
     dependency_commits: dict[str, str]
     provider_profiles: tuple[str, ...]
     budget_approved: bool
@@ -77,6 +90,8 @@ class MatrixSchedule:
             "protocol_sha256": self.protocol_sha256,
             "dataset_sha256": self.dataset_sha256,
             "dataset_status": self.dataset_status,
+            "generation_id": self.generation_id,
+            "generation_sha256": self.generation_sha256,
             "dependency_commits": dict(sorted(self.dependency_commits.items())),
             "provider_profiles": list(self.provider_profiles),
             "budget_approved": self.budget_approved,
@@ -113,6 +128,8 @@ def build_formal_matrix(
     budget_approved: bool,
     policy_artifact_ready: bool = False,
     policy_artifact_sha256: str | None = None,
+    generation_id: str | None = None,
+    generation_sha256: str | None = None,
 ) -> MatrixSchedule:
     """Emit every frozen suite, retaining blocked groups instead of shrinking the matrix."""
     blockers: list[str] = []
@@ -122,6 +139,11 @@ def build_formal_matrix(
         )
         if not dataset.manifest.blockers:
             blockers.append("BLOCKED_INPUTS: the prepared Gold dataset is not FROZEN")
+
+    if not generation_id or not generation_sha256:
+        blockers.append("BLOCKED_GENERATION: actual generation ID and SHA-256 are required")
+    elif not valid_generation_binding(generation_id, generation_sha256):
+        blockers.append("BLOCKED_GENERATION: actual generation ID or SHA-256 is invalid")
 
     for name, expected_sha in REQUIRED_DEPENDENCIES.items():
         actual_sha = dependency_commits.get(name)
@@ -211,6 +233,8 @@ def build_formal_matrix(
         dataset_sha256=dataset.manifest.cases_sha256
         or _stable_hash(dataset.manifest.model_dump(mode="json")),
         dataset_status=dataset.manifest.status.value,
+        generation_id=generation_id,
+        generation_sha256=generation_sha256,
         dependency_commits=dict(dependency_commits),
         provider_profiles=tuple(sorted(set(provider_profiles))),
         budget_approved=budget_approved,

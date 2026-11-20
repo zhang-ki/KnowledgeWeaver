@@ -19,7 +19,11 @@ from knowledge_weaver.evaluation.runs import (
     QueryRunRecord,
     run_query_with_retries,
 )
-from knowledge_weaver.evaluation.scheduling import MatrixSchedule, SuiteStatus
+from knowledge_weaver.evaluation.scheduling import (
+    MatrixSchedule,
+    SuiteStatus,
+    valid_generation_binding,
+)
 
 CaseT = TypeVar("CaseT")
 
@@ -55,6 +59,14 @@ class MatrixExecutionReport:
     blockers: tuple[str, ...] = ()
     policy_training_summary: Mapping[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        if any(
+            record.generation_id != self.schedule.generation_id
+            or record.generation_sha256 != self.schedule.generation_sha256
+            for record in self.query_records
+        ):
+            raise ValueError("matrix and per-query generation identities must match")
+
     @property
     def missing_runs(self) -> tuple[str, ...]:
         return tuple(
@@ -67,6 +79,8 @@ class MatrixExecutionReport:
         return {
             "schema_version": 1,
             "status": self.status.value,
+            "generation_id": self.schedule.generation_id,
+            "generation_sha256": self.schedule.generation_sha256,
             "formal_suite_count": len(self.schedule.suites),
             "expected_query_runs": self.schedule.expected_query_runs,
             "completed_query_records": len(self.query_records),
@@ -136,6 +150,14 @@ async def run_formal_matrix(
     """Execute every scheduled suite serially or return explicit blockers without running."""
     if schedule.status is SuiteStatus.blocked:
         return _blocked_report(schedule)
+    if not valid_generation_binding(schedule.generation_id, schedule.generation_sha256):
+        return _blocked_report(
+            schedule,
+            "BLOCKED_GENERATION: scheduled actual generation ID and SHA-256 are missing or invalid",
+        )
+    generation_id = schedule.generation_id
+    generation_sha256 = schedule.generation_sha256
+    assert generation_id is not None and generation_sha256 is not None
     if not dataset.ready or dataset.manifest.cases_sha256 != schedule.dataset_sha256:
         return _blocked_report(schedule, "BLOCKED_INPUTS: dataset readiness/hash differs from schedule")
     if gold_mapping is None or not gold_mapping.ready:
@@ -145,6 +167,16 @@ async def run_formal_matrix(
         return _blocked_report(schedule, f"BLOCKED_GOLD_MAPPING: {details}")
     if gold_mapping.dataset_sha256 != schedule.dataset_sha256:
         return _blocked_report(schedule, "BLOCKED_GOLD_MAPPING: mapping dataset hash differs from schedule")
+    if gold_mapping.generation_id != generation_id:
+        return _blocked_report(
+            schedule,
+            "BLOCKED_GENERATION: Gold mapping generation ID differs from the scheduled actual generation",
+        )
+    if gold_mapping.generation_sha256 != generation_sha256:
+        return _blocked_report(
+            schedule,
+            "BLOCKED_GENERATION: Gold mapping generation SHA-256 differs from the scheduled actual generation",
+        )
     if executor.provider_kind != "real":
         return _blocked_report(schedule, "BLOCKED_PROVIDER: mock/synthetic executors cannot run formal suites")
     if not schedule.policy_artifact_ready or not schedule.policy_artifact_sha256:
@@ -184,6 +216,8 @@ async def run_formal_matrix(
                     suite,
                     formal_dataset=True,
                     cache_state=cache_state,
+                    generation_id=generation_id,
+                    generation_sha256=generation_sha256,
                     retry_delay_seconds=retry_delay_seconds,
                 )
                 violations = _budget_violations(record, budget_by_id[suite.budget_id])

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -9,12 +10,18 @@ import pytest
 from test_final_mapping import _fixture
 
 from knowledge_weaver.agent.weights import ACTION_FAMILIES
-from knowledge_weaver.evaluation.contracts import RidgePolicyWeights
-from knowledge_weaver.evaluation.dataset import load_dataset
+from knowledge_weaver.evaluation.contracts import DatasetStatus, RidgePolicyWeights
+from knowledge_weaver.evaluation.dataset import DatasetSummary, LoadedDataset, load_dataset
+from knowledge_weaver.evaluation.gold_mapping import GoldMappingReport
 from knowledge_weaver.evaluation.protocol import load_protocol
 from knowledge_weaver.evaluation.redaction import canonical_json_line
-from knowledge_weaver.evaluation.reporting import summarize_query_runs
-from knowledge_weaver.evaluation.runner import _seeded_case_order
+from knowledge_weaver.evaluation.reporting import build_report, summarize_query_runs
+from knowledge_weaver.evaluation.runner import (
+    MatrixExecutionReport,
+    _seeded_case_order,
+    run_formal_matrix,
+    write_execution_artifacts,
+)
 from knowledge_weaver.evaluation.runs import (
     AttemptOutcome,
     QueryMeasurements,
@@ -156,6 +163,209 @@ def test_blocked_gold_keeps_all_111_suites_and_minimum_run_count() -> None:
     assert all(item.status is SuiteStatus.blocked for item in schedule.suites)
     assert any(item.startswith("BLOCKED_INPUTS:") for item in schedule.blockers)
     assert any(item.startswith("BLOCKED_POLICY:") for item in schedule.blockers)
+
+
+def test_train_state_limit_counts_unique_states_across_trajectory_ids() -> None:
+    records: list[ActionExplorationRecord] = []
+    for trajectory_number in range(3):
+        for state_index in range(3):
+            values = _record("train0", state_index).model_dump(mode="json")
+            values["trajectory_id"] = f"trajectory-{trajectory_number}"
+            values["action_id"] = f"action-{trajectory_number}-{state_index}"
+            values["state_index"] = state_index
+            records.append(ActionExplorationRecord.model_validate(values))
+
+    validate_exploration_records(records[:6], expected_split="train")
+    with pytest.raises(ValueError, match="at most six explored states"):
+        validate_exploration_records(records, expected_split="train")
+
+
+@pytest.mark.parametrize(
+    ("generation_id", "generation_sha256"),
+    [(None, None), ("generation-1", "z" * 64), ("   ", "c" * 64)],
+)
+def test_formal_schedule_blocks_missing_or_invalid_generation_binding(
+    generation_id: str | None, generation_sha256: str | None
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol = load_protocol(root / "benchmarks/configs/b07_protocol_v1.json")
+    dataset = load_dataset(root)
+    schedule = build_formal_matrix(
+        protocol,
+        dataset,
+        dependency_commits=REQUIRED_DEPENDENCIES,
+        dependencies_integrated=True,
+        provider_profiles=("deepseek", "qwen-embedding"),
+        provider_ready=True,
+        budget_approved=True,
+        policy_artifact_ready=True,
+        policy_artifact_sha256="b" * 64,
+        generation_id=generation_id,
+        generation_sha256=generation_sha256,
+    )
+
+    assert schedule.status is SuiteStatus.blocked
+    assert len(schedule.suites) == 111
+    assert any(item.startswith("BLOCKED_GENERATION:") for item in schedule.blockers)
+
+
+def _ready_dataset_for_generation_gate(root: Path) -> LoadedDataset:
+    blocked_dataset = load_dataset(root)
+    manifest = blocked_dataset.manifest.model_copy(
+        update={
+            "status": DatasetStatus.frozen,
+            "case_count": 100,
+            "cases_file": "synthetic-cases.jsonl",
+            "cases_sha256": "a" * 64,
+            "blockers": [],
+        }
+    )
+    summary = DatasetSummary(
+        case_count=100,
+        category_counts={},
+        language_counts={},
+        split_counts={"train": 30, "dev": 20, "test": 50},
+        split_family_counts={"train": 5, "dev": 5, "test": 5},
+        unanswerable_count=10,
+    )
+    return LoadedDataset(manifest=manifest, cases=(), summary=summary)
+
+
+class _UnexpectedRealExecutor:
+    provider_kind = "real"
+
+    async def execute_query(self, *args, **kwargs):
+        raise AssertionError("generation mismatch must block before provider execution")
+
+
+def _ready_formal_schedule(root: Path):
+    protocol = load_protocol(root / "benchmarks/configs/b07_protocol_v1.json")
+    dataset = _ready_dataset_for_generation_gate(root)
+    schedule = build_formal_matrix(
+        protocol,
+        dataset,
+        dependency_commits=REQUIRED_DEPENDENCIES,
+        dependencies_integrated=True,
+        provider_profiles=("deepseek", "qwen-embedding"),
+        provider_ready=True,
+        budget_approved=True,
+        policy_artifact_ready=True,
+        policy_artifact_sha256="b" * 64,
+        generation_id="generation-expected",
+        generation_sha256="c" * 64,
+    )
+    return protocol, dataset, schedule
+
+
+@pytest.mark.parametrize(
+    ("mapped_generation_id", "mapped_generation_sha256"),
+    [
+        ("generation-other", "c" * 64),
+        ("generation-expected", "d" * 64),
+    ],
+)
+def test_formal_runner_blocks_gold_generation_mismatch_before_running(
+    mapped_generation_id: str, mapped_generation_sha256: str
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, dataset, schedule = _ready_formal_schedule(root)
+    mapping = GoldMappingReport(
+        generation_id=mapped_generation_id,
+        generation_sha256=mapped_generation_sha256,
+        dataset_sha256=schedule.dataset_sha256,
+        span_mappings=(),
+        path_mappings=(),
+        blockers=(),
+    )
+
+    report = _drive_immediate(
+        run_formal_matrix(
+            schedule,
+            protocol,
+            dataset,
+            mapping,
+            _UnexpectedRealExecutor(),
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert not report.query_records
+    assert any(item.startswith("BLOCKED_GENERATION:") for item in report.blockers)
+
+
+def test_formal_runner_requires_ready_gold_mapping() -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, dataset, schedule = _ready_formal_schedule(root)
+    mapping = GoldMappingReport(
+        generation_id="generation-expected",
+        generation_sha256="c" * 64,
+        dataset_sha256=schedule.dataset_sha256,
+        span_mappings=(),
+        path_mappings=(),
+        blockers=("missing reviewed span",),
+    )
+
+    report = _drive_immediate(
+        run_formal_matrix(
+            schedule,
+            protocol,
+            dataset,
+            mapping,
+            _UnexpectedRealExecutor(),
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
+
+
+def test_generation_identity_is_written_through_matrix_and_query_artifacts(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[2]
+    _protocol, _dataset, schedule = _ready_formal_schedule(root)
+    record = _drive_immediate(
+        run_query_with_retries(
+            _SyntheticExecutor(fail_until=0),
+            _fixture()[0],
+            _suite(),
+            formal_dataset=False,
+            generation_id=schedule.generation_id,
+            generation_sha256=schedule.generation_sha256,
+            retry_delay_seconds=0,
+        )
+    )
+    matrix = MatrixExecutionReport(
+        schedule=schedule,
+        status=SuiteStatus.blocked,
+        suite_statuses=(),
+        query_records=(record,),
+        blockers=("synthetic fixture; not formal quality evidence",),
+    )
+    assert schedule.to_dict()["generation_id"] == "generation-expected"
+    assert matrix.to_dict()["generation_sha256"] == "c" * 64
+
+    paths = write_execution_artifacts(matrix, repository_root=tmp_path)
+    manifest = json.loads(Path(paths["matrix_manifest"]).read_text(encoding="utf-8"))
+    query = json.loads(Path(paths["per_query"]).read_text(encoding="utf-8").splitlines()[0])
+    assert manifest["generation_id"] == query["generation_id"] == "generation-expected"
+    assert manifest["generation_sha256"] == query["generation_sha256"] == "c" * 64
+
+    rebuilt = build_report(manifest, [QueryRunRecord.model_validate(query)])
+    assert rebuilt["generation_id"] == "generation-expected"
+    assert rebuilt["generation_sha256"] == "c" * 64
+
+    mismatched_manifest = {**manifest, "generation_id": "generation-mismatch"}
+    with pytest.raises(ValueError, match="generation IDs differ"):
+        build_report(mismatched_manifest, [QueryRunRecord.model_validate(query)])
+
+    mismatched_query = QueryRunRecord.model_validate(
+        {**query, "generation_id": "generation-mismatch"}
+    )
+    with pytest.raises(ValueError, match="generation"):
+        build_report(manifest, [mismatched_query])
 
 
 def test_train_only_fit_selects_on_dev_and_cannot_write_fixture_weights(tmp_path: Path) -> None:
