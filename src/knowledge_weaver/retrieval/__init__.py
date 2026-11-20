@@ -1,0 +1,22 @@
+"""Generation-scoped multi-channel retrieval and rank fusion for B04."""
+
+from .hybrid import HybridRetriever, RerankRecord, RetrievalRun
+from .indexed import (
+    Bm25Retriever,
+    DenseRetriever,
+    EntityRetriever,
+    SymbolRetriever,
+)
+from .rrf import RRF_K, reciprocal_rank_fusion
+
+__all__ = [
+    "RRF_K",
+    "Bm25Retriever",
+    "DenseRetriever",
+    "EntityRetriever",
+    "HybridRetriever",
+    "RerankRecord",
+    "RetrievalRun",
+    "SymbolRetriever",
+    "reciprocal_rank_fusion",
+]
