@@ -3,13 +3,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from knowledge_weaver.indexing.bm25 import TOKENIZER_VERSION, Bm25Index, tokenize
+from knowledge_weaver.indexing.dense import QdrantDenseIndex
 from knowledge_weaver.indexing.symbol import EntityIndex, SymbolIndex
 from knowledge_weaver.models import IndexChannel, IndexQuery, QueryContext
+from knowledge_weaver.providers.fake import FakeEmbeddingProvider
 
 
 @pytest.fixture
@@ -80,3 +83,53 @@ def test_symbol_exact_prefix_and_entity_alias_scoping(short_tmp_path) -> None:
     assert {item.chunk_id for item in aliases} == {chunk_exact, chunk_alias}
     filtered = _run_pure_async(entity.search(IndexQuery(channel=IndexChannel.entity, context=_context(corpus, generation, []), text="qz", top_k=5)))
     assert filtered == []
+
+
+@pytest.mark.parametrize(
+    "payload_update",
+    [
+        pytest.param({"dimension": 3}, id="dimension"),
+        pytest.param({"model": "different-model"}, id="metadata"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dense_search_rejects_published_dimension_and_metadata_mismatch(payload_update) -> None:
+    class QueryClient:
+        def __init__(self) -> None:
+            self.queried = False
+
+        async def collection_exists(self, _collection: str) -> bool:
+            return True
+
+        async def query_points(self, *_args, **_kwargs):
+            self.queried = True
+            payload = {
+                "embedding_mode": "document",
+                "dimension": 4,
+                "normalized": True,
+                "model": "fake-hash-embedding-v1",
+                "revision": "fixed-v1",
+                "chunk_id": str(uuid4()),
+            }
+            payload.update(payload_update)
+            return SimpleNamespace(points=[SimpleNamespace(payload=payload, score=0.9)])
+
+        async def close(self) -> None:
+            return None
+
+    corpus, generation = str(uuid4()), str(uuid4())
+    index = QdrantDenseIndex("http://127.0.0.1:1", FakeEmbeddingProvider(4))
+    client = QueryClient()
+    index.client = client
+    query = IndexQuery(
+        channel=IndexChannel.dense,
+        context=_context(corpus, generation),
+        text="sample query",
+        top_k=1,
+    )
+
+    with pytest.raises(ValueError, match="query embedding does not match published document embedding fingerprint"):
+        await index.search(query)
+
+    assert client.queried
+    await index.close()

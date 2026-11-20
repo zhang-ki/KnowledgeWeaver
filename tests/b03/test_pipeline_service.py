@@ -117,14 +117,26 @@ async def test_generation_lifecycle_evidence_filter_delete_rebuild_and_lease(liv
     updated = await live_pipeline.ingest(IngestRequest(corpus_id=corpus_id, source_spec=source, idempotency_key="b03-lifecycle-2"))
     assert updated.generation_id != first.generation_id
     assert await live_pipeline.knowledge_store.get_chunks(generation.chunk_ids, leased)
+    updated_generation = await live_pipeline.knowledge_store.generation(updated.generation_id)
+    deleted_chunk_ids = list(updated_generation.chunk_ids)
+    assert deleted_chunk_ids
     future = datetime.now(UTC) + timedelta(hours=25)
-    assert first.generation_id not in await live_pipeline.collect_garbage(corpus_id, now=future)
+    leased_gc = await live_pipeline.collect_garbage(corpus_id, now=future)
+    assert first.generation_id not in leased_gc
+    assert updated.generation_id not in leased_gc
     await live_pipeline.knowledge_store.release_lease(leased.request_id)
-    assert first.generation_id in await live_pipeline.collect_garbage(corpus_id, now=future)
+    retained_gc = await live_pipeline.collect_garbage(corpus_id, now=datetime.now(UTC))
+    assert first.generation_id not in retained_gc
+    assert updated.generation_id not in retained_gc
+    expired_gc = await live_pipeline.collect_garbage(corpus_id, now=future)
+    assert first.generation_id in expired_gc
+    assert updated.generation_id not in expired_gc
     deleted = await live_pipeline.delete_source(DeleteSourceRequest(corpus_id=corpus_id, source_id=source_id, idempotency_key="b03-delete-1"))
     assert deleted.generation_id is not None and deleted.generation_id != updated.generation_id
     current = await live_pipeline.knowledge_store.resolve_context(corpus_id, str(uuid4()))
     assert await live_pipeline.knowledge_store.get_chunks([], current) == []
+    with pytest.raises(KnowledgeWeaverError, match="outside the query generation"):
+        await live_pipeline.knowledge_store.get_chunks(deleted_chunk_ids, current)
     rebuilt = await live_pipeline.ingest(IngestRequest(corpus_id=corpus_id, source_spec=source, idempotency_key="b03-lifecycle-3"))
     assert rebuilt.generation_id != deleted.generation_id
     after_rebuild = await live_pipeline.knowledge_store.resolve_context(corpus_id, str(uuid4()))
