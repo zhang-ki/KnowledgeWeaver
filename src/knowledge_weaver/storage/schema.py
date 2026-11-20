@@ -3,7 +3,16 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -17,6 +26,16 @@ class CorpusRow(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     active_generation_id: Mapped[str | None] = mapped_column(String(36))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["id", "active_generation_id"],
+            ["generations.corpus_id", "generations.id"],
+            name="fk_corpora_active_generation_same_corpus",
+            deferrable=True,
+            initially="DEFERRED",
+            use_alter=True,
+        ),
+    )
 
 
 class SourceRow(Base):
@@ -146,6 +165,7 @@ class GenerationRow(Base):
     generation_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (UniqueConstraint("corpus_id", "id", name="uq_generation_corpus_id"),)
 
 
 class GenerationSourceVersionRow(Base):

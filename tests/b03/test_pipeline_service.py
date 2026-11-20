@@ -9,7 +9,8 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 
 from knowledge_weaver.core.errors import KnowledgeWeaverError
 from knowledge_weaver.models import DeleteSourceRequest, IngestRequest, Source, SourceKind
@@ -142,6 +143,44 @@ async def test_generation_lifecycle_evidence_filter_delete_rebuild_and_lease(liv
     after_rebuild = await live_pipeline.knowledge_store.resolve_context(corpus_id, str(uuid4()))
     rebuilt_generation = await live_pipeline.knowledge_store.generation(rebuilt.generation_id)
     assert await live_pipeline.knowledge_store.get_chunk_evidence(rebuilt_generation.chunk_ids, after_rebuild)
+
+
+@pytest.mark.asyncio
+async def test_active_generation_rejects_missing_and_cross_corpus_targets(live_pipeline) -> None:
+    corpus_id, other_corpus_id, generation_id = (str(uuid4()) for _ in range(3))
+    live_pipeline._test_corpus_ids.extend((corpus_id, other_corpus_id))
+    now = datetime.now(UTC)
+    async with live_pipeline.knowledge_store.database.session() as session:
+        session.add_all([
+            CorpusRow(id=corpus_id, active_generation_id=None, created_at=now),
+            CorpusRow(id=other_corpus_id, active_generation_id=None, created_at=now),
+            GenerationRow(
+                id=generation_id,
+                corpus_id=corpus_id,
+                state="published",
+                source_version_ids=[],
+                index_manifest={},
+                embedding_fingerprint="test-fingerprint",
+                generation_hash="0" * 64,
+                created_at=now,
+                published_at=now,
+            ),
+        ])
+        await session.flush()
+        await session.execute(update(CorpusRow).where(CorpusRow.id == corpus_id).values(active_generation_id=generation_id))
+        await session.commit()
+
+    async with live_pipeline.knowledge_store.database.session() as session:
+        await session.execute(update(CorpusRow).where(CorpusRow.id == other_corpus_id).values(active_generation_id=generation_id))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
+
+    async with live_pipeline.knowledge_store.database.session() as session:
+        await session.execute(update(CorpusRow).where(CorpusRow.id == corpus_id).values(active_generation_id=str(uuid4())))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
 
 
 @pytest.mark.asyncio
