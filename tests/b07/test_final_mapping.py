@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
+
+import pytest
 
 from knowledge_weaver.evaluation.contracts import (
     GoldPathEdge,
@@ -14,6 +17,7 @@ from knowledge_weaver.evaluation.contracts import (
     SourceLicense,
     human_review_digest,
 )
+from knowledge_weaver.evaluation.generation_binding import GenerationBindingError
 from knowledge_weaver.evaluation.gold_mapping import (
     GoldMappingStatus,
     map_gold_to_generation,
@@ -30,6 +34,8 @@ from knowledge_weaver.models.contracts import (
     ChunkSpan,
     Document,
     Evidence,
+    Generation,
+    GenerationState,
     Language,
     MarkdownLocator,
     Path,
@@ -218,6 +224,59 @@ def _fixture(
     return prepared, source, document, chunks, evidence, relations
 
 
+def _generation_for(
+    document: Document,
+    chunks: list[Chunk],
+    evidence: list[Evidence],
+    relations: list[Relation],
+) -> Generation:
+    members = {
+        "source_version": ["00000000-0000-4000-8000-000000000013"],
+        "document": [document.id],
+        "chunk": [item.id for item in chunks],
+        "evidence": [item.id for item in evidence],
+        "provenance": sorted({item.provenance_id for item in evidence}),
+        "entity": sorted(
+            {entity_id for item in relations for entity_id in (item.subject_id, item.object_id)}
+        ),
+        "mention": [],
+        "relation": [item.id for item in relations],
+    }
+    member_hashes = {
+        kind: hashlib.sha256("\n".join(sorted(ids)).encode("utf-8")).hexdigest()
+        for kind, ids in members.items()
+    }
+    index_manifest: dict[str, object] = {
+        "member_hashes": member_hashes,
+        "indexes": {"fixture": "mapping-test"},
+    }
+    source_version_ids = members["source_version"]
+    generation_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "source_version_ids": source_version_ids,
+                "member_hashes": member_hashes,
+                "index_manifest": index_manifest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    index_manifest["generation_hash"] = generation_sha256
+    return Generation(
+        id="00000000-0000-4000-8000-000000000014",
+        corpus_id="00000000-0000-4000-8000-000000000015",
+        state=GenerationState.READY,
+        source_version_ids=source_version_ids,
+        chunk_ids=members["chunk"],
+        entity_ids=members["entity"],
+        relation_ids=members["relation"],
+        index_manifest=index_manifest,
+        embedding_fingerprint="synthetic-mapping-test-v1",
+        published_at=NOW,
+    )
+
+
 def _map(fixture: tuple[PreparedBenchmarkCase, SourceAsset, Document, list[Chunk], list[Evidence], list[Relation]]):
     case, source, document, chunks, evidence, relations = fixture
     return map_gold_to_generation(
@@ -227,8 +286,7 @@ def _map(fixture: tuple[PreparedBenchmarkCase, SourceAsset, Document, list[Chunk
         chunks,
         evidence,
         relations,
-        generation_id="generation-1",
-        generation_sha256="a" * 64,
+        generation=_generation_for(document, chunks, evidence, relations),
         dataset_sha256="b" * 64,
     )
 
@@ -242,6 +300,41 @@ def test_gold_span_maps_to_overlapping_leaf_group_and_strict_chunk_recall() -> N
     assert len(mapping.evidence_ids) == 2
     assert mapped_evidence_group_recall([mapping.chunk_ids[0]], [mapping]) == 1.0
     assert strict_chunk_recall([mapping.chunk_ids[0]], [mapping]) == 0.5
+
+
+def test_gold_mapping_identity_is_derived_from_generation_manifest() -> None:
+    case, source, document, chunks, evidence, relations = _fixture()
+    generation = _generation_for(document, chunks, evidence, relations)
+    report = map_gold_to_generation(
+        [case],
+        [source],
+        [document],
+        chunks,
+        evidence,
+        relations,
+        generation=generation,
+        dataset_sha256="b" * 64,
+    )
+
+    assert report.generation_id == generation.id
+    assert report.generation_sha256 == generation.index_manifest["generation_hash"]
+
+
+def test_gold_mapping_rejects_evidence_not_in_the_generation_manifest() -> None:
+    case, source, document, chunks, evidence, relations = _fixture()
+    generation = _generation_for(document, chunks, evidence, relations)
+
+    with pytest.raises(GenerationBindingError, match="membership"):
+        map_gold_to_generation(
+            [case],
+            [source],
+            [document],
+            chunks,
+            evidence[:-1],
+            relations,
+            generation=generation,
+            dataset_sha256="b" * 64,
+        )
 
 
 def test_repeated_quote_in_same_locator_is_ambiguous() -> None:

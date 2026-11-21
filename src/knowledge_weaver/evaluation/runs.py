@@ -18,8 +18,17 @@ from pydantic import (
 )
 
 from knowledge_weaver.evaluation.contracts import PreparedBenchmarkCase
+from knowledge_weaver.evaluation.generation_binding import (
+    GenerationBindingError,
+    PersistedGenerationLookup,
+    VerifiedGeneration,
+    resolve_generation,
+    valid_generation_binding,
+    verify_generation_manifest,
+)
 from knowledge_weaver.evaluation.redaction import redact_text
-from knowledge_weaver.evaluation.scheduling import ExperimentSuite, valid_generation_binding
+from knowledge_weaver.evaluation.scheduling import ExperimentSuite
+from knowledge_weaver.models.contracts import Generation
 
 NonEmpty = StringConstraints(strip_whitespace=True, min_length=1)
 CountKind = Literal["exact", "estimated", "unavailable"]
@@ -104,11 +113,19 @@ class AttemptOutcome(RunModel):
     elapsed_ms: int = Field(default=0, ge=0)
     strategy_latency_ms: int = Field(default=0, ge=0)
     cache_state: Literal["cold", "warm"] = "cold"
+    executed_generation_id: str | None = None
+    executed_generation_sha256: str | None = None
     response_summary_sha256: str | None = None
     measurements: QueryMeasurements | None = None
 
     @model_validator(mode="after")
     def outcome_shape_matches(self) -> AttemptOutcome:
+        if (self.executed_generation_id is None) != (self.executed_generation_sha256 is None):
+            raise ValueError("executor-confirmed Generation ID and digest must be recorded together")
+        if self.executed_generation_id is not None and not valid_generation_binding(
+            self.executed_generation_id, self.executed_generation_sha256
+        ):
+            raise ValueError("executor-confirmed Generation binding is invalid")
         if self.status == "complete" and (self.failure_code is not None or self.measurements is None):
             raise ValueError("a complete attempt requires measurements and no failure code")
         if self.status == "failed" and not self.failure_code:
@@ -159,6 +176,15 @@ class QueryRunRecord(RunModel):
             self.generation_id, self.generation_sha256
         ):
             raise ValueError("query result generation ID or SHA-256 is invalid")
+        if self.generation_id is not None and any(
+            attempt.status == "complete"
+            and (
+                attempt.executed_generation_id != self.generation_id
+                or attempt.executed_generation_sha256 != self.generation_sha256
+            )
+            for attempt in self.attempts
+        ):
+            raise ValueError("completed query attempt does not confirm the recorded Generation")
         if [item.attempt for item in self.attempts] != list(range(1, len(self.attempts) + 1)):
             raise ValueError("query attempts must be numbered sequentially from one")
         if any(item.cache_state != self.cache_state for item in self.attempts):
@@ -251,6 +277,8 @@ class BenchmarkExecutor(Protocol):
         *,
         attempt: int,
         cache_state: Literal["cold", "warm"],
+        generation: Generation | None = None,
+        generation_sha256: str | None = None,
     ) -> AttemptOutcome: ...
 
 
@@ -261,6 +289,8 @@ async def run_query_with_retries(
     *,
     formal_dataset: bool,
     cache_state: Literal["cold", "warm"] = "cold",
+    generation_resolver: PersistedGenerationLookup | None = None,
+    generation_binding: VerifiedGeneration | None = None,
     generation_id: str | None = None,
     generation_sha256: str | None = None,
     retry_delay_seconds: float = 0.25,
@@ -273,25 +303,58 @@ async def run_query_with_retries(
     if formal_dataset and case.case.split.value != "test":
         raise ValueError("formal query runs are restricted to the frozen test split")
     if (generation_id is None) != (generation_sha256 is None):
-        raise ValueError("query execution generation ID and SHA-256 must be supplied together")
-    if formal_dataset and not valid_generation_binding(generation_id, generation_sha256):
-        raise ValueError("formal query runs require the bound actual generation ID and SHA-256")
-    if generation_id is not None and not valid_generation_binding(generation_id, generation_sha256):
-        raise ValueError("query execution generation ID or SHA-256 is invalid")
+        raise ValueError("query execution Generation ID and digest must be supplied together")
+    if generation_binding is not None and generation_resolver is not None:
+        raise ValueError("supply either a verified Generation or a Generation resolver")
+    if generation_binding is None and generation_id is not None:
+        if generation_resolver is None:
+            raise ValueError("query execution requires a persisted Generation resolver")
+        try:
+            generation_binding = await resolve_generation(
+                generation_resolver, generation_id, generation_sha256
+            )
+        except GenerationBindingError as exc:
+            raise ValueError(f"Generation binding could not be verified: {exc}") from None
+    elif generation_binding is not None:
+        try:
+            recomputed = verify_generation_manifest(generation_binding.generation)
+        except GenerationBindingError as exc:
+            raise ValueError(f"Generation binding could not be verified: {exc}") from None
+        if recomputed.generation_sha256 != generation_binding.generation_sha256:
+            raise ValueError("Generation binding digest differs from persisted manifest content")
+        if generation_id is not None and (
+            generation_id != recomputed.id or generation_sha256 != recomputed.generation_sha256
+        ):
+            raise ValueError("requested Generation binding differs from the verified Generation")
+        generation_binding = recomputed
+    if formal_dataset and generation_binding is None:
+        raise ValueError("formal query runs require a verified persisted Generation")
 
     attempts: list[AttemptOutcome] = []
     started = time.perf_counter()
     for attempt_number in range(1, 4):
         try:
-            outcome = await executor.execute_query(
-                case, suite, attempt=attempt_number, cache_state=cache_state
-            )
+            execution_kwargs: dict[str, Any] = {
+                "attempt": attempt_number,
+                "cache_state": cache_state,
+            }
+            if generation_binding is not None:
+                execution_kwargs.update(
+                    generation=generation_binding.generation,
+                    generation_sha256=generation_binding.generation_sha256,
+                )
+            outcome = await executor.execute_query(case, suite, **execution_kwargs)
             if outcome.attempt != attempt_number:
                 raise ValueError("executor returned an attempt number that does not match")
             if outcome.provider_kind != executor.provider_kind:
                 raise ValueError("executor outcome provider kind does not match its capability")
             if outcome.cache_state != cache_state:
                 raise ValueError("executor outcome cache state does not match the requested profile")
+            if generation_binding is not None and (
+                outcome.executed_generation_id != generation_binding.id
+                or outcome.executed_generation_sha256 != generation_binding.generation_sha256
+            ):
+                raise ValueError("executor did not confirm the verified Generation it queried")
         except ProviderExecutionError as exc:
             outcome = AttemptOutcome(
                 attempt=attempt_number,
@@ -367,8 +430,10 @@ async def run_query_with_retries(
         seed=suite.seed,
         ablation_id=suite.ablation_id,
         case_id=case.case.id,
-        generation_id=generation_id,
-        generation_sha256=generation_sha256,
+        generation_id=generation_binding.id if generation_binding is not None else None,
+        generation_sha256=(
+            generation_binding.generation_sha256 if generation_binding is not None else None
+        ),
         split=case.case.split.value,
         answerable=case.case.answerable,
         cache_state=cache_state,

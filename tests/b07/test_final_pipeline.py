@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 import pytest
 from test_final_mapping import _fixture
+from test_generation_binding import _GenerationStore, _make_generation
 
 from knowledge_weaver.agent.weights import ACTION_FAMILIES
 from knowledge_weaver.evaluation.contracts import DatasetStatus, RidgePolicyWeights
 from knowledge_weaver.evaluation.dataset import DatasetSummary, LoadedDataset, load_dataset
+from knowledge_weaver.evaluation.generation_binding import verify_generation_manifest
 from knowledge_weaver.evaluation.gold_mapping import GoldMappingReport
 from knowledge_weaver.evaluation.protocol import load_protocol
 from knowledge_weaver.evaluation.redaction import canonical_json_line
@@ -48,7 +51,7 @@ from knowledge_weaver.evaluation.training import (
     validate_exploration_records,
     write_policy_artifact,
 )
-from knowledge_weaver.models.contracts import Action, ActionTool
+from knowledge_weaver.models.contracts import Action, ActionTool, Generation
 
 NOW = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
 
@@ -241,6 +244,7 @@ class _UnexpectedRealExecutor:
 def _ready_formal_schedule(root: Path):
     protocol = load_protocol(root / "benchmarks/configs/b07_protocol_v1.json")
     dataset = _ready_dataset_for_generation_gate(root)
+    generation, generation_sha256 = _make_generation()
     schedule = build_formal_matrix(
         protocol,
         dataset,
@@ -251,24 +255,24 @@ def _ready_formal_schedule(root: Path):
         budget_approved=True,
         policy_artifact_ready=True,
         policy_artifact_sha256="b" * 64,
-        generation_id="generation-expected",
-        generation_sha256="c" * 64,
+        generation_id=generation.id,
+        generation_sha256=generation_sha256,
     )
-    return protocol, dataset, schedule
+    return protocol, dataset, schedule, generation
 
 
 @pytest.mark.parametrize(
     ("mapped_generation_id", "mapped_generation_sha256"),
     [
-        ("generation-other", "c" * 64),
-        ("generation-expected", "d" * 64),
+        ("44444444-4444-4444-8444-444444444444", "c" * 64),
+        ("11111111-1111-4111-8111-111111111111", "d" * 64),
     ],
 )
 def test_formal_runner_blocks_gold_generation_mismatch_before_running(
     mapped_generation_id: str, mapped_generation_sha256: str
 ) -> None:
     root = Path(__file__).resolve().parents[2]
-    protocol, dataset, schedule = _ready_formal_schedule(root)
+    protocol, dataset, schedule, generation = _ready_formal_schedule(root)
     mapping = GoldMappingReport(
         generation_id=mapped_generation_id,
         generation_sha256=mapped_generation_sha256,
@@ -285,6 +289,7 @@ def test_formal_runner_blocks_gold_generation_mismatch_before_running(
             dataset,
             mapping,
             _UnexpectedRealExecutor(),
+            generation_resolver=_GenerationStore(generation),
             policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
             retry_delay_seconds=0,
         )
@@ -297,10 +302,10 @@ def test_formal_runner_blocks_gold_generation_mismatch_before_running(
 
 def test_formal_runner_requires_ready_gold_mapping() -> None:
     root = Path(__file__).resolve().parents[2]
-    protocol, dataset, schedule = _ready_formal_schedule(root)
+    protocol, dataset, schedule, generation = _ready_formal_schedule(root)
     mapping = GoldMappingReport(
-        generation_id="generation-expected",
-        generation_sha256="c" * 64,
+        generation_id=generation.id,
+        generation_sha256=verify_generation_manifest(generation).generation_sha256,
         dataset_sha256=schedule.dataset_sha256,
         span_mappings=(),
         path_mappings=(),
@@ -314,6 +319,7 @@ def test_formal_runner_requires_ready_gold_mapping() -> None:
             dataset,
             mapping,
             _UnexpectedRealExecutor(),
+            generation_resolver=_GenerationStore(generation),
             policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
             retry_delay_seconds=0,
         )
@@ -323,17 +329,56 @@ def test_formal_runner_requires_ready_gold_mapping() -> None:
     assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
 
 
+@pytest.mark.parametrize("mismatch", ["missing_id", "digest"])
+def test_formal_runner_blocks_unverified_schedule_generation_before_provider(
+    mismatch: str,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, dataset, schedule, generation = _ready_formal_schedule(root)
+    if mismatch == "missing_id":
+        schedule = replace(
+            schedule,
+            generation_id="44444444-4444-4444-8444-444444444444",
+        )
+    else:
+        schedule = replace(schedule, generation_sha256="f" * 64)
+    mapping = GoldMappingReport(
+        generation_id=generation.id,
+        generation_sha256=verify_generation_manifest(generation).generation_sha256,
+        dataset_sha256=schedule.dataset_sha256,
+        span_mappings=(),
+        path_mappings=(),
+        blockers=(),
+    )
+
+    report = _drive_immediate(
+        run_formal_matrix(
+            schedule,
+            protocol,
+            dataset,
+            mapping,
+            _UnexpectedRealExecutor(),
+            generation_resolver=_GenerationStore(generation),
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert not report.query_records
+    assert any(item.startswith("BLOCKED_GENERATION:") for item in report.blockers)
+
+
 def test_generation_identity_is_written_through_matrix_and_query_artifacts(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
-    _protocol, _dataset, schedule = _ready_formal_schedule(root)
+    _protocol, _dataset, schedule, generation = _ready_formal_schedule(root)
     record = _drive_immediate(
         run_query_with_retries(
             _SyntheticExecutor(fail_until=0),
             _fixture()[0],
             _suite(),
             formal_dataset=False,
-            generation_id=schedule.generation_id,
-            generation_sha256=schedule.generation_sha256,
+            generation_binding=verify_generation_manifest(generation),
             retry_delay_seconds=0,
         )
     )
@@ -344,28 +389,49 @@ def test_generation_identity_is_written_through_matrix_and_query_artifacts(tmp_p
         query_records=(record,),
         blockers=("synthetic fixture; not formal quality evidence",),
     )
-    assert schedule.to_dict()["generation_id"] == "generation-expected"
-    assert matrix.to_dict()["generation_sha256"] == "c" * 64
+    assert schedule.to_dict()["generation_id"] == generation.id
+    assert matrix.to_dict()["generation_sha256"] == verify_generation_manifest(generation).generation_sha256
 
     paths = write_execution_artifacts(matrix, repository_root=tmp_path)
     manifest = json.loads(Path(paths["matrix_manifest"]).read_text(encoding="utf-8"))
     query = json.loads(Path(paths["per_query"]).read_text(encoding="utf-8").splitlines()[0])
-    assert manifest["generation_id"] == query["generation_id"] == "generation-expected"
-    assert manifest["generation_sha256"] == query["generation_sha256"] == "c" * 64
+    assert manifest["generation_id"] == query["generation_id"] == generation.id
+    assert manifest["generation_sha256"] == query["generation_sha256"] == verify_generation_manifest(generation).generation_sha256
 
     rebuilt = build_report(manifest, [QueryRunRecord.model_validate(query)])
-    assert rebuilt["generation_id"] == "generation-expected"
-    assert rebuilt["generation_sha256"] == "c" * 64
+    assert rebuilt["generation_id"] == generation.id
+    assert rebuilt["generation_sha256"] == verify_generation_manifest(generation).generation_sha256
 
-    mismatched_manifest = {**manifest, "generation_id": "generation-mismatch"}
+    mismatched_id = "55555555-5555-4555-8555-555555555555"
+    mismatched_manifest = {**manifest, "generation_id": mismatched_id}
     with pytest.raises(ValueError, match="generation IDs differ"):
         build_report(mismatched_manifest, [QueryRunRecord.model_validate(query)])
 
+    mismatched_attempt_identity = {
+        **query["attempts"][0],
+        "executed_generation_id": mismatched_id,
+    }
     mismatched_query = QueryRunRecord.model_validate(
-        {**query, "generation_id": "generation-mismatch"}
+        {
+            **query,
+            "generation_id": mismatched_id,
+            "attempts": [mismatched_attempt_identity],
+        }
     )
     with pytest.raises(ValueError, match="generation"):
         build_report(manifest, [mismatched_query])
+
+    mismatched_attempt = {
+        **query,
+        "attempts": [
+            {
+                **query["attempts"][0],
+                "executed_generation_sha256": "f" * 64,
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="completed query attempt"):
+        QueryRunRecord.model_validate(mismatched_attempt)
 
 
 def test_train_only_fit_selects_on_dev_and_cannot_write_fixture_weights(tmp_path: Path) -> None:
@@ -507,6 +573,8 @@ class _SyntheticExecutor:
         *,
         attempt: int,
         cache_state: Literal["cold", "warm"] = "cold",
+        generation: Generation | None = None,
+        generation_sha256: str | None = None,
     ) -> AttemptOutcome:
         self.calls += 1
         if attempt <= self.fail_until:
@@ -525,6 +593,8 @@ class _SyntheticExecutor:
                 count_kind="estimated",
                 elapsed_ms=10,
                 cache_state=cache_state,
+                executed_generation_id=generation.id if generation is not None else None,
+                executed_generation_sha256=generation_sha256,
             )
         return AttemptOutcome(
             attempt=attempt,
@@ -541,6 +611,8 @@ class _SyntheticExecutor:
             elapsed_ms=15,
             strategy_latency_ms=4,
             cache_state=cache_state,
+            executed_generation_id=generation.id if generation is not None else None,
+            executed_generation_sha256=generation_sha256,
             measurements=QueryMeasurements(evidence_recall=0.9),
         )
 

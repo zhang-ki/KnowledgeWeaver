@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Literal
 
 from knowledge_weaver.evaluation.dataset import LoadedDataset
+from knowledge_weaver.evaluation.generation_binding import valid_generation_binding
 from knowledge_weaver.evaluation.protocol import EvaluationProtocol
 
 REQUIRED_DEPENDENCIES: dict[str, str] = {
@@ -20,18 +20,6 @@ REQUIRED_DEPENDENCIES: dict[str, str] = {
     "B06": "8a4ede85c363f4cf18e772dd57be9984f265153f",
 }
 MINIMUM_TEST_CASES = 40
-_GENERATION_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-
-
-def valid_generation_binding(generation_id: str | None, generation_sha256: str | None) -> bool:
-    return bool(
-        generation_id
-        and generation_id.strip()
-        and generation_sha256
-        and _GENERATION_SHA256.fullmatch(generation_sha256)
-    )
-
-
 class SuiteStatus(StrEnum):
     planned = "PLANNED"
     blocked = "BLOCKED"

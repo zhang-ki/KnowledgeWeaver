@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from knowledge_weaver.evaluation.dataset import LoadedDataset
+from knowledge_weaver.evaluation.generation_binding import (
+    GenerationBindingError,
+    PersistedGenerationLookup,
+    resolve_generation,
+    valid_generation_binding,
+)
 from knowledge_weaver.evaluation.gold_mapping import GoldMappingReport
 from knowledge_weaver.evaluation.protocol import BudgetSpec, EvaluationProtocol
 from knowledge_weaver.evaluation.redaction import canonical_json_line
@@ -22,7 +28,6 @@ from knowledge_weaver.evaluation.runs import (
 from knowledge_weaver.evaluation.scheduling import (
     MatrixSchedule,
     SuiteStatus,
-    valid_generation_binding,
 )
 
 CaseT = TypeVar("CaseT")
@@ -144,6 +149,7 @@ async def run_formal_matrix(
     gold_mapping: GoldMappingReport | None,
     executor: BenchmarkExecutor,
     *,
+    generation_resolver: PersistedGenerationLookup | None = None,
     policy_training_summary: Mapping[str, Any] | None = None,
     retry_delay_seconds: float = 0.25,
 ) -> MatrixExecutionReport:
@@ -160,6 +166,22 @@ async def run_formal_matrix(
     assert generation_id is not None and generation_sha256 is not None
     if not dataset.ready or dataset.manifest.cases_sha256 != schedule.dataset_sha256:
         return _blocked_report(schedule, "BLOCKED_INPUTS: dataset readiness/hash differs from schedule")
+    if generation_resolver is None:
+        return _blocked_report(
+            schedule,
+            "BLOCKED_GENERATION: persisted Generation lookup is unavailable",
+        )
+    try:
+        verified_generation = await resolve_generation(
+            generation_resolver, generation_id, generation_sha256
+        )
+    except GenerationBindingError:
+        return _blocked_report(
+            schedule,
+            "BLOCKED_GENERATION: persisted Generation is missing or its identity/content digest is invalid",
+        )
+    generation_id = verified_generation.id
+    generation_sha256 = verified_generation.generation_sha256
     if gold_mapping is None or not gold_mapping.ready:
         details = "Gold span/path mapping is unavailable"
         if gold_mapping is not None and gold_mapping.blockers:
@@ -216,8 +238,7 @@ async def run_formal_matrix(
                     suite,
                     formal_dataset=True,
                     cache_state=cache_state,
-                    generation_id=generation_id,
-                    generation_sha256=generation_sha256,
+                    generation_binding=verified_generation,
                     retry_delay_seconds=retry_delay_seconds,
                 )
                 violations = _budget_violations(record, budget_by_id[suite.budget_id])

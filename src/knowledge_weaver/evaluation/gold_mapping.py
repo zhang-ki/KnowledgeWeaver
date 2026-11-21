@@ -10,7 +10,8 @@ from enum import StrEnum
 from typing import Any
 
 from knowledge_weaver.evaluation.contracts import PreparedBenchmarkCase, SourceAsset
-from knowledge_weaver.models.contracts import Chunk, Document, Evidence, Relation
+from knowledge_weaver.evaluation.generation_binding import verify_generation_manifest
+from knowledge_weaver.models.contracts import Chunk, Document, Evidence, Generation, Relation
 
 
 class GoldMappingStatus(StrEnum):
@@ -302,11 +303,19 @@ def map_gold_to_generation(
     evidence: Sequence[Evidence],
     relations: Sequence[Relation],
     *,
-    generation_id: str,
-    generation_sha256: str,
+    generation: Generation,
     dataset_sha256: str,
 ) -> GoldMappingReport:
     """Map every reviewed span/path; unmapped, ambiguous, and incomplete rows block readiness."""
+    verified_generation = verify_generation_manifest(
+        generation,
+        observed_member_ids={
+            "document": [item.id for item in documents],
+            "chunk": [item.id for item in chunks],
+            "evidence": [item.id for item in evidence],
+            "relation": [item.id for item in relations],
+        },
+    )
     assets = {item.id: item for item in source_assets}
     docs = {item.id: item for item in documents}
     chunks_by_document: dict[str, list[Chunk]] = {}
@@ -399,8 +408,8 @@ def map_gold_to_generation(
                 )
 
     return GoldMappingReport(
-        generation_id=generation_id,
-        generation_sha256=generation_sha256,
+        generation_id=verified_generation.id,
+        generation_sha256=verified_generation.generation_sha256,
         dataset_sha256=dataset_sha256,
         span_mappings=tuple(span_mappings),
         path_mappings=tuple(path_mappings),
