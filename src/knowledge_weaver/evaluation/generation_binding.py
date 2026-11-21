@@ -61,6 +61,16 @@ def verify_generation_manifest(
     if generation.state not in {GenerationState.READY, GenerationState.RETIRED}:
         raise GenerationBindingError("persisted Generation is not queryable")
 
+    source_version_ids = generation.source_version_ids
+    if any(
+        not isinstance(source_version_id, str)
+        or not _UUID_TEXT.fullmatch(source_version_id)
+        for source_version_id in source_version_ids
+    ):
+        raise GenerationBindingError("persisted source-version ID is not UUIDText")
+    if len(source_version_ids) != len(set(source_version_ids)):
+        raise GenerationBindingError("persisted source-version IDs are not unique")
+
     manifest = dict(generation.index_manifest)
     stored_digest = manifest.pop("generation_hash", None)
     member_hashes = manifest.get("member_hashes")
@@ -70,20 +80,30 @@ def verify_generation_manifest(
         raise GenerationBindingError("persisted Generation manifest has no membership hashes")
 
     visible_members = {
+        "source_version": source_version_ids,
         "chunk": generation.chunk_ids,
         "entity": generation.entity_ids,
         "relation": generation.relation_ids,
     }
     if observed_member_ids is not None:
+        observed_source_versions = observed_member_ids.get("source_version")
+        if (
+            observed_source_versions is not None
+            and sorted(observed_source_versions) != sorted(source_version_ids)
+        ):
+            raise GenerationBindingError(
+                "observed source-version membership differs from persisted Generation"
+            )
         visible_members.update(
             {kind: list(ids) for kind, ids in observed_member_ids.items()}
         )
+        visible_members["source_version"] = source_version_ids
     for kind, ids in visible_members.items():
         if member_hashes.get(kind) != _member_sha256(ids):
             raise GenerationBindingError("persisted Generation membership does not match its manifest")
 
     payload = {
-        "source_version_ids": generation.source_version_ids,
+        "source_version_ids": source_version_ids,
         "member_hashes": member_hashes,
         "index_manifest": manifest,
     }

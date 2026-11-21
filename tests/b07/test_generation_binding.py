@@ -8,6 +8,10 @@ from typing import Literal
 import pytest
 from test_final_mapping import _fixture
 
+from knowledge_weaver.evaluation.generation_binding import (
+    GenerationBindingError,
+    verify_generation_manifest,
+)
 from knowledge_weaver.evaluation.runs import (
     AttemptOutcome,
     QueryMeasurements,
@@ -25,7 +29,10 @@ def _make_generation() -> tuple[Generation, str]:
     _case, _source, document, chunks, evidence, relations = _fixture()
     generation_id = "11111111-1111-4111-8111-111111111111"
     corpus_id = "22222222-2222-4222-8222-222222222222"
-    source_version_ids = ["33333333-3333-4333-8333-333333333333"]
+    source_version_ids = [
+        "44444444-4444-4444-8444-444444444444",
+        "33333333-3333-4333-8333-333333333333",
+    ]
     member_ids = {
         "source_version": source_version_ids,
         "document": [document.id],
@@ -39,7 +46,7 @@ def _make_generation() -> tuple[Generation, str]:
         "relation": sorted(item.id for item in relations),
     }
     member_hashes = {
-        kind: hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()
+        kind: hashlib.sha256("\n".join(sorted(ids)).encode("utf-8")).hexdigest()
         for kind, ids in member_ids.items()
     }
     manifest: dict[str, object] = {
@@ -73,6 +80,98 @@ def _make_generation() -> tuple[Generation, str]:
         ),
         generation_sha256,
     )
+
+
+def _with_source_version_membership(
+    generation: Generation,
+    source_version_ids: list[str],
+    *,
+    include_source_version_hash: bool = True,
+    rebind_source_version_hash: bool = True,
+) -> Generation:
+    manifest = dict(generation.index_manifest)
+    member_hashes = dict(manifest["member_hashes"])
+    if not include_source_version_hash:
+        member_hashes.pop("source_version", None)
+    elif rebind_source_version_hash:
+        member_hashes["source_version"] = hashlib.sha256(
+            "\n".join(sorted(source_version_ids)).encode("utf-8")
+        ).hexdigest()
+    manifest["member_hashes"] = member_hashes
+    payload = {
+        "source_version_ids": source_version_ids,
+        "member_hashes": member_hashes,
+        "index_manifest": {
+            key: value
+            for key, value in manifest.items()
+            if key != "generation_hash"
+        },
+    }
+    manifest["generation_hash"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return generation.model_copy(
+        update={"source_version_ids": source_version_ids, "index_manifest": manifest}
+    )
+
+
+def test_source_version_membership_verifies_with_publisher_sorting() -> None:
+    generation, _ = _make_generation()
+
+    verified = verify_generation_manifest(generation)
+
+    assert verified.generation_sha256 == generation.index_manifest["generation_hash"]
+    assert generation.source_version_ids != sorted(generation.source_version_ids)
+
+
+def test_source_version_membership_requires_hash() -> None:
+    generation, _ = _make_generation()
+    malformed = _with_source_version_membership(
+        generation,
+        generation.source_version_ids,
+        include_source_version_hash=False,
+    )
+
+    with pytest.raises(GenerationBindingError, match="membership"):
+        verify_generation_manifest(malformed)
+
+
+def test_source_version_membership_must_match_persisted_ids() -> None:
+    generation, _ = _make_generation()
+    changed_ids = [
+        "55555555-5555-4555-8555-555555555555",
+        generation.source_version_ids[1],
+    ]
+    malformed = _with_source_version_membership(
+        generation,
+        changed_ids,
+        rebind_source_version_hash=False,
+    )
+
+    with pytest.raises(GenerationBindingError, match="membership"):
+        verify_generation_manifest(malformed)
+
+
+def test_source_version_ids_must_follow_uuid_text_contract() -> None:
+    generation, _ = _make_generation()
+    malformed = generation.model_copy(
+        update={"source_version_ids": ["not-a-uuid-text"]}
+    )
+
+    with pytest.raises(GenerationBindingError, match="UUIDText"):
+        verify_generation_manifest(malformed)
+
+
+def test_observed_source_version_ids_cannot_replace_persisted_members() -> None:
+    generation, _ = _make_generation()
+
+    with pytest.raises(GenerationBindingError, match="source-version membership"):
+        verify_generation_manifest(
+            generation,
+            observed_member_ids={
+                "source_version": ["55555555-5555-4555-8555-555555555555"]
+            },
+        )
 
 
 class _GenerationStore:
