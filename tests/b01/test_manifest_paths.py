@@ -77,7 +77,7 @@ def test_manifest_reports_added_changed_unchanged_and_deleted(tmp_path, source_f
 def test_manifest_explicitly_reports_unsupported_files(tmp_path, source_factory) -> None:
     from knowledge_weaver.ingestion import ManifestBuilder
 
-    (tmp_path / "notes.txt").write_text("not markdown", encoding="utf-8")
+    (tmp_path / "notes.png").write_bytes(b"unsupported")
     source = source_factory(SourceKind.markdown)
     result = ManifestBuilder().build(
         source, tmp_path, revision="rev-a", dirty=False

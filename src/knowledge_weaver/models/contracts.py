@@ -239,7 +239,12 @@ class PythonLocator(SchemaModel):
     def valid_lines_and_columns(self) -> Self:
         if self.line_end < self.line_start:
             raise ValueError("line_end must not precede line_start")
-        if self.col_start is not None and self.col_end is not None and self.col_end < self.col_start:
+        if (
+            self.line_start == self.line_end
+            and self.col_start is not None
+            and self.col_end is not None
+            and self.col_end < self.col_start
+        ):
             raise ValueError("col_end must not precede col_start")
         return self
 

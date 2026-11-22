@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import html
 import io
 import os
 import re
@@ -10,8 +11,9 @@ import threading
 from collections import OrderedDict
 from collections.abc import Iterator
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import ValidationError
 
@@ -64,6 +66,134 @@ class _FileParseProblem(ValueError):
         super().__init__(message)
         self.code = code
         self.safe_message = message
+
+
+class _VisibleHTMLTextParser(HTMLParser):
+    """Collect deterministic visible text blocks with original HTML line ranges."""
+
+    _HIDDEN_TAGS: ClassVar[frozenset[str]] = frozenset(
+        {"head", "script", "style", "template", "noscript"}
+    )
+    _BLOCK_TAGS: ClassVar[frozenset[str]] = frozenset({
+        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+        "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4",
+        "h5", "h6", "header", "hr", "li", "main", "nav", "ol", "p", "pre", "section",
+        "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+    })
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.blocks: list[tuple[BlockKind, str, int, int]] = []
+        self._parts: list[str] = []
+        self._start_line: int | None = None
+        self._end_line: int | None = None
+        self._kind = BlockKind.paragraph
+        self._hidden_stack: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.casefold()
+        hidden_attr = any(
+            name.casefold() == "hidden"
+            or (name.casefold() == "aria-hidden" and (value or "").casefold() == "true")
+            or (
+                name.casefold() == "style"
+                and bool(
+                    re.search(
+                        r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden|content-visibility\s*:\s*hidden)\s*(?:;|$)",
+                        value or "",
+                        re.IGNORECASE,
+                    )
+                )
+            )
+            for name, value in attrs
+        )
+        if self._hidden_stack:
+            if tag in self._HIDDEN_TAGS or hidden_attr:
+                self._hidden_stack.append(tag)
+            return
+        if tag in self._HIDDEN_TAGS or hidden_attr:
+            self._flush()
+            self._hidden_stack.append(tag)
+            return
+        if tag in self._BLOCK_TAGS:
+            self._flush()
+        if tag in {f"h{level}" for level in range(1, 7)}:
+            self._kind = BlockKind.heading
+        elif tag == "pre":
+            self._kind = BlockKind.code
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if self._hidden_stack:
+            if tag in self._hidden_stack:
+                index = len(self._hidden_stack) - 1 - self._hidden_stack[::-1].index(tag)
+                del self._hidden_stack[index:]
+            return
+        if tag in self._BLOCK_TAGS:
+            self._flush()
+
+    def handle_data(self, data: str) -> None:
+        if not data or self._hidden_stack:
+            return
+        line, _column = self.getpos()
+        self._append(data, line, line + data.count("\n"))
+
+    def handle_entityref(self, name: str) -> None:
+        self._append(html.unescape(f"&{name};"), self.getpos()[0], self.getpos()[0])
+
+    def handle_charref(self, name: str) -> None:
+        self._append(html.unescape(f"&#{name};"), self.getpos()[0], self.getpos()[0])
+
+    def _append(self, value: str, start_line: int, end_line: int) -> None:
+        if not value or self._hidden_stack:
+            return
+        if self._start_line is None:
+            self._start_line = start_line
+        self._end_line = max(self._end_line or end_line, end_line)
+        self._parts.append(value)
+
+    def _flush(self) -> None:
+        if self._parts and self._start_line is not None and self._end_line is not None:
+            value = "".join(self._parts)
+            if value.strip():
+                self.blocks.append((self._kind, value, self._start_line, self._end_line))
+        self._parts = []
+        self._start_line = None
+        self._end_line = None
+        self._kind = BlockKind.paragraph
+
+
+def _plain_text_specs(text: str, relative_path: str) -> list[tuple[_BlockSpec, int]]:
+    if not text:
+        return []
+    line_end = len(_line_starts(text))
+    return [
+        (
+            _BlockSpec(
+                kind=BlockKind.paragraph,
+                text=text,
+                locator=MarkdownLocator(path=relative_path, line_start=1, line_end=line_end),
+            ),
+            0,
+        )
+    ]
+
+
+def _html_specs(text: str, relative_path: str) -> list[_BlockSpec]:
+    # HTMLParser counts LF; normalizing line endings preserves source line numbers.
+    parser = _VisibleHTMLTextParser()
+    parser.feed(text.replace("\r\n", "\n").replace("\r", "\n"))
+    parser.close()
+    parser._flush()
+    specs: list[_BlockSpec] = []
+    for kind, value, line_start, line_end in parser.blocks:
+        locator = MarkdownLocator(
+            path=relative_path,
+            line_start=line_start,
+            line_end=max(line_start, line_end),
+        )
+        specs.append(_BlockSpec(kind=kind, text=value, locator=locator))
+    return specs
 
 
 class StructuralParser:
@@ -297,8 +427,15 @@ class StructuralParser:
             warnings: list[str] = []
         elif source_kind is SourceKind.markdown:
             text = _decode_text(raw)
-            located_specs = _markdown_specs(text, relative_path)
-            document_text = text
+            suffix = Path(relative_path).suffix.casefold()
+            if suffix in {".txt"}:
+                located_specs = _plain_text_specs(text, relative_path)
+                document_text = text
+            elif suffix == ".html":
+                document_text, located_specs = _compose_specs(_html_specs(text, relative_path))
+            else:
+                located_specs = _markdown_specs(text, relative_path)
+                document_text = text
             warnings = []
         elif source_kind is SourceKind.docx:
             validate_docx_archive(path)
