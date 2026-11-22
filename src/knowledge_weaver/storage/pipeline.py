@@ -502,9 +502,59 @@ class PipelineService:
                 session.add(BlockRow(id=block.id, document_id=document.id, payload=block.model_dump(mode="json")))
 
     async def _persist_chunks(self, session: AsyncSession, chunks: list[Chunk]) -> None:
-        for chunk in chunks:
-            if await session.get(ChunkRow, chunk.id) is None:
-                session.add(ChunkRow(id=chunk.id, document_id=chunk.document_id, parent_id=chunk.parent_id, is_leaf=chunk.is_leaf, text=chunk.text, text_hash=chunk.text_hash, payload=chunk.model_dump(mode="json")))
+        chunks_by_id = {chunk.id: chunk for chunk in chunks}
+        external_parent_ids = {
+            chunk.parent_id
+            for chunk in chunks
+            if chunk.parent_id is not None and chunk.parent_id not in chunks_by_id
+        }
+        for parent_id in sorted(external_parent_ids):
+            if await session.get(ChunkRow, parent_id) is None:
+                raise KnowledgeWeaverError(
+                    ErrorCode.MISSING_REFERENCE,
+                    "Chunk parent does not exist.",
+                )
+
+        remaining_ids = set(chunks_by_id)
+        depths: dict[str, int] = {}
+        while remaining_ids:
+            ready_ids = [
+                chunk.id
+                for chunk in chunks
+                if chunk.id in remaining_ids
+                and (chunk.parent_id is None or chunk.parent_id not in remaining_ids)
+            ]
+            if not ready_ids:
+                raise KnowledgeWeaverError(
+                    ErrorCode.MISSING_REFERENCE,
+                    "Chunk parent hierarchy contains a cycle.",
+                )
+            for chunk_id in ready_ids:
+                chunk = chunks_by_id[chunk_id]
+                parent_id = chunk.parent_id
+                depths[chunk_id] = (
+                    depths[parent_id] + 1
+                    if parent_id is not None and parent_id in depths
+                    else 0
+                )
+                remaining_ids.remove(chunk_id)
+
+        for depth in sorted(set(depths.values())):
+            for chunk in chunks:
+                if depths[chunk.id] != depth or await session.get(ChunkRow, chunk.id) is not None:
+                    continue
+                session.add(
+                    ChunkRow(
+                        id=chunk.id,
+                        document_id=chunk.document_id,
+                        parent_id=chunk.parent_id,
+                        is_leaf=chunk.is_leaf,
+                        text=chunk.text,
+                        text_hash=chunk.text_hash,
+                        payload=chunk.model_dump(mode="json"),
+                    )
+                )
+            await session.flush()
 
     async def _persist_extraction(self, session: AsyncSession, extracted: ExtractionResult, evidence: dict[str, Evidence], provenance: dict[str, Provenance], members: dict[str, set[str]]) -> None:
         for provenance_row in provenance.values():
