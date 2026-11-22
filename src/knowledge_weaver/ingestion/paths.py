@@ -17,7 +17,7 @@ SUPPORTED_SUFFIXES: dict[SourceKind, frozenset[str]] = {
     SourceKind.python_repo: frozenset({".py"}),
     SourceKind.pdf: frozenset({".pdf"}),
     SourceKind.docx: frozenset({".docx"}),
-    SourceKind.markdown: frozenset({".md", ".markdown"}),
+    SourceKind.markdown: frozenset({".md", ".markdown", ".txt", ".html"}),
 }
 
 
