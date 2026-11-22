@@ -7,11 +7,20 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from enum import StrEnum
+from pathlib import PurePosixPath
 from typing import Any
 
 from knowledge_weaver.evaluation.contracts import PreparedBenchmarkCase, SourceAsset
 from knowledge_weaver.evaluation.generation_binding import verify_generation_manifest
-from knowledge_weaver.models.contracts import Chunk, Document, Evidence, Generation, Relation
+from knowledge_weaver.ingestion.text_coordinates import TextCoordinates
+from knowledge_weaver.models.contracts import (
+    Chunk,
+    Document,
+    Evidence,
+    Generation,
+    MarkdownLocator,
+    Relation,
+)
 
 
 class GoldMappingStatus(StrEnum):
@@ -168,6 +177,11 @@ def _span_candidates(
     candidates: list[_Candidate] = []
     intervals: set[tuple[str, int, int]] = set()
     for document in matching_documents:
+        txt_coordinates = (
+            TextCoordinates.from_text(document.normalized_text)
+            if PurePosixPath(document.relative_path).suffix.casefold() == ".txt"
+            else None
+        )
         for chunk in chunks_by_document.get(document.id, ()):
             if not chunk.is_leaf:
                 continue
@@ -183,6 +197,14 @@ def _span_candidates(
                     document_start = span.document_start + local_start - span.chunk_start
                     document_end = document_start + len(gold.quote)
                     if document.normalized_text[document_start:document_end] != gold.quote:
+                        continue
+                    if txt_coordinates is not None and (
+                        not isinstance(gold.locator, MarkdownLocator)
+                        or not isinstance(span.locator, MarkdownLocator)
+                        or gold.locator.path != span.locator.path
+                        or txt_coordinates.at(document_start)[0] < gold.locator.line_start
+                        or txt_coordinates.at(document_end - 1)[0] > gold.locator.line_end
+                    ):
                         continue
                     intervals.add((document.id, document_start, document_end))
 

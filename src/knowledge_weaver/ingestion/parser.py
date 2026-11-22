@@ -44,6 +44,7 @@ from .paths import (
     validate_docx_archive,
 )
 from .tables import render_table_cells
+from .text_coordinates import TextCoordinates
 
 
 @dataclass(frozen=True)
@@ -166,7 +167,7 @@ class _VisibleHTMLTextParser(HTMLParser):
 def _plain_text_specs(text: str, relative_path: str) -> list[tuple[_BlockSpec, int]]:
     if not text:
         return []
-    line_end = len(_line_starts(text))
+    line_end, _, _ = TextCoordinates.from_text(text).at(len(text))
     return [
         (
             _BlockSpec(

@@ -4,6 +4,7 @@ import ast
 import bisect
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from knowledge_weaver.core.ids import chunk_id, deterministic_id, sha256_text
 from knowledge_weaver.models import (
@@ -21,6 +22,7 @@ from knowledge_weaver.models import (
 )
 
 from .tables import CellRange, render_table_cells
+from .text_coordinates import TextCoordinates
 
 DEFAULT_MAX_LEAF_CHUNKS = 10_000
 
@@ -87,6 +89,8 @@ class StructuralChunker:
         return results
 
     def _split_document(self, document: Document, config: ChunkConfig) -> list[Chunk]:
+        if PurePosixPath(document.relative_path).suffix.casefold() == ".txt":
+            config = config.model_copy(update={"fingerprint": sha256_text(f"{config.fingerprint}:txt-windows-v1")})
         blocks = sorted(
             document.blocks,
             key=lambda block: (block.start, -(block.end - block.start), block.id),
@@ -712,8 +716,18 @@ def _plain_slices(
             if result:
                 return result
 
+    coordinates = (
+        TextCoordinates.from_text(document.normalized_text)
+        if PurePosixPath(document.relative_path).suffix.casefold() == ".txt"
+        else None
+    )
+    ranges = (
+        _txt_ranges(len(block.text), config, max_leaf_chunks)
+        if coordinates is not None
+        else _natural_ranges(block.text, config, max_leaf_chunks)
+    )
     result = []
-    for left, right in _natural_ranges(block.text, config, max_leaf_chunks):
+    for left, right in ranges:
         slice_text = block.text[left:right]
         document_start = block.start + left
         document_end = block.start + right
@@ -726,7 +740,9 @@ def _plain_slices(
                         chunk_end=len(slice_text),
                         document_start=document_start,
                         document_end=document_end,
-                        locator=_slice_locator(document, block, document_start, document_end),
+                        locator=_slice_locator(
+                            document, block, document_start, document_end, coordinates
+                        ),
                     ),
                 ),
                 path_component=f"source:{document_start}",
@@ -898,9 +914,18 @@ def _python_locator_for_range(
     )
 
 
-def _slice_locator(document: Document, block: Block, start: int, end: int) -> Locator:
+def _slice_locator(
+    document: Document, block: Block, start: int, end: int,
+    coordinates: TextCoordinates | None = None,
+) -> Locator:
     locator = block.locator
     if isinstance(locator, MarkdownLocator):
+        if coordinates is not None:
+            return MarkdownLocator(
+                path=locator.path,
+                line_start=coordinates.at(start)[0],
+                line_end=coordinates.at(end - 1)[0],
+            )
         starts = _line_starts(document.normalized_text)
         start_line, _ = _line_and_column(document.normalized_text, starts, start)
         end_line, _ = _line_and_column(document.normalized_text, starts, end - 1)
@@ -931,6 +956,22 @@ def _line_starts(text: str) -> list[int]:
 def _line_and_column(text: str, line_starts: list[int], offset: int) -> tuple[int, int]:
     index = bisect.bisect_right(line_starts, offset) - 1
     return index + 1, offset - line_starts[index]
+
+
+def _txt_ranges(
+    length: int, config: ChunkConfig, max_ranges: int
+) -> list[tuple[int, int]]:
+    """Keep one contiguous source span per window, with at least half overlap."""
+    stride = max(1, min(config.max_chars // 2, config.max_chars - config.overlap_chars))
+    ranges: list[tuple[int, int]] = []
+    for start in range(0, length, stride):
+        if len(ranges) >= max_ranges:
+            raise ChunkLimitExceeded(f"Text splitting exceeded the {max_ranges}-chunk limit.")
+        end = min(length, start + config.max_chars)
+        ranges.append((start, end))
+        if end == length:
+            break
+    return ranges
 
 
 def _natural_ranges(
