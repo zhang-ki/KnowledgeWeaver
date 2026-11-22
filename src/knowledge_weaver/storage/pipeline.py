@@ -531,10 +531,10 @@ class PipelineService:
                 )
             for chunk_id in ready_ids:
                 chunk = chunks_by_id[chunk_id]
-                parent_id = chunk.parent_id
+                chunk_parent_id = chunk.parent_id
                 depths[chunk_id] = (
-                    depths[parent_id] + 1
-                    if parent_id is not None and parent_id in depths
+                    depths[chunk_parent_id] + 1
+                    if chunk_parent_id is not None and chunk_parent_id in depths
                     else 0
                 )
                 remaining_ids.remove(chunk_id)
