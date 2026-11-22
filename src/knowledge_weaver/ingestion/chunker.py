@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import bisect
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from knowledge_weaver.core.ids import chunk_id, deterministic_id, sha256_text
@@ -174,7 +175,305 @@ class StructuralChunker:
                     config=config,
                 )
             )
+
+        self._append_uncovered_python_leaves(
+            document,
+            blocks,
+            child_ids,
+            block_chunk_ids,
+            output,
+            append_chunk,
+            config,
+        )
+        self._coalesce_python_sibling_leaves(
+            document,
+            blocks,
+            child_ids,
+            block_chunk_ids,
+            output,
+            config,
+        )
+        leaf_count = sum(1 for chunk in output if chunk.is_leaf)
+        if leaf_count > self.max_leaf_chunks:
+            raise ChunkLimitExceeded(
+                f"Chunking produced {leaf_count} leaf chunks; limit is {self.max_leaf_chunks}."
+            )
         return output
+
+    def _coalesce_python_sibling_leaves(
+        self,
+        document: Document,
+        blocks: list[Block],
+        child_ids: dict[str, list[str]],
+        block_chunk_ids: dict[str, str],
+        output: list[Chunk],
+        config: ChunkConfig,
+    ) -> None:
+        parent_blocks = sorted(
+            (
+                block
+                for block in blocks
+                if child_ids.get(block.id) and isinstance(block.locator, PythonLocator)
+            ),
+            key=lambda block: (block.end - block.start, block.start, block.id),
+        )
+        block_by_id = {block.id: block for block in blocks}
+        block_id_by_chunk_id = {
+            chunk_id: block_id for block_id, chunk_id in block_chunk_ids.items()
+        }
+        parent_by_block_id = {
+            child_id: parent_id
+            for parent_id, children in child_ids.items()
+            for child_id in children
+        }
+        remove_ids: set[str] = set()
+        replacements: list[Chunk] = []
+
+        def direct_symbol_branch(chunk: Chunk, parent_block_id: str) -> str | None:
+            owner_block_id = block_id_by_chunk_id.get(chunk.id) or block_id_by_chunk_id.get(
+                chunk.parent_id or ""
+            )
+            while owner_block_id is not None and owner_block_id != parent_block_id:
+                owner_parent_id = parent_by_block_id.get(owner_block_id)
+                if owner_parent_id == parent_block_id:
+                    owner = block_by_id[owner_block_id]
+                    locator = owner.locator
+                    if (
+                        isinstance(locator, PythonLocator)
+                        and locator.qualname is not None
+                        and "::<" not in locator.qualname
+                        and locator.qualname != "<module>"
+                    ):
+                        return owner_block_id
+                    return None
+                owner_block_id = owner_parent_id
+            return None
+
+        for block in parent_blocks:
+            if block.locator.qualname == "<module>":
+                continue
+            parent_chunk_id = block_chunk_ids[block.id]
+            descendant_block_ids: set[str] = set()
+            pending_block_ids = list(child_ids.get(block.id, ()))
+            while pending_block_ids:
+                child_block_id = pending_block_ids.pop()
+                if child_block_id in descendant_block_ids:
+                    continue
+                descendant_block_ids.add(child_block_id)
+                pending_block_ids.extend(child_ids.get(child_block_id, ()))
+            descendant_chunk_ids = {
+                block_chunk_ids[block_id] for block_id in descendant_block_ids
+            }
+            siblings = sorted(
+                (
+                    chunk
+                    for chunk in output
+                    if chunk.is_leaf
+                    and (
+                        chunk.parent_id == parent_chunk_id
+                        or chunk.id in descendant_chunk_ids
+                        or chunk.parent_id in descendant_chunk_ids
+                    )
+                    and len(chunk.spans) == 1
+                    and isinstance(chunk.spans[0].locator, PythonLocator)
+                    and chunk.spans[0].chunk_start == 0
+                    and chunk.spans[0].chunk_end == len(chunk.text)
+                    and document.normalized_text[
+                        chunk.spans[0].document_start : chunk.spans[0].document_end
+                    ]
+                    == chunk.text
+                ),
+                key=lambda chunk: (
+                    chunk.spans[0].document_start,
+                    chunk.spans[0].document_end,
+                    chunk.id,
+                ),
+            )
+            if len(siblings) < 2:
+                continue
+
+            groups: list[list[Chunk]] = []
+            current: list[Chunk] = []
+            for chunk in siblings:
+                span = chunk.spans[0]
+                if current:
+                    previous_end = current[-1].spans[0].document_end
+                    gap = document.normalized_text[previous_end : span.document_start]
+                    branches = {
+                        branch
+                        for item in current
+                        if (branch := direct_symbol_branch(item, block.id)) is not None
+                    }
+                    next_branch = direct_symbol_branch(chunk, block.id)
+                    crosses_sibling_symbols = (
+                        next_branch is not None
+                        and branches
+                        and next_branch not in branches
+                    )
+                    if (
+                        span.document_start < previous_end
+                        or gap.strip()
+                        or crosses_sibling_symbols
+                    ):
+                        groups.append(current)
+                        current = []
+                current.append(chunk)
+            if current:
+                groups.append(current)
+
+            for group in groups:
+                if len(group) < 2:
+                    continue
+                windows: list[list[Chunk]] = []
+                window: list[Chunk] = []
+                for chunk in group:
+                    if (
+                        window
+                        and chunk.spans[0].document_end
+                        - window[0].spans[0].document_start
+                        > config.max_chars
+                    ):
+                        windows.append(window)
+                        window = []
+                    window.append(chunk)
+                if window:
+                    windows.append(window)
+
+                for window in windows:
+                    if len(window) < 2:
+                        continue
+                    group_ids = {chunk.id for chunk in window}
+                    source_start = window[0].spans[0].document_start
+                    source_end = window[-1].spans[0].document_end
+                    group_text = document.normalized_text[source_start:source_end]
+                    if len(group_text) > config.max_chars:
+                        continue
+                    overlaps_other_leaf = any(
+                        chunk.is_leaf
+                        and chunk.id not in group_ids
+                        and any(
+                            span.document_start < source_end
+                            and source_start < span.document_end
+                            for span in chunk.spans
+                        )
+                        for chunk in output
+                    )
+                    if overlaps_other_leaf:
+                        continue
+
+                    replacements.append(
+                        self._make_chunk(
+                            document,
+                            block,
+                            text=group_text,
+                            spans=[
+                                ChunkSpan(
+                                    chunk_start=0,
+                                    chunk_end=len(group_text),
+                                    document_start=source_start,
+                                    document_end=source_end,
+                                    locator=_python_locator_for_range(
+                                        document, block, source_start, source_end
+                                    ),
+                                )
+                            ],
+                            parent_id=parent_chunk_id,
+                            is_leaf=True,
+                            path=[
+                                "block",
+                                block.id,
+                                "leaf",
+                                f"source:{source_start}",
+                                "0",
+                            ],
+                            config=config,
+                        )
+                    )
+                    remove_ids.update(group_ids)
+
+            if remove_ids:
+                output[:] = [chunk for chunk in output if chunk.id not in remove_ids]
+                output.extend(replacements)
+                remove_ids.clear()
+                replacements.clear()
+
+    def _append_uncovered_python_leaves(
+        self,
+        document: Document,
+        blocks: list[Block],
+        child_ids: dict[str, list[str]],
+        block_chunk_ids: dict[str, str],
+        output: list[Chunk],
+        append_chunk: Callable[[Chunk], None],
+        config: ChunkConfig,
+    ) -> None:
+        leaf_intervals = sorted(
+            (
+                (span.document_start, span.document_end)
+                for chunk in output
+                if chunk.is_leaf
+                for span in chunk.spans
+            )
+        )
+        prefix_max_end: list[int] = []
+        max_end = -1
+        for _start, end in leaf_intervals:
+            max_end = max(max_end, end)
+            prefix_max_end.append(max_end)
+        parent_blocks = sorted(
+            (
+                block
+                for block in blocks
+                if child_ids.get(block.id) and isinstance(block.locator, PythonLocator)
+            ),
+            key=lambda block: (block.end - block.start, block.start, block.id),
+        )
+
+        for block in parent_blocks:
+            parent_chunk_id = block_chunk_ids[block.id]
+            uncovered = _uncovered_ranges(
+                block.start, block.end, leaf_intervals, prefix_max_end
+            )
+            for source_start, source_end in uncovered:
+                gap_text = document.normalized_text[source_start:source_end]
+                if not gap_text.strip():
+                    continue
+                ranges = _natural_ranges(gap_text, config, self.max_leaf_chunks)
+                for index, (local_start, local_end) in enumerate(ranges):
+                    leaf_start = source_start + local_start
+                    leaf_end = source_start + local_end
+                    text = document.normalized_text[leaf_start:leaf_end]
+                    append_chunk(
+                        self._make_chunk(
+                            document,
+                            block,
+                            text=text,
+                            spans=[
+                                ChunkSpan(
+                                    chunk_start=0,
+                                    chunk_end=len(text),
+                                    document_start=leaf_start,
+                                    document_end=leaf_end,
+                                    locator=_python_locator_for_range(
+                                        document, block, leaf_start, leaf_end
+                                    ),
+                                )
+                            ],
+                            parent_id=parent_chunk_id,
+                            is_leaf=True,
+                            path=[
+                                "block",
+                                block.id,
+                                "leaf",
+                                f"source:{leaf_start}",
+                                str(index),
+                            ],
+                            config=config,
+                        )
+                    )
+                    _insert_coverage_interval(
+                        (leaf_start, leaf_end), leaf_intervals, prefix_max_end
+                    )
 
     def _block_spans(self, document: Document, block: Block) -> list[ChunkSpan]:
         if block.kind is BlockKind.table and block.table_cells:
@@ -478,6 +777,44 @@ def _python_statement_ranges(document: Document, block: Block) -> list[tuple[int
     if cursor < block.end and document.normalized_text[cursor : block.end].strip():
         ranges.append((cursor, block.end))
     return [(start, end) for start, end in ranges if end > start]
+
+
+def _uncovered_ranges(
+    start: int,
+    end: int,
+    covered_ranges: list[tuple[int, int]],
+    prefix_max_end: list[int],
+) -> list[tuple[int, int]]:
+    uncovered: list[tuple[int, int]] = []
+    cursor = start
+    first = bisect.bisect_right(prefix_max_end, start)
+    stop = bisect.bisect_left(covered_ranges, (end, -1))
+    for left, right in covered_ranges[first:stop]:
+        if left > cursor:
+            uncovered.append((cursor, left))
+        cursor = max(cursor, right)
+        if cursor >= end:
+            break
+    if cursor < end:
+        uncovered.append((cursor, end))
+    return uncovered
+
+
+def _insert_coverage_interval(
+    interval: tuple[int, int],
+    covered_ranges: list[tuple[int, int]],
+    prefix_max_end: list[int],
+) -> None:
+    index = bisect.bisect_left(covered_ranges, interval)
+    covered_ranges.insert(index, interval)
+    prefix_max_end.insert(index, 0)
+    max_end = prefix_max_end[index - 1] if index else -1
+    for current in range(index, len(covered_ranges)):
+        previous_prefix = prefix_max_end[current]
+        max_end = max(max_end, covered_ranges[current][1])
+        prefix_max_end[current] = max_end
+        if current > index and max_end == previous_prefix:
+            break
 
 
 def _ast_child_statements(node: ast.AST) -> list[ast.stmt]:

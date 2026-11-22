@@ -302,6 +302,44 @@ def test_gold_span_maps_to_overlapping_leaf_group_and_strict_chunk_recall() -> N
     assert strict_chunk_recall([mapping.chunk_ids[0]], [mapping]) == 0.5
 
 
+def test_gold_mapping_never_uses_parent_chunks() -> None:
+    case, source, document, chunks, evidence, relations = _fixture()
+    parent_chunks = [chunk.model_copy(update={"is_leaf": False}) for chunk in chunks]
+
+    report = _map((case, source, document, parent_chunks, evidence, relations))
+
+    assert not report.ready
+    assert report.span_mappings[0].status is GoldMappingStatus.unmapped
+
+
+def test_gold_mapping_rejects_wrong_hash_path_locator_and_quote() -> None:
+    variants = (
+        {"raw_hash": "a" * 64},
+        {
+            "source_path": "docs/missing.md",
+            "locator": MarkdownLocator(
+                kind="markdown", path="docs/missing.md", line_start=1, line_end=1
+            ),
+        },
+        {
+            "locator": MarkdownLocator(
+                kind="markdown", path="docs/guide.md", line_start=2, line_end=2
+            )
+        },
+        {"quote": "text that does not occur in the source"},
+    )
+
+    for updates in variants:
+        prepared, source, document, chunks, evidence, relations = _fixture()
+        gold = prepared.case.gold[0].model_copy(update=updates)
+        case = prepared.case.model_copy(update={"gold": [gold]})
+        prepared = prepared.model_copy(update={"case": case})
+        report = _map((prepared, source, document, chunks, evidence, relations))
+
+        assert not report.ready
+        assert report.span_mappings[0].status is GoldMappingStatus.unmapped
+
+
 def test_gold_mapping_identity_is_derived_from_generation_manifest() -> None:
     case, source, document, chunks, evidence, relations = _fixture()
     generation = _generation_for(document, chunks, evidence, relations)
