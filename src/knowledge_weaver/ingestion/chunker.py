@@ -250,7 +250,10 @@ class StructuralChunker:
             return None
 
         for block in parent_blocks:
-            if block.locator.qualname == "<module>":
+            if (
+                not isinstance(block.locator, PythonLocator)
+                or block.locator.qualname == "<module>"
+            ):
                 continue
             parent_chunk_id = block_chunk_ids[block.id]
             descendant_block_ids: set[str] = set()
@@ -408,12 +411,10 @@ class StructuralChunker:
         config: ChunkConfig,
     ) -> None:
         leaf_intervals = sorted(
-            (
-                (span.document_start, span.document_end)
-                for chunk in output
-                if chunk.is_leaf
-                for span in chunk.spans
-            )
+            (span.document_start, span.document_end)
+            for chunk in output
+            if chunk.is_leaf
+            for span in chunk.spans
         )
         prefix_max_end: list[int] = []
         max_end = -1

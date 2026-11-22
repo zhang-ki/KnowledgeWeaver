@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -186,7 +187,7 @@ def test_python_parent_does_not_duplicate_ranges_already_covered_by_children(
 
     assert len(child_leaves) == 1
     assert len(intervals) == len(set(intervals))
-    assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:]))
+    assert all(left[1] <= right[0] for left, right in pairwise(intervals))
 
 
 def test_python_parent_coalesces_contiguous_descendant_leaf_coverage(
@@ -242,7 +243,7 @@ def test_python_parent_coalesces_contiguous_descendant_leaf_coverage(
     assert len(matching_leaves) == 1
     assert matching_leaves[0].parent_id == outer.id
     assert len(matching_leaves[0].text) <= config.max_chars
-    assert all(left[1] <= right[0] for left, right in zip(leaf_intervals, leaf_intervals[1:]))
+    assert all(left[1] <= right[0] for left, right in pairwise(leaf_intervals))
     _assert_source_spans(document, chunks)
     assert [chunk.model_dump(mode="json") for chunk in chunks] == [
         chunk.model_dump(mode="json") for chunk in repeated_chunks
@@ -281,7 +282,7 @@ def test_python_parent_does_not_coalesce_across_sibling_functions(
     assert right.parent_id == outer.id
     assert not any("def left():" in chunk.text and "def right():" in chunk.text for chunk in leaves)
     assert all(len(chunk.text) <= config.max_chars for chunk in leaves)
-    assert all(left[1] <= right[0] for left, right in zip(intervals, intervals[1:]))
+    assert all(left[1] <= right[0] for left, right in pairwise(intervals))
     _assert_source_spans(document, chunks)
 
 
