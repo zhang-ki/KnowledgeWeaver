@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,6 +100,190 @@ def test_python_syntax_error_is_reported_without_importing_source(
     assert result.documents == []
     assert result.rejected_files[0].code == "PARSE_FAILED"
     assert "line 1" in result.rejected_files[0].message
+
+
+def test_python_parent_fills_only_uncovered_source_gaps_deterministically(
+    tmp_path, request_factory, source_factory, run_immediate_async
+) -> None:
+    content = (
+        "def resolve():\n"
+        "    value = 1\n"
+        "    # Quote lives in a parser gap.\n"
+        "    return value\n"
+    )
+    (tmp_path / "gapped.py").write_text(content, encoding="utf-8")
+    request = request_factory(
+        tmp_path, SourceKind.python_repo, source_factory(SourceKind.python_repo)
+    )
+    document = run_immediate_async(StructuralParser().parse(request)).documents[0]
+    chunker = StructuralChunker()
+    config = _chunk_config()
+
+    chunks = chunker.split(document, config)
+    repeated_chunks = chunker.split(document, config)
+    parent = next(chunk for chunk in chunks if chunk.qualname == "resolve" and not chunk.is_leaf)
+    quote = "# Quote lives in a parser gap."
+    quote_start = document.normalized_text.index(quote)
+    matching_leaves = [
+        chunk
+        for chunk in chunks
+        if chunk.is_leaf
+        and chunk.parent_id == parent.id
+        and quote in chunk.text
+        and any(
+            span.chunk_start <= chunk.text.index(quote)
+            and chunk.text.index(quote) + len(quote) <= span.chunk_end
+            for span in chunk.spans
+        )
+    ]
+
+    assert not parent.is_leaf
+    assert len(matching_leaves) == 1
+    leaf = matching_leaves[0]
+    span = leaf.spans[0]
+    assert span.locator.path == "gapped.py"
+    assert span.locator.line_start <= 3 <= span.locator.line_end
+    assert span.document_start <= quote_start < quote_start + len(quote) <= span.document_end
+    assert document.normalized_text[span.document_start : span.document_end] == leaf.text[
+        span.chunk_start : span.chunk_end
+    ]
+    _assert_source_spans(document, chunks)
+
+    def chunk_projection(items):
+        return [
+            (
+                item.id,
+                item.parent_id,
+                item.is_leaf,
+                item.text,
+                [span.model_dump(mode="json") for span in item.spans],
+            )
+            for item in items
+        ]
+
+    assert chunk_projection(chunks) == chunk_projection(repeated_chunks)
+
+
+def test_python_parent_does_not_duplicate_ranges_already_covered_by_children(
+    tmp_path, request_factory, source_factory, run_immediate_async
+) -> None:
+    content = "def ready():\n    result = 1\n    return result\n"
+    (tmp_path / "covered.py").write_text(content, encoding="utf-8")
+    request = request_factory(
+        tmp_path, SourceKind.python_repo, source_factory(SourceKind.python_repo)
+    )
+    document = run_immediate_async(StructuralParser().parse(request)).documents[0]
+    chunks = StructuralChunker().split(document, _chunk_config())
+    parent = next(chunk for chunk in chunks if chunk.qualname == "ready" and not chunk.is_leaf)
+    child_leaves = [
+        chunk for chunk in chunks if chunk.is_leaf and chunk.parent_id == parent.id
+    ]
+    intervals = sorted(
+        (span.document_start, span.document_end)
+        for chunk in chunks
+        if chunk.is_leaf
+        for span in chunk.spans
+    )
+
+    assert len(child_leaves) == 1
+    assert len(intervals) == len(set(intervals))
+    assert all(left[1] <= right[0] for left, right in pairwise(intervals))
+
+
+def test_python_parent_coalesces_contiguous_descendant_leaf_coverage(
+    tmp_path, request_factory, source_factory, run_immediate_async
+) -> None:
+    content = (
+        "def outer():\n"
+        "    def inner():\n"
+        "        first = 1\n"
+        "        second = 2\n"
+        "        return first + second\n"
+        "    return inner()\n"
+    )
+    (tmp_path / "nested.py").write_text(content, encoding="utf-8")
+    request = request_factory(
+        tmp_path, SourceKind.python_repo, source_factory(SourceKind.python_repo)
+    )
+    document = run_immediate_async(StructuralParser().parse(request)).documents[0]
+    chunker = StructuralChunker()
+    config = _chunk_config(target=300, maximum=400, overlap=20)
+    chunks = chunker.split(document, config)
+    repeated_chunks = chunker.split(document, config)
+    outer = next(chunk for chunk in chunks if chunk.qualname == "outer" and not chunk.is_leaf)
+    inner = next(chunk for chunk in chunks if chunk.qualname == "outer.inner" and not chunk.is_leaf)
+    inner_start = document.normalized_text.index("def inner():")
+    quote_start = document.normalized_text.rfind("\n", 0, inner_start) + 1
+    outer_return_start = document.normalized_text.index("return inner()", inner_start)
+    quote_end = outer_return_start + len("return inner()")
+    quote = document.normalized_text[quote_start:quote_end]
+    matching_leaves = [
+        chunk
+        for chunk in chunks
+        if chunk.is_leaf
+        and quote in chunk.text
+        and any(
+            span.chunk_start <= chunk.text.index(quote)
+            and chunk.text.index(quote) + len(quote) <= span.chunk_end
+            and span.document_start
+            <= quote_start
+            < quote_start + len(quote)
+            <= span.document_end
+            for span in chunk.spans
+        )
+    ]
+    leaf_intervals = sorted(
+        (span.document_start, span.document_end)
+        for chunk in chunks
+        if chunk.is_leaf
+        for span in chunk.spans
+    )
+
+    assert inner.parent_id == outer.id
+    assert len(matching_leaves) == 1
+    assert matching_leaves[0].parent_id == outer.id
+    assert len(matching_leaves[0].text) <= config.max_chars
+    assert all(left[1] <= right[0] for left, right in pairwise(leaf_intervals))
+    _assert_source_spans(document, chunks)
+    assert [chunk.model_dump(mode="json") for chunk in chunks] == [
+        chunk.model_dump(mode="json") for chunk in repeated_chunks
+    ]
+
+
+def test_python_parent_does_not_coalesce_across_sibling_functions(
+    tmp_path, request_factory, source_factory, run_immediate_async
+) -> None:
+    content = (
+        "def outer():\n"
+        "    def left():\n"
+        "        return 1\n"
+        "    def right():\n"
+        "        return 2\n"
+        "    return left() + right()\n"
+    )
+    (tmp_path / "siblings.py").write_text(content, encoding="utf-8")
+    request = request_factory(
+        tmp_path, SourceKind.python_repo, source_factory(SourceKind.python_repo)
+    )
+    document = run_immediate_async(StructuralParser().parse(request)).documents[0]
+    config = _chunk_config(target=80, maximum=100, overlap=10)
+    chunks = StructuralChunker().split(document, config)
+    outer = next(chunk for chunk in chunks if chunk.qualname == "outer" and not chunk.is_leaf)
+    left = next(chunk for chunk in chunks if chunk.qualname == "outer.left" and not chunk.is_leaf)
+    right = next(chunk for chunk in chunks if chunk.qualname == "outer.right" and not chunk.is_leaf)
+    leaves = [chunk for chunk in chunks if chunk.is_leaf]
+    intervals = sorted(
+        (span.document_start, span.document_end)
+        for chunk in leaves
+        for span in chunk.spans
+    )
+
+    assert left.parent_id == outer.id
+    assert right.parent_id == outer.id
+    assert not any("def left():" in chunk.text and "def right():" in chunk.text for chunk in leaves)
+    assert all(len(chunk.text) <= config.max_chars for chunk in leaves)
+    assert all(left[1] <= right[0] for left, right in pairwise(intervals))
+    _assert_source_spans(document, chunks)
 
 
 def test_markdown_headings_fences_and_line_locators(
