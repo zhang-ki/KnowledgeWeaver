@@ -426,3 +426,41 @@ def test_mapped_path_preserves_direction_and_closes_over_gold_evidence() -> None
     assert measurements.strict_chunk_recall_at_k[5] == 0.5
     assert measurements.complete_path_accuracy == 1.0
     assert measurements.gold_path_coverage == 1.0
+
+
+def test_txt_quote_must_be_inside_declared_source_lines_even_in_a_broad_leaf() -> None:
+    from knowledge_weaver.evaluation.gold_mapping import _span_candidates
+
+    text = "accepted evidence.\f\naccepted evidence."
+    prepared, source, document, chunks, evidence, _ = _fixture(text, overlap=False)
+    path = "docs/guide.txt"
+    document = document.model_copy(update={"relative_path": path})
+    source = source.model_copy(update={"source_path": path})
+    locator = MarkdownLocator(path=path, line_start=1, line_end=3)
+    chunk = chunks[0].model_copy(update={
+        "spans": [chunks[0].spans[0].model_copy(update={"locator": locator})],
+    })
+    proof = evidence[0].model_copy(update={"locator": locator})
+
+    def locate(line: int) -> set[tuple[str, int, int]]:
+        gold = prepared.case.gold[0].model_copy(update={
+            "source_path": path,
+            "locator": MarkdownLocator(path=path, line_start=line, line_end=line),
+        })
+        case = prepared.model_copy(update={"case": prepared.case.model_copy(update={"gold": [gold]})})
+        candidates, intervals = _span_candidates(
+            case,
+            0,
+            source_assets={source.id: source},
+            documents={document.id: document},
+            chunks_by_document={document.id: [chunk]},
+            evidence_by_chunk={chunk.id: [proof]},
+        )
+        assert all(candidate.evidence_ids == (proof.id,) for candidate in candidates)
+        return intervals
+
+    quote = "accepted evidence."
+    last = text.rindex(quote)
+    assert locate(1) == {(document.id, 0, len(quote))}
+    assert locate(2) == set()
+    assert locate(3) == {(document.id, last, last + len(quote))}

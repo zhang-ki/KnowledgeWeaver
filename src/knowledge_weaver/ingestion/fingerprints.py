@@ -29,6 +29,8 @@ def parser_fingerprint(source_kind: SourceKind) -> str:
         "dependency": dependency,
         "dependency_version": dependency_version,
     }
+    if source_kind is SourceKind.markdown:
+        settings["txt_coordinates"] = "crlf-cr-lf-ff-v1"
     if source_kind is SourceKind.python_repo:
         settings["python_runtime"] = f"{sys.version_info.major}.{sys.version_info.minor}"
         settings["encoding"] = "utf-8-sig"

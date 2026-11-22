@@ -256,3 +256,39 @@ def test_text_inputs_keep_strict_utf8_decoding(
     assert not parsed.documents
     assert len(parsed.rejected_files) == 1
     assert parsed.rejected_files[0].code == "PARSE_FAILED"
+
+
+def test_txt_windows_preserve_page_coordinates_and_contiguous_source(
+    tmp_path, request_factory, source_factory, run_immediate_async
+) -> None:
+    from knowledge_weaver.ingestion.chunker import StructuralChunker
+    from knowledge_weaver.ingestion.text_coordinates import TextCoordinates
+    from knowledge_weaver.models import ChunkConfig
+
+    content = "A\r\nB\f\nC" + "x" * 64
+    (tmp_path / "rfc.txt").write_bytes(content.encode())
+    request = request_factory(tmp_path, SourceKind.markdown, source_factory(SourceKind.markdown))
+    document, = run_immediate_async(StructuralParser().parse(request)).documents
+    coordinates = TextCoordinates.from_text(document.normalized_text)
+    assert coordinates.at(content.index("\f")) == (2, 1, 2)
+    assert coordinates.at(content.index("C")) == (4, 2, 2)
+    assert document.normalized_text == content
+    config = ChunkConfig(fingerprint="test", max_chars=16, target_chars=9, overlap_chars=2)
+    chunker = StructuralChunker()
+    chunks = chunker.split(document, config)
+    leaves = [chunk for chunk in chunks if chunk.is_leaf]
+    assert chunks == chunker.split(document, config)
+    assert [chunk.spans[0].document_start for chunk in leaves[:3]] == [0, 8, 16]
+    quote_start, quote_end = 13, 20
+    assert any(
+        chunk.spans[0].document_start <= quote_start
+        and quote_end <= chunk.spans[0].document_end
+        for chunk in leaves
+    )
+    for chunk in leaves:
+        span, = chunk.spans
+        assert len(chunk.text) <= config.max_chars
+        assert chunk.text == content[span.document_start:span.document_end]
+        assert span.locator.line_start == coordinates.at(span.document_start)[0]
+        assert span.locator.line_end == coordinates.at(span.document_end - 1)[0]
+        assert chunk.chunker_fingerprint != config.fingerprint
