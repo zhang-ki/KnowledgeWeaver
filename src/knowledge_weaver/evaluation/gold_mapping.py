@@ -11,15 +11,21 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from knowledge_weaver.evaluation.contracts import PreparedBenchmarkCase, SourceAsset
-from knowledge_weaver.evaluation.generation_binding import verify_generation_manifest
+from knowledge_weaver.evaluation.generation_binding import (
+    GenerationBindingError,
+    verify_generation_manifest,
+)
 from knowledge_weaver.ingestion.text_coordinates import TextCoordinates
 from knowledge_weaver.models.contracts import (
     Chunk,
     Document,
+    Entity,
     Evidence,
     Generation,
     MarkdownLocator,
+    Polarity,
     Relation,
+    RelationPredicate,
 )
 
 
@@ -48,6 +54,17 @@ class GoldSpanMapping:
         value = asdict(self)
         value["status"] = self.status.value
         return value
+
+
+@dataclass(frozen=True)
+class GoldRelationExpectation:
+    """Expected semantic contract for resolving a Data-side Gold relation ID at runtime."""
+
+    relation_id: str
+    predicate: RelationPredicate
+    subject_names: tuple[str, ...]
+    object_names: tuple[str, ...]
+    polarity: Polarity = Polarity.positive
 
 
 @dataclass(frozen=True)
@@ -381,6 +398,118 @@ def _same_physical_quote_groups(
     return physical_identity is not None and evidence_identity is not None
 
 
+def _normalize_entity_label(label: str) -> str:
+    return " ".join(label.strip().split())
+
+
+def _entity_matches(
+    entity: Entity | None,
+    expected_names: tuple[str, ...],
+    *,
+    entities_by_id: Mapping[str, Entity],
+) -> bool:
+    if entity is None or not expected_names:
+        return False
+    expected_labels = {_normalize_entity_label(name) for name in expected_names if name.strip()}
+    if not expected_labels:
+        return False
+
+    def has_exact_registered_label(candidate: Entity) -> bool:
+        labels = {_normalize_entity_label(candidate.canonical_name)} | {
+            _normalize_entity_label(alias) for alias in candidate.aliases
+        }
+        return bool(labels & expected_labels)
+
+    if not has_exact_registered_label(entity):
+        return False
+    matching_entity_ids = {
+        candidate.id
+        for candidate in entities_by_id.values()
+        if has_exact_registered_label(candidate)
+    }
+    matching_identity_ids = {
+        candidate.id
+        for candidate in entities_by_id.values()
+        if (candidate.corpus_id, candidate.kind, candidate.identity_key)
+        == (entity.corpus_id, entity.kind, entity.identity_key)
+    }
+    return matching_entity_ids == {entity.id} and matching_identity_ids == {entity.id}
+
+
+def _relation_evidence_closure(
+    relation: Relation, mapped_evidence_groups: Sequence[set[str]]
+) -> tuple[str, ...]:
+    relation_evidence_ids = set(relation.evidence_ids)
+    intersections = [group & relation_evidence_ids for group in mapped_evidence_groups]
+    if not intersections or any(not intersection for intersection in intersections):
+        return ()
+    return tuple(sorted(set().union(*intersections)))
+
+
+def _resolve_runtime_relation(
+    edge_relation_id: str,
+    mapped_evidence_groups: Sequence[set[str]],
+    *,
+    relation_by_id: Mapping[str, Relation],
+    relations: Sequence[Relation],
+    entities_by_id: Mapping[str, Entity],
+    relation_expectations: Mapping[str, GoldRelationExpectation] | None,
+) -> tuple[Relation | None, tuple[str, ...], str | None]:
+    direct = relation_by_id.get(edge_relation_id)
+    if direct is not None:
+        closed = _relation_evidence_closure(direct, mapped_evidence_groups)
+        if not closed:
+            return direct, (), "does not close over Evidence for every reviewed Gold quote"
+        return direct, closed, None
+    if not relation_expectations:
+        return None, (), None
+    expectation = relation_expectations.get(edge_relation_id)
+    if expectation is None:
+        return None, (), None
+    if not expectation.subject_names or not expectation.object_names:
+        return None, (), "cannot be resolved because explicit subject and object names are missing"
+
+    matches: list[tuple[Relation, tuple[str, ...]]] = []
+    has_qualified_candidate = False
+    has_direction_mismatch = False
+    for candidate in relations:
+        if candidate.predicate is not expectation.predicate:
+            continue
+        if candidate.polarity is not expectation.polarity:
+            continue
+        closed = _relation_evidence_closure(candidate, mapped_evidence_groups)
+        if not closed:
+            continue
+        subj = entities_by_id.get(candidate.subject_id)
+        obj = entities_by_id.get(candidate.object_id)
+        if not _entity_matches(
+            subj, expectation.subject_names, entities_by_id=entities_by_id
+        ) or not _entity_matches(obj, expectation.object_names, entities_by_id=entities_by_id):
+            if _entity_matches(
+                subj, expectation.object_names, entities_by_id=entities_by_id
+            ) and _entity_matches(obj, expectation.subject_names, entities_by_id=entities_by_id):
+                has_direction_mismatch = True
+            continue
+        if candidate.qualifiers:
+            has_qualified_candidate = True
+            continue
+        matches.append((candidate, closed))
+    if has_qualified_candidate:
+        return (
+            None,
+            (),
+            "cannot be resolved because candidate qualifiers are not represented in the expectation",
+        )
+    if len(matches) > 1:
+        return None, (), "has multiple semantic candidates"
+    if not matches:
+        if has_direction_mismatch:
+            return None, (), "has an endpoint direction mismatch"
+        return None, (), "has no candidate matching its exact endpoints and Evidence for every Gold quote"
+    relation, closed_ids = matches[0]
+    return relation, closed_ids, None
+
+
 def map_gold_to_generation(
     cases: Sequence[PreparedBenchmarkCase],
     source_assets: Sequence[SourceAsset],
@@ -389,19 +518,42 @@ def map_gold_to_generation(
     evidence: Sequence[Evidence],
     relations: Sequence[Relation],
     *,
+    entities: Sequence[Entity] = (),
+    relation_expectations: Mapping[str, GoldRelationExpectation] | None = None,
     generation: Generation,
     dataset_sha256: str,
 ) -> GoldMappingReport:
     """Map every reviewed span/path; unmapped, ambiguous, and incomplete rows block readiness."""
+    relation_ids = {item.id for item in relations}
+    expectation_ids = relation_expectations or {}
+    needs_semantic_entities = any(
+        edge.relation_id not in relation_ids and edge.relation_id in expectation_ids
+        for case in cases
+        for path in case.gold_paths
+        for edge in path.edges
+    )
+    observed_members: dict[str, Sequence[str]] = {
+        "document": [item.id for item in documents],
+        "chunk": [item.id for item in chunks],
+        "evidence": [item.id for item in evidence],
+        "relation": [item.id for item in relations],
+    }
+    if needs_semantic_entities:
+        observed_members["entity"] = [item.id for item in entities]
     verified_generation = verify_generation_manifest(
         generation,
-        observed_member_ids={
-            "document": [item.id for item in documents],
-            "chunk": [item.id for item in chunks],
-            "evidence": [item.id for item in evidence],
-            "relation": [item.id for item in relations],
-        },
+        observed_member_ids=observed_members,
     )
+    if needs_semantic_entities and sorted(entity.id for entity in entities) != sorted(
+        verified_generation.generation.entity_ids
+    ):
+        raise GenerationBindingError(
+            "observed Entity IDs differ from persisted Generation entity membership"
+        )
+    if needs_semantic_entities and any(
+        entity.corpus_id != verified_generation.generation.corpus_id for entity in entities
+    ):
+        raise GenerationBindingError("observed Entity corpus differs from persisted Generation")
     assets = {item.id: item for item in source_assets}
     docs = {item.id: item for item in documents}
     chunks_by_document: dict[str, list[Chunk]] = {}
@@ -411,6 +563,7 @@ def map_gold_to_generation(
     for item in evidence:
         evidence_by_chunk.setdefault(item.chunk_id, []).append(item)
     relation_by_id = {item.id: item for item in relations}
+    entities_by_id = {item.id: item for item in entities}
 
     span_mappings: list[GoldSpanMapping] = []
     path_mappings: list[GoldPathMapping] = []
@@ -440,13 +593,10 @@ def map_gold_to_generation(
             mapped_relations: list[str] = []
             mapped_directions: list[bool] = []
             edge_evidence: list[tuple[str, ...]] = []
+            previous_to_id: str | None = None
             failure: str | None = None
             for edge_index, edge in enumerate(reviewed_path.edges):
-                relation = relation_by_id.get(edge.relation_id)
-                if relation is None:
-                    failure = f"Gold relation {edge.relation_id} is absent from generation"
-                    break
-                mapped_ids: set[str] = set()
+                mapped_evidence_groups: list[set[str]] = []
                 for quote_hash in edge.evidence_quote_sha256:
                     span_mappings_for_quote = mappings_by_case_quote.get(
                         (case.case.id, quote_hash), []
@@ -470,18 +620,55 @@ def map_gold_to_generation(
                             "does not resolve to a mapped span"
                         )
                         break
-                    mapped_ids.update(span_mapping.evidence_ids)
+                    mapped_evidence_groups.append(set(span_mapping.evidence_ids))
                 if failure:
                     break
-                closed_ids = tuple(sorted(mapped_ids & set(relation.evidence_ids)))
+                relation, closed_ids, resolution_failure = _resolve_runtime_relation(
+                    edge.relation_id,
+                    mapped_evidence_groups,
+                    relation_by_id=relation_by_id,
+                    relations=relations,
+                    entities_by_id=entities_by_id,
+                    relation_expectations=relation_expectations,
+                )
+                if relation is None:
+                    failure = (
+                        f"Gold relation {edge.relation_id} {resolution_failure}"
+                        if resolution_failure
+                        else f"Gold relation {edge.relation_id} is absent from generation"
+                    )
+                    break
                 if not closed_ids:
                     failure = (
-                        f"Gold path edge {edge_index} relation does not close over mapped Evidence"
+                        f"Gold path edge {edge_index} relation "
+                        f"{resolution_failure or 'does not close over mapped Evidence'}"
+                    )
+                    break
+                generation_entity_ids = set(verified_generation.generation.entity_ids)
+                if (
+                    relation.subject_id not in generation_entity_ids
+                    or relation.object_id not in generation_entity_ids
+                ):
+                    failure = (
+                        f"Gold path edge {edge_index} relation endpoint is outside Generation "
+                        "entity membership"
+                    )
+                    break
+                step_from_id, step_to_id = (
+                    (relation.object_id, relation.subject_id)
+                    if edge.traversed_reverse
+                    else (relation.subject_id, relation.object_id)
+                )
+                if previous_to_id is not None and previous_to_id != step_from_id:
+                    failure = (
+                        f"Gold path is discontinuous between edges {edge_index - 1} and "
+                        f"{edge_index}: {previous_to_id} != {step_from_id}"
                     )
                     break
                 mapped_relations.append(relation.id)
                 mapped_directions.append(edge.traversed_reverse)
                 edge_evidence.append(closed_ids)
+                previous_to_id = step_to_id
             status = GoldMappingStatus.mapped if failure is None else GoldMappingStatus.unmapped
             path = GoldPathMapping(
                 case_id=case.case.id,
