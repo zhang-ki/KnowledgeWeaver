@@ -317,6 +317,70 @@ def _make_span_mapping(
     )
 
 
+def _same_physical_quote_groups(
+    mappings: Sequence[GoldSpanMapping],
+    *,
+    source_assets: Mapping[str, SourceAsset],
+    documents: Mapping[str, Document],
+    generation: Generation,
+) -> bool:
+    """Prove that distinct claim groups resolve to the same physical source span."""
+    if len({item.evidence_group_id for item in mappings}) < 2:
+        return False
+    if len({(item.case_id, item.quote_sha256) for item in mappings}) != 1:
+        return False
+    if not generation.source_version_ids:
+        return False
+
+    generation_scope = (generation.id, tuple(sorted(generation.source_version_ids)))
+    physical_identity: tuple[object, ...] | None = None
+    evidence_identity: frozenset[str] | None = None
+    for item in mappings:
+        if (
+            item.status is not GoldMappingStatus.mapped
+            or len(item.document_intervals) != 1
+            or not item.evidence_ids
+        ):
+            return False
+        document_id, start, end = item.document_intervals[0]
+        document = documents.get(document_id)
+        if document is None or document.id != document_id:
+            return False
+        source_asset = source_assets.get(document.source_id)
+        if (
+            source_asset is None
+            or source_asset.id != document.source_id
+            or document.raw_hash != source_asset.raw_sha256
+        ):
+            return False
+
+        # A persistent Document ID is the source-version membership key within
+        # this verified Generation; equal IDs therefore carry the same version.
+        current_physical_identity = (
+            generation_scope,
+            document.id,
+            document.source_id,
+            document.relative_path,
+            source_asset.source_path,
+            source_asset.raw_sha256,
+            document.raw_hash,
+            start,
+            end,
+        )
+        if physical_identity is None:
+            physical_identity = current_physical_identity
+        elif current_physical_identity != physical_identity:
+            return False
+
+        current_evidence_identity = frozenset(item.evidence_ids)
+        if evidence_identity is None:
+            evidence_identity = current_evidence_identity
+        elif current_evidence_identity != evidence_identity:
+            return False
+
+    return physical_identity is not None and evidence_identity is not None
+
+
 def map_gold_to_generation(
     cases: Sequence[PreparedBenchmarkCase],
     source_assets: Sequence[SourceAsset],
@@ -388,7 +452,12 @@ def map_gold_to_generation(
                         (case.case.id, quote_hash), []
                     )
                     unique_groups = {item.evidence_group_id: item for item in span_mappings_for_quote}
-                    if len(unique_groups) != 1:
+                    if len(unique_groups) != 1 and not _same_physical_quote_groups(
+                        tuple(unique_groups.values()),
+                        source_assets=assets,
+                        documents=docs,
+                        generation=verified_generation.generation,
+                    ):
                         failure = (
                             f"Gold path edge {edge_index} quote hash {quote_hash} "
                             "does not identify exactly one reviewed source span"

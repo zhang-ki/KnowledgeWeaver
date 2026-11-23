@@ -69,6 +69,7 @@ def _fixture(
     overlap: bool = True,
     include_evidence: bool = True,
     include_path: bool = False,
+    claim_groups: tuple[str, ...] = ("claim-1",),
 ) -> tuple[PreparedBenchmarkCase, SourceAsset, Document, list[Chunk], list[Evidence], list[Relation]]:
     quote = "accepted evidence."
     quote_start = text.index(quote)
@@ -122,8 +123,9 @@ def _fixture(
                 locator=locator,
                 quote=quote,
                 grade=2,
-                claim_group="claim-1",
+                claim_group=claim_group,
             )
+            for claim_group in claim_groups
         ],
         gold_paths=[[RELATION_ID]] if include_path else [],
         reviewer="fixture",
@@ -145,7 +147,7 @@ def _fixture(
         reviewed_record_sha256=human_review_digest(
             case,
             [SOURCE_ID],
-            [quote_hash],
+            [quote_hash for _ in claim_groups],
             "fixture",
             NOW,
             checklist,
@@ -157,7 +159,7 @@ def _fixture(
         case=case,
         source_ids=[SOURCE_ID],
         source_record_sha256=[source_record_hash],
-        gold_quote_sha256=[quote_hash],
+        gold_quote_sha256=[quote_hash for _ in claim_groups],
         gold_paths=reviewed_paths,
         human_review=review,
     )
@@ -291,6 +293,46 @@ def _map(fixture: tuple[PreparedBenchmarkCase, SourceAsset, Document, list[Chunk
     )
 
 
+def _with_gold_groups(
+    prepared: PreparedBenchmarkCase,
+    groups: list[tuple[str, MarkdownLocator]],
+    *,
+    source_path: str | None = None,
+) -> PreparedBenchmarkCase:
+    template = prepared.case.gold[0]
+    gold = [
+        template.model_copy(
+            update={
+                "claim_group": claim_group,
+                "locator": locator,
+                "source_path": source_path or template.source_path,
+            }
+        )
+        for claim_group, locator in groups
+    ]
+    case = prepared.case.model_copy(update={"gold": gold})
+    quote_hashes = [hashlib.sha256(item.quote.encode("utf-8")).hexdigest() for item in gold]
+    review_digest = human_review_digest(
+        case,
+        prepared.source_ids,
+        quote_hashes,
+        prepared.human_review.reviewer_id,
+        prepared.human_review.reviewed_at,
+        prepared.human_review.checklist,
+        list(prepared.gold_paths),
+        prepared.source_record_sha256,
+    )
+    review = prepared.human_review.model_copy(update={"reviewed_record_sha256": review_digest})
+    return PreparedBenchmarkCase(
+        case=case,
+        source_ids=prepared.source_ids,
+        source_record_sha256=prepared.source_record_sha256,
+        gold_quote_sha256=quote_hashes,
+        gold_paths=prepared.gold_paths,
+        human_review=review,
+    )
+
+
 def test_gold_span_maps_to_overlapping_leaf_group_and_strict_chunk_recall() -> None:
     report = _map(_fixture())
     assert report.ready
@@ -300,6 +342,125 @@ def test_gold_span_maps_to_overlapping_leaf_group_and_strict_chunk_recall() -> N
     assert len(mapping.evidence_ids) == 2
     assert mapped_evidence_group_recall([mapping.chunk_ids[0]], [mapping]) == 1.0
     assert strict_chunk_recall([mapping.chunk_ids[0]], [mapping]) == 0.5
+
+
+def test_gold_path_maps_multiple_claim_groups_for_the_same_physical_quote() -> None:
+    report = _map(
+        _fixture(include_path=True, claim_groups=("claim-1", "claim-2"))
+    )
+
+    assert report.ready
+    assert [item.claim_group for item in report.span_mappings] == ["claim-1", "claim-2"]
+    assert report.span_mappings[0].evidence_group_id != report.span_mappings[1].evidence_group_id
+    assert report.span_mappings[0].evidence_ids == report.span_mappings[1].evidence_ids
+    assert report.path_mappings[0].status is GoldMappingStatus.mapped
+    assert mapped_evidence_group_recall(
+        [report.span_mappings[0].chunk_ids[0]], report.span_mappings
+    ) == 1.0
+    assert strict_chunk_recall(
+        [report.span_mappings[0].chunk_ids[0]], report.span_mappings
+    ) == 0.5
+
+
+def test_gold_path_rejects_same_quote_at_different_document_intervals() -> None:
+    quote = "accepted evidence."
+    text = f"{quote}\n{quote}"
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        text, overlap=False, include_path=True
+    )
+    source_path = "docs/guide.txt"
+    first_locator = MarkdownLocator(path=source_path, line_start=1, line_end=1)
+    second_locator = MarkdownLocator(path=source_path, line_start=2, line_end=2)
+    broad_locator = MarkdownLocator(path=source_path, line_start=1, line_end=2)
+    prepared = _with_gold_groups(
+        prepared,
+        [("claim-1", first_locator), ("claim-2", second_locator)],
+        source_path=source_path,
+    )
+    source = source.model_copy(update={"source_path": source_path})
+    document = document.model_copy(update={"relative_path": source_path})
+    chunk = chunks[0].model_copy(
+        update={"spans": [chunks[0].spans[0].model_copy(update={"locator": broad_locator})]}
+    )
+    proof = evidence[0].model_copy(update={"locator": broad_locator})
+
+    report = _map((prepared, source, document, [chunk], [proof], relations))
+
+    assert all(item.status is GoldMappingStatus.mapped for item in report.span_mappings)
+    assert report.span_mappings[0].evidence_ids == report.span_mappings[1].evidence_ids
+    assert report.span_mappings[0].document_intervals != report.span_mappings[1].document_intervals
+    assert report.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert "does not identify exactly one reviewed source span" in (
+        report.path_mappings[0].reason or ""
+    )
+
+
+def test_gold_path_rejects_same_interval_with_different_evidence_sets() -> None:
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    first_locator = MarkdownLocator(path="docs/guide.md", line_start=1, line_end=1)
+    second_locator = MarkdownLocator(path="docs/guide.md", line_start=2, line_end=2)
+    broad_locator = MarkdownLocator(path="docs/guide.md", line_start=1, line_end=2)
+    prepared = _with_gold_groups(
+        prepared, [("claim-1", first_locator), ("claim-2", second_locator)]
+    )
+    chunk = chunks[0].model_copy(
+        update={"spans": [chunks[0].spans[0].model_copy(update={"locator": broad_locator})]}
+    )
+    first_evidence = evidence[0].model_copy(update={"locator": first_locator})
+    second_evidence = evidence[0].model_copy(
+        update={"id": EVIDENCE_TWO_ID, "locator": second_locator}
+    )
+    relation = relations[0].model_copy(
+        update={"evidence_ids": [EVIDENCE_ONE_ID, EVIDENCE_TWO_ID]}
+    )
+
+    report = _map(
+        (prepared, source, document, [chunk], [first_evidence, second_evidence], [relation])
+    )
+
+    assert all(item.status is GoldMappingStatus.mapped for item in report.span_mappings)
+    assert report.span_mappings[0].document_intervals == report.span_mappings[1].document_intervals
+    assert report.span_mappings[0].evidence_ids != report.span_mappings[1].evidence_ids
+    assert report.path_mappings[0].status is GoldMappingStatus.unmapped
+
+
+def test_gold_path_does_not_coalesce_unmapped_claim_groups() -> None:
+    prepared, source, document, chunks, _evidence, relations = _fixture(
+        include_path=True, claim_groups=("claim-1", "claim-2")
+    )
+
+    report = _map((prepared, source, document, chunks, [], relations))
+
+    assert all(
+        item.status is GoldMappingStatus.missing_evidence for item in report.span_mappings
+    )
+    assert report.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert "does not identify exactly one reviewed source span" in (
+        report.path_mappings[0].reason or ""
+    )
+
+
+def test_gold_path_still_requires_present_relation_and_evidence_intersection() -> None:
+    fixture = _fixture(
+        overlap=False, include_path=True, claim_groups=("claim-1", "claim-2")
+    )
+    report_without_relation = _map((*fixture[:5], []))
+    assert report_without_relation.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert "is absent from generation" in (
+        report_without_relation.path_mappings[0].reason or ""
+    )
+
+    prepared, source, document, chunks, evidence, relations = fixture
+    relation = relations[0].model_copy(update={"evidence_ids": [EVIDENCE_TWO_ID]})
+    report_without_intersection = _map(
+        (prepared, source, document, chunks, evidence, [relation])
+    )
+    assert report_without_intersection.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert "does not close over mapped Evidence" in (
+        report_without_intersection.path_mappings[0].reason or ""
+    )
 
 
 def test_gold_mapping_never_uses_parent_chunks() -> None:
