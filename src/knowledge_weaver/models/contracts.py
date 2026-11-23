@@ -189,11 +189,6 @@ class RelationPredicate(str, Enum):
     DEPENDS_ON = "DEPENDS_ON"
     RELATED_TO = "RELATED_TO"
     CONTRADICTS = "CONTRADICTS"
-    RETURNS = "RETURNS"
-    MAPS_TO = "MAPS_TO"
-    TRIGGERS = "TRIGGERS"
-    UPDATES = "UPDATES"
-    VALIDATES = "VALIDATES"
 
 
 class PdfLocator(SchemaModel):
