@@ -851,6 +851,59 @@ def test_direct_gold_relation_id_validates_explicit_semantics() -> None:
     assert report.path_mappings[0].relation_ids == (DATA_RELATION_ID,)
 
 
+def test_direct_gold_relation_id_rejects_generation_bound_wrong_entity_identity() -> None:
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    runtime_relation = relations[0].model_copy(
+        update={
+            "id": DATA_RELATION_ID,
+            "predicate": RelationPredicate.USES,
+            "subject_id": SUBJECT_ID,
+            "object_id": OBJECT_ID,
+            "polarity": Polarity.positive,
+            "evidence_ids": [EVIDENCE_ONE_ID],
+        }
+    )
+    subject, obj = _expected_relation_entities()
+    wrong_subject = subject.model_copy(
+        update={
+            "canonical_name": "unrelated factory",
+            "aliases": [],
+            "identity_key": "uvicorn:unrelated_factory",
+        }
+    )
+    wrong_obj = obj.model_copy(
+        update={
+            "canonical_name": "different loop implementation",
+            "identity_key": "uvicorn:different_loop_implementation",
+        }
+    )
+    expectation = _expected_data_relation()
+    generation = _generation_for(document, chunks, evidence, [runtime_relation])
+
+    assert {SUBJECT_ID, OBJECT_ID}.issubset(generation.entity_ids)
+    report = map_gold_to_generation(
+        [prepared],
+        [source],
+        [document],
+        chunks,
+        evidence,
+        [runtime_relation],
+        entities=[wrong_subject, wrong_obj],
+        relation_expectations={DATA_RELATION_ID: expectation},
+        generation=generation,
+        dataset_sha256="a" * 64,
+    )
+
+    assert not report.ready
+    assert report.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert "no candidate matching its exact endpoints" in (
+        report.path_mappings[0].reason or ""
+    )
+
+
 @pytest.mark.parametrize(
     ("contradiction", "reason"),
     [
