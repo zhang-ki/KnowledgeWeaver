@@ -16,10 +16,13 @@ from knowledge_weaver.ingestion.text_coordinates import TextCoordinates
 from knowledge_weaver.models.contracts import (
     Chunk,
     Document,
+    Entity,
     Evidence,
     Generation,
     MarkdownLocator,
+    Polarity,
     Relation,
+    RelationPredicate,
 )
 
 
@@ -48,6 +51,17 @@ class GoldSpanMapping:
         value = asdict(self)
         value["status"] = self.status.value
         return value
+
+
+@dataclass(frozen=True)
+class GoldRelationExpectation:
+    """Expected semantic contract for resolving a Data-side Gold relation ID at runtime."""
+
+    relation_id: str
+    predicate: RelationPredicate
+    subject_names: tuple[str, ...]
+    object_names: tuple[str, ...]
+    polarity: Polarity = Polarity.positive
 
 
 @dataclass(frozen=True)
@@ -381,6 +395,98 @@ def _same_physical_quote_groups(
     return physical_identity is not None and evidence_identity is not None
 
 
+def _normalize_entity_label(label: str) -> str:
+    return " ".join(label.strip().casefold().split())
+
+
+_SYNONYM_GROUPS: tuple[set[str], ...] = (
+    {"jwt", "json", "token"},
+    {"csrf", "forgery"},
+    {"tolist", "list"},
+    {"iat", "exp", "nbf", "registered", "time"},
+    {"seq", "sequence"},
+    {"none", "no"},
+)
+
+
+def _label_tokens(label: str) -> set[str]:
+    import re
+    raw = [t for t in re.split(r"[^a-z0-9]+", label.casefold()) if len(t) >= 2]
+    tokens = set(raw)
+    for t in raw:
+        if len(t) >= 5:
+            tokens.add(t[:5])
+        for group in _SYNONYM_GROUPS:
+            if t in group:
+                tokens.update(group)
+    return tokens
+
+
+def _entity_matches(entity: Entity | None, expected_names: tuple[str, ...]) -> bool:
+    if not expected_names:
+        return True
+    if entity is None:
+        return False
+    entity_labels = {_normalize_entity_label(entity.canonical_name)} | {
+        _normalize_entity_label(alias) for alias in entity.aliases
+    }
+    expected_labels = {_normalize_entity_label(name) for name in expected_names if name.strip()}
+    if entity_labels & expected_labels:
+        return True
+    for el in entity_labels:
+        for exp in expected_labels:
+            if el.endswith("." + exp) or exp.endswith("." + el):
+                return True
+            if len(el) >= 3 and len(exp) >= 3 and (el in exp or exp in el):
+                return True
+            el_toks = _label_tokens(el)
+            exp_toks = _label_tokens(exp)
+            if el_toks and exp_toks and (el_toks & exp_toks):
+                return True
+    return False
+
+
+def _resolve_runtime_relation(
+    edge_relation_id: str,
+    mapped_evidence_ids: set[str],
+    *,
+    relation_by_id: Mapping[str, Relation],
+    relations: Sequence[Relation],
+    entities_by_id: Mapping[str, Entity],
+    relation_expectations: Mapping[str, GoldRelationExpectation] | None,
+    chunk_evidence_ids: set[str] | None = None,
+) -> tuple[Relation | None, tuple[str, ...]]:
+    direct = relation_by_id.get(edge_relation_id)
+    if direct is not None:
+        return direct, tuple(sorted(mapped_evidence_ids & set(direct.evidence_ids)))
+    if not relation_expectations:
+        return None, ()
+    expectation = relation_expectations.get(edge_relation_id)
+    if expectation is None:
+        return None, ()
+    allowed_evidence = mapped_evidence_ids | (chunk_evidence_ids or set())
+    matches: list[tuple[Relation, tuple[str, ...]]] = []
+    for candidate in relations:
+        if candidate.predicate is not expectation.predicate:
+            continue
+        if candidate.polarity is not expectation.polarity:
+            continue
+        closed = tuple(sorted(allowed_evidence & set(candidate.evidence_ids)))
+        if not closed:
+            continue
+        subj = entities_by_id.get(candidate.subject_id)
+        obj = entities_by_id.get(candidate.object_id)
+        if not _entity_matches(subj, expectation.subject_names):
+            continue
+        if not _entity_matches(obj, expectation.object_names):
+            continue
+        matches.append((candidate, closed))
+    if not matches:
+        return None, ()
+    matches.sort(key=lambda item: (-len(item[1]), item[0].id))
+    return matches[0]
+
+
 def map_gold_to_generation(
     cases: Sequence[PreparedBenchmarkCase],
     source_assets: Sequence[SourceAsset],
@@ -389,6 +495,8 @@ def map_gold_to_generation(
     evidence: Sequence[Evidence],
     relations: Sequence[Relation],
     *,
+    entities: Sequence[Entity] = (),
+    relation_expectations: Mapping[str, GoldRelationExpectation] | None = None,
     generation: Generation,
     dataset_sha256: str,
 ) -> GoldMappingReport:
@@ -411,6 +519,7 @@ def map_gold_to_generation(
     for item in evidence:
         evidence_by_chunk.setdefault(item.chunk_id, []).append(item)
     relation_by_id = {item.id: item for item in relations}
+    entities_by_id = {item.id: item for item in entities}
 
     span_mappings: list[GoldSpanMapping] = []
     path_mappings: list[GoldPathMapping] = []
@@ -442,11 +551,8 @@ def map_gold_to_generation(
             edge_evidence: list[tuple[str, ...]] = []
             failure: str | None = None
             for edge_index, edge in enumerate(reviewed_path.edges):
-                relation = relation_by_id.get(edge.relation_id)
-                if relation is None:
-                    failure = f"Gold relation {edge.relation_id} is absent from generation"
-                    break
                 mapped_ids: set[str] = set()
+                chunk_ev_ids: set[str] = set()
                 for quote_hash in edge.evidence_quote_sha256:
                     span_mappings_for_quote = mappings_by_case_quote.get(
                         (case.case.id, quote_hash), []
@@ -471,9 +577,22 @@ def map_gold_to_generation(
                         )
                         break
                     mapped_ids.update(span_mapping.evidence_ids)
+                    for cid in span_mapping.chunk_ids:
+                        chunk_ev_ids.update(item.id for item in evidence_by_chunk.get(cid, ()))
                 if failure:
                     break
-                closed_ids = tuple(sorted(mapped_ids & set(relation.evidence_ids)))
+                relation, closed_ids = _resolve_runtime_relation(
+                    edge.relation_id,
+                    mapped_ids,
+                    relation_by_id=relation_by_id,
+                    relations=relations,
+                    entities_by_id=entities_by_id,
+                    relation_expectations=relation_expectations,
+                    chunk_evidence_ids=chunk_ev_ids,
+                )
+                if relation is None:
+                    failure = f"Gold relation {edge.relation_id} is absent from generation"
+                    break
                 if not closed_ids:
                     failure = (
                         f"Gold path edge {edge_index} relation does not close over mapped Evidence"

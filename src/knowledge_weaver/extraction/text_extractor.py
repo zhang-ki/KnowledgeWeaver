@@ -68,6 +68,11 @@ class _RelationCandidate(BaseModel):
         "DEPENDS_ON",
         "RELATED_TO",
         "CONTRADICTS",
+        "RETURNS",
+        "MAPS_TO",
+        "TRIGGERS",
+        "UPDATES",
+        "VALIDATES",
     ]
     object_local_id: str = Field(min_length=1)
     polarity: Literal["positive", "negative"]
@@ -143,6 +148,7 @@ class StructuredTextExtractor:
         corpus_id: str | None,
         timeout_seconds: float = 30.0,
         max_schema_repairs: int = 1,
+        focus_instruction: str | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -152,6 +158,7 @@ class StructuredTextExtractor:
         self.corpus_id = corpus_id
         self.timeout_seconds = timeout_seconds
         self.max_schema_repairs = max_schema_repairs
+        self.focus_instruction = focus_instruction
 
     async def extract(self, request: ExtractionRequest) -> ExtractionResult:
         builder = ExtractionBuilder(request, corpus_id=self.corpus_id)
@@ -277,8 +284,13 @@ class StructuredTextExtractor:
         self._materialize_relations(payload, entities, chunk, builder, provenance)
 
     def _request(self, context: dict[str, Any], instruction: str) -> LLMRequest:
+        full_instruction = (
+            f"{instruction}\n\n{self.focus_instruction}"
+            if self.focus_instruction
+            else instruction
+        )
         return LLMRequest(
-            system_instruction=instruction,
+            system_instruction=f"{full_instruction}\n\nJSON Schema:\n{json.dumps(_SCHEMA, ensure_ascii=False)}",
             untrusted_context=json.dumps(context, ensure_ascii=False, sort_keys=True),
             response_schema=_SCHEMA,
             max_output_tokens=2500,
