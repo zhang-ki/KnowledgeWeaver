@@ -446,6 +446,38 @@ def _relation_evidence_closure(
     return tuple(sorted(set().union(*intersections)))
 
 
+def _direct_relation_expectation_failure(
+    relation: Relation,
+    expectation: GoldRelationExpectation,
+    *,
+    entities_by_id: Mapping[str, Entity],
+) -> str | None:
+    if not expectation.subject_names or not expectation.object_names:
+        return "cannot be resolved because explicit subject and object names are missing"
+    if relation.predicate is not expectation.predicate:
+        return "does not match the expected predicate"
+    if relation.polarity is not expectation.polarity:
+        return "does not match the expected polarity"
+    if relation.qualifiers:
+        return "cannot be resolved because candidate qualifiers are not represented in the expectation"
+
+    subject = entities_by_id.get(relation.subject_id)
+    obj = entities_by_id.get(relation.object_id)
+    subject_matches = _entity_matches(
+        subject, expectation.subject_names, entities_by_id=entities_by_id
+    )
+    object_matches = _entity_matches(
+        obj, expectation.object_names, entities_by_id=entities_by_id
+    )
+    if subject_matches and object_matches:
+        return None
+    if _entity_matches(
+        subject, expectation.object_names, entities_by_id=entities_by_id
+    ) and _entity_matches(obj, expectation.subject_names, entities_by_id=entities_by_id):
+        return "has an endpoint direction mismatch"
+    return "has no candidate matching its exact endpoints"
+
+
 def _resolve_runtime_relation(
     edge_relation_id: str,
     mapped_evidence_groups: Sequence[set[str]],
@@ -457,9 +489,16 @@ def _resolve_runtime_relation(
 ) -> tuple[Relation | None, tuple[str, ...], str | None]:
     direct = relation_by_id.get(edge_relation_id)
     if direct is not None:
+        expectation = (relation_expectations or {}).get(edge_relation_id)
+        if expectation is not None:
+            expectation_failure = _direct_relation_expectation_failure(
+                direct, expectation, entities_by_id=entities_by_id
+            )
+            if expectation_failure:
+                return None, (), expectation_failure
         closed = _relation_evidence_closure(direct, mapped_evidence_groups)
         if not closed:
-            return direct, (), "does not close over Evidence for every reviewed Gold quote"
+            return None, (), "does not close over Evidence for every reviewed Gold quote"
         return direct, closed, None
     if not relation_expectations:
         return None, (), None
@@ -524,10 +563,9 @@ def map_gold_to_generation(
     dataset_sha256: str,
 ) -> GoldMappingReport:
     """Map every reviewed span/path; unmapped, ambiguous, and incomplete rows block readiness."""
-    relation_ids = {item.id for item in relations}
     expectation_ids = relation_expectations or {}
     needs_semantic_entities = any(
-        edge.relation_id not in relation_ids and edge.relation_id in expectation_ids
+        edge.relation_id in expectation_ids
         for case in cases
         for path in case.gold_paths
         for edge in path.edges
