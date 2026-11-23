@@ -375,6 +375,39 @@ def _map_with_expectation(
     )
 
 
+def _expected_relation_entities() -> list[Entity]:
+    return [
+        Entity(
+            id=SUBJECT_ID,
+            corpus_id=GENERATION_CORPUS_ID,
+            kind=EntityKind.concept,
+            canonical_name="get_loop_factory",
+            aliases=["Config.get_loop_factory"],
+            namespace="uvicorn",
+            identity_key="uvicorn:get_loop_factory",
+        ),
+        Entity(
+            id=OBJECT_ID,
+            corpus_id=GENERATION_CORPUS_ID,
+            kind=EntityKind.concept,
+            canonical_name="None loop factory",
+            aliases=[],
+            namespace="uvicorn",
+            identity_key="uvicorn:none_loop_factory",
+        ),
+    ]
+
+
+def _expected_data_relation() -> GoldRelationExpectation:
+    return GoldRelationExpectation(
+        relation_id=DATA_RELATION_ID,
+        predicate=RelationPredicate.USES,
+        subject_names=("Config.get_loop_factory",),
+        object_names=("None loop factory",),
+        polarity=Polarity.positive,
+    )
+
+
 def _with_gold_groups(
     prepared: PreparedBenchmarkCase,
     groups: list[tuple[str, MarkdownLocator]],
@@ -780,6 +813,134 @@ def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_m
     )
     assert not bad_report.ready
     assert bad_report.path_mappings[0].status is GoldMappingStatus.unmapped
+
+
+def test_direct_gold_relation_id_validates_explicit_semantics() -> None:
+    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    runtime_relation = relations[0].model_copy(
+        update={
+            "id": DATA_RELATION_ID,
+            "predicate": RelationPredicate.USES,
+            "subject_id": SUBJECT_ID,
+            "object_id": OBJECT_ID,
+            "polarity": Polarity.positive,
+            "qualifiers": {},
+            "evidence_ids": [EVIDENCE_ONE_ID],
+        }
+    )
+    entities = _expected_relation_entities()
+    expectation = _expected_data_relation()
+
+    report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [runtime_relation],
+        entities,
+        expectation,
+    )
+
+    assert report.ready
+    assert report.path_mappings[0].relation_ids == (DATA_RELATION_ID,)
+
+
+@pytest.mark.parametrize(
+    ("contradiction", "reason"),
+    [
+        ("predicate", "expected predicate"),
+        ("polarity", "expected polarity"),
+        ("ordered_endpoints", "endpoint direction mismatch"),
+        ("qualifiers", "candidate qualifiers are not represented"),
+        ("evidence", "does not close over Evidence for every reviewed Gold quote"),
+    ],
+)
+def test_direct_gold_relation_id_contradiction_does_not_fall_back(
+    contradiction: str, reason: str
+) -> None:
+    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    valid_alternative = relations[0].model_copy(
+        update={
+            "id": RUNTIME_RELATION_TWO_ID,
+            "predicate": RelationPredicate.USES,
+            "subject_id": SUBJECT_ID,
+            "object_id": OBJECT_ID,
+            "polarity": Polarity.positive,
+            "qualifiers": {},
+            "evidence_ids": [EVIDENCE_ONE_ID],
+        }
+    )
+    contradiction_updates = {
+        "predicate": {"predicate": RelationPredicate.CALLS},
+        "polarity": {"polarity": Polarity.negative},
+        "ordered_endpoints": {"subject_id": OBJECT_ID, "object_id": SUBJECT_ID},
+        "qualifiers": {"qualifiers": {"modality": "RECOMMENDED"}},
+        "evidence": {"evidence_ids": [EVIDENCE_TWO_ID]},
+    }[contradiction]
+    direct_relation = valid_alternative.model_copy(
+        update={"id": DATA_RELATION_ID, **contradiction_updates}
+    )
+    entities = _expected_relation_entities()
+    expectation = _expected_data_relation()
+
+    report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [direct_relation, valid_alternative],
+        entities,
+        expectation,
+    )
+
+    assert not report.ready
+    assert report.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert report.path_mappings[0].relation_ids == ()
+    assert reason in (report.path_mappings[0].reason or "")
+
+
+def test_direct_gold_relation_expectation_requires_generation_entity_binding() -> None:
+    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    direct_relation = relations[0].model_copy(
+        update={
+            "id": DATA_RELATION_ID,
+            "predicate": RelationPredicate.USES,
+            "subject_id": SUBJECT_ID,
+            "object_id": OBJECT_ID,
+            "polarity": Polarity.positive,
+        }
+    )
+    entities = _expected_relation_entities()
+    expectation = _expected_data_relation()
+
+    with pytest.raises(GenerationBindingError, match="membership"):
+        _map_with_expectation(
+            prepared,
+            source,
+            document,
+            chunks,
+            evidence,
+            [direct_relation],
+            entities[1:],
+            expectation,
+        )
 
 
 def test_gold_path_fallback_does_not_close_on_adjacent_chunk_evidence_or_pick_first_id() -> None:
