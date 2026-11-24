@@ -97,3 +97,44 @@ No API key, Qwen cloud credential, external request, formal Test split, paid pro
 - Base/rollback: code base `8dbfa0f1e76b7ddfb816473937e5be48d1883e08`; `refs/codex/rollback/b07-local-chat-acceptance-attempt-001` points to that commit. The required baseline `1052ddcc75c09acf1199889df152bceaffab1915` remains an ancestor.
 - Implementation candidate: `4d0997e5970126a2194e9010a641dcc116d013a6` (parent `8dbfa0f1e76b7ddfb816473937e5be48d1883e08`); the rollback ref above preserves the pre-change state.
 - The local answer resolves the generation-unavailable blocker for this one synthetic Dense Dev route only. Missing frozen dataset manifest, persisted source text/SourceVersion binding, citation-bearing answer, B04 cache control, and B06 ordered trace remain open. No formal gate or quality threshold was relaxed.
+
+## Continuation: PostgreSQL-backed Dense Dev synthetic acceptance — 2026-11-25
+
+This run replaces the earlier in-memory hydration attempt as evidence for one isolated synthetic route. It does not turn the blocked dataset into a frozen dataset or claim a complete B07 Dev slice.
+
+### Isolated persisted source and identity
+
+- Evidence artifact: `.kw/runtime/verification/B07-PG-Dense-Dev-20261125-ef46ea39/result.json`; the self-authored source remains under the same run directory at `source/synthetic_acceptance.py`.
+- The run created one new corpus `9fe42200-d034-4989-9c08-cd755ad1c262`, source `e02b21b0-690b-4bde-8fdc-5f6b18a8543c`, SourceVersion `1f47817e-f870-5b00-8b46-60b9527fffc5`, Document `5580fe23-ce56-5d3e-99c3-1f9ca51f9916`, and READY Generation `30152134-f2d0-4395-bc0a-420a1b9439c2`.
+- The SourceVersion manifest SHA is `c67b72d583405bd8239a37326b5173cf4aeb272e5de5f74635462a10d90c0925`; the verified Generation SHA is `99328dc402f975f851b292eadb099a21d98115b38708ccf6c1673f1dba3a085d`. The Generation's sole SourceVersion ID is the ID above.
+- Source-file SHA-256 and persisted Document `raw_hash` both equal `c01a16693ce761ede056cbd1fed1c605530a28690b15cfa120f4e93e8b3d338b`.
+- The actual document embedding inputs had SHA-256 values `02d8fe72ae49ab52db48d672c4bc048ccbe48551c49130f778cfcfa33b172efc` and `df105aed5c5a0a80fd658407e249c2b4554f739d113b79bda637c16213509ac9`. This set exactly matches the persisted leaf Chunk text hashes. The target Chunk `b80f776d-38f2-5379-99a7-fac8dead54ee` was hydrated from PostgreSQL with SHA `02d8fe72ae49ab52db48d672c4bc048ccbe48551c49130f778cfcfa33b172efc`, equal to its hash at document-embedding time.
+- Qdrant collection `kw_9cb43fa41b679dd1b8ef88b5` contains 2 points for this Generation. Its target point maps to the persisted target Chunk. Dense metadata records Qwen `qwen3-embedding-0.6b`, 1024 dimensions, and configuration fingerprint `faf94a9c69ffa8f099d5c7f549bc064ccf4b578d62a6aac7eb63a499dac938d4`.
+
+### Blinded execution, answer, and runner measurement
+
+- A `BlindBenchmarkInput` containing only the self-written query ID/question/language entered `PublicPortBenchmarkExecutor`. The real `DenseRetriever` used the new Qdrant collection, then hydrated Chunk and Evidence records through `PostgresKnowledgeStore`.
+- Actual Top-K: target Chunk `b80f776d-38f2-5379-99a7-fac8dead54ee` at rank 1 (score `0.7758223`); `6dfc640b-ac07-5637-9985-139dbfc159b5` at rank 2 (score `0.5139288`).
+- Local Qwen generated: “The synthetic codename returned by acceptance_codename in the persisted B07 source is 'LARKSPUR'.” The claim cites persisted Evidence `22bca254-f7fa-5d7f-ab11-79125df8ee0f`; PostgreSQL `validate_citations` returned that ID as valid with no invalid IDs.
+- Provider usage was exact: embedding used 37 document-input tokens and 18 query-input tokens; chat used 547 input and 74 output tokens, one LLM call, and 21,209 ms executor elapsed time. Retrieval strategy latency was 406 ms. Chat artifact SHA-256: `00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4`; generation config SHA: `973c16a69971a3e236262a515f02a94c6ca83d94069b9aa9bb03a924d2db8623`; Dense route config SHA: `0427ed38ca82082b5eabf1268d130784120263fd3087b8f4a4fcba914bc6aaa5`; one-route synthetic registry SHA: `3d548b73d91ab613beb95b51a3c0f17a5251947f23b4a4e309cec9e9f38e7023`.
+- Runner-side `compute_query_measurements` scored this one self-authored diagnostic mapping against actual persisted retrieval output: evidence recall/MRR/nDCG/recall/strict chunk recall were `1.0`; precision@5/10/20 was `0.20/0.10/0.05`; citation validity was `1.0`. Citation precision and answer correctness remain `null` because this synthetic case has no human review. This is not a frozen Gold mapping, and `run_dense_dev_slice` was not run because the repository dataset manifest remains `BLOCKED_INPUTS`.
+- The result is Dev-only. `cache_state="cold"` is a label and was not enforced. No formal Test split, sensitive input, external request, or paid provider was used. Qdrant emitted and we retained the warnings that the API key is being used over HTTP and qdrant-client `1.20.0` is outside the supported compatibility range for server `1.17.1`.
+- The execution harness wrote the complete result artifact but its wrapper reported exit code `1` after output; that exit cause was not retained. A separate read-only recheck exited `0` and independently verified the persisted Generation digest, SourceVersion/source binding, source and document hashes, embedded-input/Chunk hash equality, Qdrant target point, Evidence-to-Chunk quote match, and PostgreSQL citation validity. No second generation request was made for the exit-status check.
+
+### Failure found in an isolated Markdown probe
+
+- A prior attempt with a Markdown source created only its own corpus `dba0404b-9d44-47cf-b9c4-05dbe7634114`, source `83fbaaa9-9ca5-40a6-b3eb-ea4f4d78633f`, Generation `3a5aaf48-d7c2-4b10-b349-82b920536946`, and collection `kw_774c211ed558c99c684816fa` (2 points). No query or answer was run against it.
+- `verify_generation_manifest` rejected this Generation because the persisted `member_hashes` omitted the empty `entity` and `relation` member-set SHA values, while the Generation exposes those empty member lists. The B03 pipeline emitted the Generation as READY but did not materialize empty-set hashes for absent member kinds. This Work did not alter B03 source or patch the persisted record; it retained the failed isolated artifact and switched the successful synthetic route to a Python source that produces nonempty static Entity/Relation memberships. B03 should normalize all member kinds before hashing and add an empty-members regression.
+
+### B04 cache-state handoff
+
+- No B04-owned source or public port was changed. The existing [B04 cache-state CR](../changes/CR-B07-B04-CACHE-STATE-PORT-v1-20261125.md) specifies the minimum cross-batch contract: a cache profile for requested cold/warm state, a verifiable applied-state receipt bound to implementation/config SHA, cold reset and frozen warm-up behavior across the selected retrieval/store caches, and fail-closed behavior when control is unsupported or partial. Its acceptance tests preserve the frozen matrix and thresholds. Until B04 implements and integrates this port, formal cold/warm suites remain blocked.
+
+### Code change, regression, and Git
+
+- Exact tracked paths changed in this continuation: `src/knowledge_weaver/evaluation/local_generation.py`, `tests/b07/test_local_generation.py`, and this delivery document.
+- The local-only answer provider now strengthens each claim's `evidence_ids` schema to `minItems: 1` without mutating the caller schema, instructs the model to copy a retrieved ID, and fails closed on `status=answered` with no cited claim. It changes no quality threshold and does not assign or fabricate citation IDs.
+- Focused B07 regressions: 16 passed in 2.39 s across `test_local_generation.py`, `test_dense_dev_executor.py`, and the configuration-failure retry / executor-supplied-Gold rejection cases in `test_final_pipeline.py`. Ruff and `git diff --check` passed. Tests used synthetic fixtures; live local-model and persisted-store evidence is recorded above.
+- Pytest ran with a temporary per-process `WindowsSelectorEventLoopPolicy`; the default Proactor loop had hung while creating its local self-pipe in the restricted runner. No shared runtime configuration or dependency was changed.
+- Code commit: `1fe20196a89625aae1e012713960ff386bab086b` (parent `c9f4bfa43a2748c2dfe55a01223e91d642e17f00`). Rollback ref `refs/codex/rollback/b07-pg-dense-citation-schema-20261125-001` points to that parent. The required baseline `1052ddcc75c09acf1199889df152bceaffab1915` remains an ancestor.
+- No formal gate or threshold was relaxed. The remaining formal blockers are the frozen dataset, B03 empty-member hash consistency for text-only sources, B04 cache-state control, and B06 ordered Agent trace.
