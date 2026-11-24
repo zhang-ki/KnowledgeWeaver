@@ -189,6 +189,121 @@ class _PythonSourceIndex:
         return candidate.entity
 
 
+class _DefinitionBindingCollector(ast.NodeVisitor):
+    """Collect names bound in one module or class execution scope."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    @classmethod
+    def _target_names(cls, target: ast.AST) -> set[str]:
+        if isinstance(target, ast.Name):
+            return {target.id}
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return set().union(*(cls._target_names(item) for item in target.elts))
+        return set()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self.names.update(self._target_names(target))
+        self.visit(node.value)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self.names.update(self._target_names(node.target))
+        if node.value is not None:
+            self.visit(node.value)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self.names.update(self._target_names(node.target))
+        self.visit(node.value)
+
+    def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+        self.names.update(self._target_names(node.target))
+        self.visit(node.value)
+
+    def visit_Delete(self, node: ast.Delete) -> None:
+        for target in node.targets:
+            self.names.update(self._target_names(target))
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.names.add(alias.asname or alias.name.split(".", 1)[0])
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module == "__future__":
+            return
+        for alias in node.names:
+            if alias.name != "*":
+                self.names.add(alias.asname or alias.name)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.names.add(node.name)
+        for expression in (*node.decorator_list, *node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.names.add(node.name)
+        for expression in (*node.decorator_list, *node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+        if node.returns is not None:
+            self.visit(node.returns)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.names.add(node.name)
+        for expression in (*node.decorator_list, *node.bases, *(item.value for item in node.keywords)):
+            self.visit(expression)
+
+    def visit_For(self, node: ast.For) -> None:
+        self.names.update(self._target_names(node.target))
+        self.generic_visit(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self.names.update(self._target_names(node.target))
+        self.generic_visit(node)
+
+    def visit_With(self, node: ast.With) -> None:
+        for item in node.items:
+            if item.optional_vars is not None:
+                self.names.update(self._target_names(item.optional_vars))
+        self.generic_visit(node)
+
+    def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
+        for item in node.items:
+            if item.optional_vars is not None:
+                self.names.update(self._target_names(item.optional_vars))
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+        if node.pattern is not None:
+            self.visit(node.pattern)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        if node.name is not None:
+            self.names.add(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping) -> None:
+        if node.rest is not None:
+            self.names.add(node.rest)
+        self.generic_visit(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        # A lambda body has its own scope; its local bindings cannot rebind this scope.
+        for expression in (*node.args.defaults, *node.args.kw_defaults):
+            if expression is not None:
+                self.visit(expression)
+
+
 class _DefinitionIndexVisitor(ast.NodeVisitor):
     def __init__(
         self,
@@ -197,19 +312,20 @@ class _DefinitionIndexVisitor(ast.NodeVisitor):
         corpus_id: str,
         module_name: str,
         definitions: dict[str, list[_IndexedDefinition]],
+        opaque_exports: set[str],
     ) -> None:
         self.document = document
         self.corpus_id = corpus_id
         self.module_name = module_name
         self.definitions = definitions
-        self.frames = [module_name]
+        self.opaque_exports = opaque_exports
 
-    def _visit_definition(
+    def _index_definition(
         self,
         node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
         kind: EntityKind,
+        qualname: str,
     ) -> None:
-        qualname = f"{self.frames[-1]}.{node.name}"
         identity = _identity_key(
             self.document.source_id,
             self.document.relative_path,
@@ -228,19 +344,52 @@ class _DefinitionIndexVisitor(ast.NodeVisitor):
         self.definitions.setdefault(qualname, []).append(
             _IndexedDefinition(entity=entity, module_name=self.module_name)
         )
-        self.frames.append(qualname)
+
+    def _mark_scope_writes_opaque(self, statement: ast.stmt, *, prefix: str) -> set[str]:
+        collector = _DefinitionBindingCollector()
+        collector.visit(statement)
+        for name in collector.names:
+            self.opaque_exports.add(f"{prefix}.{name}")
+        return collector.names
+
+    def _index_class_members(self, node: ast.ClassDef, class_qualname: str) -> None:
+        binding_counts: dict[str, int] = defaultdict(int)
         for statement in node.body:
-            self.visit(statement)
-        self.frames.pop()
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                binding_counts[statement.name] += 1
+                self._index_definition(
+                    statement,
+                    EntityKind.function,
+                    f"{class_qualname}.{statement.name}",
+                )
+            else:
+                for name in self._mark_scope_writes_opaque(statement, prefix=class_qualname):
+                    binding_counts[name] += 1
+        for name, count in binding_counts.items():
+            if count != 1:
+                self.opaque_exports.add(f"{class_qualname}.{name}")
 
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self._visit_definition(node, EntityKind.class_)
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self._visit_definition(node, EntityKind.function)
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self._visit_definition(node, EntityKind.function)
+    def visit_Module(self, node: ast.Module) -> None:
+        binding_counts: dict[str, int] = defaultdict(int)
+        for statement in node.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                binding_counts[statement.name] += 1
+                self._index_definition(
+                    statement,
+                    EntityKind.function,
+                    f"{self.module_name}.{statement.name}",
+                )
+            elif isinstance(statement, ast.ClassDef):
+                binding_counts[statement.name] += 1
+                class_qualname = f"{self.module_name}.{statement.name}"
+                self._index_definition(statement, EntityKind.class_, class_qualname)
+                self._index_class_members(statement, class_qualname)
+            else:
+                for name in self._mark_scope_writes_opaque(statement, prefix=self.module_name):
+                    binding_counts[name] += 1
+        for name, count in binding_counts.items():
+            if count != 1:
+                self.opaque_exports.add(f"{self.module_name}.{name}")
 
 
 def _package_name(relative_path: str) -> str:
@@ -350,6 +499,7 @@ def _build_python_source_index(
             corpus_id=corpus_id,
             module_name=module_name,
             definitions=definitions,
+            opaque_exports=opaque_exports,
         ).visit(tree)
         reexports = _ReExportVisitor(module_name)
         reexports.visit(tree)

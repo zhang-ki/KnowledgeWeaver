@@ -297,6 +297,129 @@ def test_ast_import_alias_resolves_to_same_source_definition(
 
 
 @pytest.mark.parametrize(
+    ("target_text", "import_name", "call_expression"),
+    [
+        (
+            "if ENABLED:\n    def transform():\n        return None\n",
+            "transform",
+            "tx()",
+        ),
+        (
+            "class Handler:\n    if ENABLED:\n        def run(self):\n            return None\n",
+            "Handler",
+            "target.run(None)",
+        ),
+        (
+            "def enclosing():\n    def transform():\n        return None\n",
+            "enclosing",
+            "outer.transform()",
+        ),
+        (
+            "def transform():\n    return None\ntransform = lambda: None\n",
+            "transform",
+            "tx()",
+        ),
+        (
+            "def transform():\n    return None\ndel transform\n",
+            "transform",
+            "tx()",
+        ),
+    ],
+    ids=["conditional-module-definition", "conditional-class-member", "function-local-definition", "module-rebind", "module-delete"],
+)
+def test_ast_source_index_rejects_nonstable_definitions(
+    target_text: str,
+    import_name: str,
+    call_expression: str,
+) -> None:
+    target_request, _target_chunk = make_request(
+        target_text,
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000161",
+        chunk_id="00000000-0000-4000-8000-000000000261",
+    )
+    caller_alias = "outer" if import_name == "enclosing" else "target" if import_name == "Handler" else "tx"
+    caller_request, _caller_chunk = make_request(
+        f"from pkg.target import {import_name} as {caller_alias}\n"
+        f"def caller():\n    {call_expression}\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000162",
+        chunk_id="00000000-0000-4000-8000-000000000262",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+
+    assert not any(item.predicate is RelationPredicate.CALLS for item in result.relations)
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+
+
+def test_ast_source_index_keeps_plain_module_and_direct_class_definitions() -> None:
+    target_request, _target_chunk = make_request(
+        "def transform(value):\n    return value\n\n"
+        "class Handler:\n    def run(self):\n        return None\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000171",
+        chunk_id="00000000-0000-4000-8000-000000000271",
+    )
+    caller_request, _caller_chunk = make_request(
+        "from pkg.target import transform as tx\n"
+        "def caller(value):\n    return tx(value)\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000172",
+        chunk_id="00000000-0000-4000-8000-000000000272",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    target_result = run_immediate(extractor.extract(target_request))
+    caller_result = run_immediate(extractor.extract(caller_request))
+    direct_method = source_index.resolve(
+        "pkg.target.Handler.run",
+        expected=EntityKind.function,
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+    )
+    target = next(
+        entity
+        for entity in target_result.entities
+        if entity.canonical_name == "pkg.target.transform"
+        and entity.kind is EntityKind.function
+    )
+    call = next(
+        relation
+        for relation in caller_result.relations
+        if relation.predicate is RelationPredicate.CALLS
+    )
+
+    assert call.object_id == target.id
+    assert direct_method is not None
+    assert direct_method.canonical_name == "pkg.target.Handler.run"
+
+
+@pytest.mark.parametrize(
     ("caller_text", "source_id", "source_version_id", "extra_documents"),
     [
         (
