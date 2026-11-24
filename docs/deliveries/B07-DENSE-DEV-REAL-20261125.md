@@ -64,3 +64,35 @@ $env:PYTHONPATH = (Join-Path (Get-Location).Path 'src')
 - 代码起点：`e50ab8e74ae3bdc0915f11b5335f54623aec89b7`，分支 `task/b07-blind-formal-executor`。
 - 本次文档记录前的回滚 ref：`refs/codex/rollback/b07-dense-runtime-attempt-002`。
 - 本次只修改本交付文档；未改源码、测试、公共端口、数据、数据库、其他 worktree 或运行账本。
+
+## Continuation: local chat and runner-side synthetic Dev score — 2026-11-25
+
+### Scope and path
+
+- Added an evaluation-only `DevLocalOpenAICompatibleGenerationProvider`, restricted to an explicit `http://127.0.0.1:<port>/v1/chat/completions` endpoint. It sends no Authorization header, uses the existing provider budget ledger, asks for strict OpenAI-compatible JSON Schema output, and cannot fall back to a remote provider. The shared cloud provider/profile and external-authentication rules were not changed.
+- Executed one synthetic query through `DenseRetriever` and `PublicPortBenchmarkExecutor` with the registered `dev/dense/standard/seed-17` route. The CandidateIndex performed Qwen query embedding and Qdrant `query_points` only. Before/after collection snapshots matched; no `set_payload`, upsert, or delete was called.
+- Qdrant stores the three vector payloads and chunk IDs, not source text. For this Dev-only run, chunk text and citation records were hydrated from a self-authored in-memory synthetic fixture keyed by those stored chunk IDs. That fixture is not evidence that its text bytes exactly match the original text used to create the persisted vectors. No PostgreSQL or existing KnowledgeStore collection was read or modified.
+- The runner-side `compute_query_measurements` function scored the returned Dense ranks against a self-authored synthetic Gold mapping. The dataset manifest is still `BLOCKED_INPUTS`; this was not `run_dense_dev_slice` over a frozen dataset and is not a formal or complete B07 result.
+
+### Local runtime and measured output
+
+| Item | Observed result |
+|---|---|
+| Query | “What is the codename used in the B07 synthetic Dense Dev source?” |
+| Embedding | `qwen3-embedding-0.6b`, revision `qwen3-embedding-0.6b`, 1024 dimensions, exact usage 17 input tokens |
+| Retrieval | Three stored points; target chunk `7245c73d-9ad5-4071-afce-4439401df11c` ranked 1. Remaining order: `13705744-acd3-4380-8d8b-bfbaadb2941d`, `5c26a760-9621-4595-9e08-6e67c15beae3` |
+| Generation | Local `qwen3.5-4b-local` at `http://127.0.0.1:56337/v1/chat/completions`; exact usage 509 input / 35 output tokens; elapsed executor time 5,509 ms |
+| Answer | `The codename used in the B07 synthetic Dense Dev source is LARKSPUR.` The model returned an empty `evidence_ids` list. The answer is real local model output, but citation validity is unavailable and no human answer review was done. |
+| Runner metrics | Evidence recall 1.0; reciprocal rank 1.0; nDCG@5/10/20 1.0; recall@5/10/20 1.0; precision@5/10/20 0.20 / 0.10 / 0.05; strict chunk recall 1.0. Citation validity, citation precision, and answer correctness remain null. |
+| Qdrant mutation check | Three points before and after; payload snapshot SHA-256 `46ffd8cc9ab8d78336b537dd3debe71d892513a42d9555eb57193d9891ad35bb`; unchanged |
+
+The local Qwen chat artifact was `D:/agent/models/qwen3.5-4b/Qwen3.5-4B-Q4_K_M.gguf`, 2,740,937,888 bytes, SHA-256 `00FE7986FF5F6B463E62455821146049DB6F9313603938A70800D1FB69EF11A4`. Generation profile config SHA-256: `1da9fbf6bb141e5a74ba9567d58e6011e0ded08dc62ee2036f8e52d79c46ebf3`; Dense route config SHA-256: `94ed73db130031346065fcb4d6b5c0fe7066c81e0fa5efe1be9aedea0c80bcad`. The run-local suite registry SHA is `a41e3f79133c6f87a3ac2c9764a8247471c805a5b92dae24f99529e629a72324`; its input fixture was synthetic. The Generation digest `a75221d055cfa85147446a9a033d59825fb0c48ece91871a0767d25e740a7be8` was reconstructed only in memory for this synthetic invocation; no persisted Generation manifest or SourceVersion ID was verified from Qdrant.
+
+No API key, Qwen cloud credential, external request, formal Test split, paid provider, or database write was used. The Qdrant client still warns that version `1.20.0` is outside its declared compatibility range for server `1.17.1`; this warning is retained.
+
+### Focused verification and Git
+
+- Exact changed paths for this continuation: `src/knowledge_weaver/evaluation/local_generation.py`, `tests/b07/test_local_generation.py`, and this delivery record.
+- Focused local-provider plus Dense-executor regressions: 11 passed. Ruff on the two changed Python files and `git diff --check`: all checks passed. Tests used synthetic fixtures; the local runtime output above is separate live Dev evidence.
+- Base/rollback: code base `8dbfa0f1e76b7ddfb816473937e5be48d1883e08`; `refs/codex/rollback/b07-local-chat-acceptance-attempt-001` points to that commit. The required baseline `1052ddcc75c09acf1199889df152bceaffab1915` remains an ancestor.
+- The local answer resolves the generation-unavailable blocker for this one synthetic Dense Dev route only. Missing frozen dataset manifest, persisted source text/SourceVersion binding, citation-bearing answer, B04 cache control, and B06 ordered trace remain open. No formal gate or quality threshold was relaxed.
