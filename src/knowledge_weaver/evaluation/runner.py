@@ -88,10 +88,19 @@ class MatrixExecutionReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": self.status.value,
             "generation_id": self.schedule.generation_id,
             "generation_sha256": self.schedule.generation_sha256,
+            "dataset_id": self.schedule.dataset_id,
+            "dataset_version": self.schedule.dataset_version,
+            "dataset_manifest_sha256": self.schedule.dataset_manifest_sha256,
+            "dataset_content_sha256": self.schedule.dataset_content_sha256,
+            "relation_expectations_sha256": self.schedule.relation_expectations_sha256,
+            "required_relation_ids": list(self.schedule.required_relation_ids),
+            "required_relation_ids_sha256": self.schedule.required_relation_ids_sha256,
+            "required_relation_queue_sha256": self.schedule.required_relation_queue_sha256,
+            "gold_mapping_mode": self.schedule.gold_mapping_mode,
             "formal_suite_count": len(self.schedule.suites),
             "expected_query_runs": self.schedule.expected_query_runs,
             "completed_query_records": len(self.query_records),
@@ -152,7 +161,6 @@ async def run_formal_matrix(
     schedule: MatrixSchedule,
     protocol: EvaluationProtocol,
     dataset: LoadedDataset,
-    gold_mapping: GoldMappingReport | None,
     executor: BenchmarkExecutor,
     *,
     generation_resolver: PersistedGenerationLookup | None = None,
@@ -160,7 +168,118 @@ async def run_formal_matrix(
     policy_training_summary: Mapping[str, Any] | None = None,
     retry_delay_seconds: float = 0.25,
 ) -> MatrixExecutionReport:
-    """Execute every scheduled suite serially or return explicit blockers without running."""
+    """Execute only loader-verified, exact-coverage semantic G3 schedules."""
+    return await _run_matrix(
+        schedule,
+        protocol,
+        dataset,
+        None,
+        executor,
+        compatibility_mode=False,
+        generation_resolver=generation_resolver,
+        gold_projection_lookup=gold_projection_lookup,
+        policy_training_summary=policy_training_summary,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
+async def run_legacy_matrix_compatibility(
+    schedule: MatrixSchedule,
+    protocol: EvaluationProtocol,
+    dataset: LoadedDataset,
+    gold_mapping: GoldMappingReport,
+    executor: BenchmarkExecutor,
+    *,
+    generation_resolver: PersistedGenerationLookup | None = None,
+    policy_training_summary: Mapping[str, Any] | None = None,
+    retry_delay_seconds: float = 0.25,
+) -> MatrixExecutionReport:
+    """Run pre-G3 mapping only through this explicitly non-formal compatibility entry."""
+    return await _run_matrix(
+        schedule,
+        protocol,
+        dataset,
+        gold_mapping,
+        executor,
+        compatibility_mode=True,
+        generation_resolver=generation_resolver,
+        gold_projection_lookup=None,
+        policy_training_summary=policy_training_summary,
+        retry_delay_seconds=retry_delay_seconds,
+    )
+
+
+def _semantic_schedule_blocker(
+    schedule: MatrixSchedule, dataset: LoadedDataset
+) -> str | None:
+    if schedule.gold_mapping_mode != "STRICT_SEMANTIC":
+        return "BLOCKED_GOLD_MAPPING: formal G3 schedule is not bound to strict semantic mapping"
+    if (
+        dataset.manifest.relation_expectations_file is None
+        or dataset.manifest.relation_expectations_sha256 is None
+    ):
+        return "BLOCKED_GOLD_MAPPING: formal G3 requires a hash-bound semantic expectation sidecar"
+    if (
+        dataset.manifest_sha256 is None
+        or schedule.dataset_manifest_sha256 != dataset.manifest_sha256
+        or schedule.dataset_id != dataset.manifest.dataset_id
+        or schedule.dataset_version != dataset.manifest.dataset_version
+    ):
+        return "BLOCKED_GOLD_MAPPING: dataset manifest identity differs from the schedule"
+    if (
+        dataset.loaded_content_sha256 is None
+        or schedule.dataset_content_sha256 != dataset.loaded_content_sha256
+        or dataset.current_loaded_content_sha256 != dataset.loaded_content_sha256
+    ):
+        return "BLOCKED_GOLD_MAPPING: loader-verified dataset content was replaced"
+    if schedule.relation_expectations_sha256 != dataset.manifest.relation_expectations_sha256:
+        return "BLOCKED_GOLD_MAPPING: semantic sidecar SHA-256 differs from the schedule"
+    required_ids = set(dataset.required_relation_ids)
+    if (
+        set(schedule.required_relation_ids) != required_ids
+        or schedule.required_relation_ids_sha256 != dataset.required_relation_ids_sha256
+        or schedule.required_relation_queue_sha256 != dataset.required_relation_queue_sha256
+    ):
+        return "BLOCKED_GOLD_MAPPING: frozen required relation queue differs from the schedule"
+    expectation_ids = set(dataset.relation_expectations)
+    if (
+        not required_ids
+        or expectation_ids != required_ids
+        or expectation_ids
+        != {item.relation_id for item in dataset.relation_expectations.values()}
+    ):
+        return "BLOCKED_GOLD_MAPPING: semantic sidecar does not exactly cover frozen required relation IDs"
+    return None
+
+
+async def _run_matrix(
+    schedule: MatrixSchedule,
+    protocol: EvaluationProtocol,
+    dataset: LoadedDataset,
+    gold_mapping: GoldMappingReport | None,
+    executor: BenchmarkExecutor,
+    *,
+    compatibility_mode: bool,
+    generation_resolver: PersistedGenerationLookup | None,
+    gold_projection_lookup: GoldProjectionLookup | None,
+    policy_training_summary: Mapping[str, Any] | None,
+    retry_delay_seconds: float,
+) -> MatrixExecutionReport:
+    """Shared executor behind separate strict and legacy public entries."""
+    has_semantic_sidecar = (
+        dataset.manifest.relation_expectations_file is not None
+        or dataset.manifest.relation_expectations_sha256 is not None
+    )
+    if compatibility_mode:
+        if schedule.gold_mapping_mode != "LEGACY_COMPATIBILITY" or has_semantic_sidecar:
+            return _blocked_report(
+                schedule,
+                "BLOCKED_GOLD_MAPPING: legacy compatibility entry cannot run a semantic dataset",
+            )
+    else:
+        semantic_blocker = _semantic_schedule_blocker(schedule, dataset)
+        if semantic_blocker is not None:
+            return _blocked_report(schedule, semantic_blocker)
     if schedule.status is SuiteStatus.blocked:
         return _blocked_report(schedule)
     if not valid_generation_binding(schedule.generation_id, schedule.generation_sha256):
@@ -189,19 +308,7 @@ async def run_formal_matrix(
         )
     generation_id = verified_generation.id
     generation_sha256 = verified_generation.generation_sha256
-    if dataset.manifest.relation_expectations_file is not None:
-        sidecar_hash = dataset.manifest.relation_expectations_sha256
-        expectation_ids = set(dataset.relation_expectations)
-        if (
-            not sidecar_hash
-            or not expectation_ids
-            or expectation_ids
-            != {item.relation_id for item in dataset.relation_expectations.values()}
-        ):
-            return _blocked_report(
-                schedule,
-                "BLOCKED_GOLD_MAPPING: semantic expectation sidecar is not hash-bound or complete",
-            )
+    if not compatibility_mode:
         lookup = gold_projection_lookup
         if lookup is None:
             if getattr(generation_resolver, "database", None) is None:

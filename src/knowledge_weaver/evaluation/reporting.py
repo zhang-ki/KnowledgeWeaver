@@ -293,6 +293,26 @@ def build_report(
         and manifest_generation_sha256 != schedule_generation_sha256
     ):
         raise ValueError("matrix manifest and schedule generation SHA-256 values differ")
+    binding_fields = (
+        "dataset_id",
+        "dataset_version",
+        "dataset_manifest_sha256",
+        "dataset_content_sha256",
+        "relation_expectations_sha256",
+        "required_relation_ids",
+        "required_relation_ids_sha256",
+        "required_relation_queue_sha256",
+        "gold_mapping_mode",
+    )
+    for field in binding_fields:
+        manifest_value = matrix_manifest.get(field)
+        schedule_value = schedule.get(field)
+        if (
+            manifest_value is not None
+            and schedule_value is not None
+            and manifest_value != schedule_value
+        ):
+            raise ValueError(f"matrix manifest and schedule {field} values differ")
     generation_id = manifest_generation_id or schedule_generation_id
     generation_sha256 = manifest_generation_sha256 or schedule_generation_sha256
     if records:
@@ -314,10 +334,18 @@ def build_report(
     status = matrix_manifest.get("status", schedule.get("status", "BLOCKED"))
     summary = summarize_query_runs(records)
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": status,
         "generation_id": generation_id,
         "generation_sha256": generation_sha256,
+        **{
+            field: (
+                matrix_manifest.get(field)
+                if matrix_manifest.get(field) is not None
+                else schedule.get(field)
+            )
+            for field in binding_fields
+        },
         "protocol_id": schedule.get("protocol_id"),
         "formal_suite_count": schedule.get("formal_suite_count", len(schedule.get("suites", []))),
         "blocked_suite_count": blocked_count,

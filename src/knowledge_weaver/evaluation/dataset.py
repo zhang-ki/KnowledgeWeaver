@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 from pydantic import ValidationError
 
@@ -42,7 +43,80 @@ class LoadedDataset:
     manifest: DatasetManifest
     cases: tuple[PreparedBenchmarkCase, ...]
     summary: DatasetSummary | None
-    relation_expectations: dict[str, GoldRelationExpectation] = field(default_factory=dict)
+    relation_expectations: Mapping[str, GoldRelationExpectation] = field(default_factory=dict)
+    manifest_sha256: str | None = None
+    loaded_content_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "relation_expectations",
+            MappingProxyType(dict(self.relation_expectations)),
+        )
+        if self.loaded_content_sha256 is None:
+            object.__setattr__(
+                self,
+                "loaded_content_sha256",
+                self.current_loaded_content_sha256,
+            )
+
+    @property
+    def current_loaded_content_sha256(self) -> str:
+        return canonical_json_hash(
+            {
+                "manifest_sha256": self.manifest_sha256,
+                "manifest": self.manifest.model_dump(mode="json"),
+                "cases": [case.model_dump(mode="json") for case in self.cases],
+                "relation_expectations": [
+                    self.relation_expectations[key].model_dump(mode="json")
+                    for key in sorted(self.relation_expectations)
+                ],
+            }
+        )
+
+    @property
+    def required_relation_ids(self) -> frozenset[str]:
+        return frozenset(
+            edge.relation_id
+            for prepared in self.cases
+            for path in prepared.gold_paths
+            for edge in path.edges
+        )
+
+    @property
+    def required_relation_ids_sha256(self) -> str:
+        return canonical_json_hash(
+            {
+                "schema_version": 1,
+                "dataset_id": self.manifest.dataset_id,
+                "dataset_version": self.manifest.dataset_version,
+                "required_relation_ids": sorted(self.required_relation_ids),
+            }
+        )
+
+    @property
+    def required_relation_queue_sha256(self) -> str:
+        queue = [
+            {
+                "case_id": prepared.case.id,
+                "path_index": path_index,
+                "edge_index": edge_index,
+                "relation_id": edge.relation_id,
+                "traversed_reverse": edge.traversed_reverse,
+                "evidence_quote_sha256": list(edge.evidence_quote_sha256),
+            }
+            for prepared in self.cases
+            for path_index, path in enumerate(prepared.gold_paths)
+            for edge_index, edge in enumerate(path.edges)
+        ]
+        return canonical_json_hash(
+            {
+                "schema_version": 1,
+                "dataset_id": self.manifest.dataset_id,
+                "dataset_version": self.manifest.dataset_version,
+                "required_relation_queue": queue,
+            }
+        )
 
     @property
     def ready(self) -> bool:
@@ -192,13 +266,20 @@ def load_dataset(
     """Load a manifest and its JSONL cases; source paths are confined to ``root``."""
     try:
         manifest_file = _resolve_inside(root, manifest_path)
-        raw_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        manifest_bytes = manifest_file.read_bytes()
+        manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+        raw_manifest = json.loads(manifest_bytes)
         manifest = DatasetManifest.model_validate(raw_manifest)
     except (OSError, json.JSONDecodeError, ValidationError, RuntimeError) as exc:
         raise DatasetValidationError(f"dataset manifest is invalid: {exc}") from exc
 
     if manifest.status is DatasetStatus.blocked_inputs:
-        return LoadedDataset(manifest=manifest, cases=(), summary=None)
+        return LoadedDataset(
+            manifest=manifest,
+            cases=(),
+            summary=None,
+            manifest_sha256=manifest_sha256,
+        )
 
     assert manifest.cases_file is not None
     assert manifest.cases_sha256 is not None
@@ -242,9 +323,9 @@ def load_dataset(
             relation_expectations = {
                 item.relation_id: item for item in expectation_manifest.expectations
             }
-            if not set(relation_expectations).issubset(referenced_relation_ids):
+            if set(relation_expectations) != referenced_relation_ids:
                 raise DatasetValidationError(
-                    "relation expectations must reference relations used by reviewed Gold paths"
+                    "relation expectation IDs must exactly cover reviewed Gold path relations"
                 )
     except (OSError, ValidationError, RuntimeError) as exc:
         raise DatasetValidationError(f"dataset content is invalid: {exc}") from exc
@@ -253,4 +334,5 @@ def load_dataset(
         cases=cases,
         summary=summary,
         relation_expectations=relation_expectations,
+        manifest_sha256=manifest_sha256,
     )

@@ -384,16 +384,24 @@ def test_frozen_loader_reads_versioned_relation_expectation_sidecar(tmp_path: Pa
     manifest, cases = _valid_frozen_dataset()
     prepared = cases[1]
     relation_id = _uuid(9200)
+    missing_relation_id = _uuid(9202)
     reviewed_path = ReviewedGoldPath(
         edges=[
             GoldPathEdge(
                 relation_id=relation_id,
                 traversed_reverse=False,
                 evidence_quote_sha256=[prepared.gold_quote_sha256[0]],
-            )
+            ),
+            GoldPathEdge(
+                relation_id=missing_relation_id,
+                traversed_reverse=True,
+                evidence_quote_sha256=[prepared.gold_quote_sha256[0]],
+            ),
         ]
     )
-    case = prepared.case.model_copy(update={"gold_paths": [[relation_id]]})
+    case = prepared.case.model_copy(
+        update={"gold_paths": [[relation_id, missing_relation_id]]}
+    )
     review_hash = human_review_digest(
         case,
         prepared.source_ids,
@@ -445,7 +453,10 @@ def test_frozen_loader_reads_versioned_relation_expectation_sidecar(tmp_path: Pa
     expectation_manifest = GoldRelationExpectationManifest(
         dataset_id=manifest.dataset_id,
         dataset_version=manifest.dataset_version,
-        expectations=[expectation],
+        expectations=[
+            expectation,
+            expectation.model_copy(update={"relation_id": missing_relation_id}),
+        ],
     )
     expectation_bytes = expectation_manifest.model_dump_json().encode("utf-8")
     cases_bytes = ("\n".join(case.model_dump_json() for case in cases) + "\n").encode(
@@ -480,7 +491,10 @@ def test_frozen_loader_reads_versioned_relation_expectation_sidecar(tmp_path: Pa
     loaded = load_dataset(tmp_path)
 
     assert loaded.ready
-    assert loaded.relation_expectations == {relation_id: expectation}
+    assert set(loaded.relation_expectations) == {relation_id, missing_relation_id}
+    assert loaded.required_relation_ids == frozenset({relation_id, missing_relation_id})
+    assert len(loaded.manifest_sha256 or "") == 64
+    assert len(loaded.required_relation_queue_sha256) == 64
 
     normative_obligation = expectation.model_copy(
         update={
@@ -503,6 +517,31 @@ def test_frozen_loader_reads_versioned_relation_expectation_sidecar(tmp_path: Pa
             invalid_runtime_event.model_dump(mode="json")
         )
 
+    missing_expectation_bytes = GoldRelationExpectationManifest(
+        dataset_id=manifest.dataset_id,
+        dataset_version=manifest.dataset_version,
+        expectations=[expectation],
+    ).model_dump_json().encode("utf-8")
+    expectation_file.write_bytes(missing_expectation_bytes)
+    missing_expectation_manifest = frozen_manifest.model_copy(
+        update={
+            "relation_expectations_sha256": hashlib.sha256(
+                missing_expectation_bytes
+            ).hexdigest()
+        }
+    )
+    manifest_file.write_text(
+        json.dumps(missing_expectation_manifest.model_dump(mode="json"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    with pytest.raises(DatasetValidationError, match="exactly cover"):
+        load_dataset(tmp_path)
+
+    expectation_file.write_bytes(expectation_bytes)
+    manifest_file.write_text(
+        json.dumps(frozen_manifest.model_dump(mode="json"), ensure_ascii=False),
+        encoding="utf-8",
+    )
     expectation_file.write_bytes(expectation_bytes + b" ")
     with pytest.raises(DatasetValidationError, match="relation expectation hash"):
         load_dataset(tmp_path)

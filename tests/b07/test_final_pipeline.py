@@ -23,6 +23,7 @@ from knowledge_weaver.evaluation.runner import (
     MatrixExecutionReport,
     _seeded_case_order,
     run_formal_matrix,
+    run_legacy_matrix_compatibility,
     write_execution_artifacts,
 )
 from knowledge_weaver.evaluation.runs import (
@@ -283,7 +284,7 @@ def test_formal_runner_blocks_gold_generation_mismatch_before_running(
     )
 
     report = _drive_immediate(
-        run_formal_matrix(
+        run_legacy_matrix_compatibility(
             schedule,
             protocol,
             dataset,
@@ -313,7 +314,7 @@ def test_formal_runner_requires_ready_gold_mapping() -> None:
     )
 
     report = _drive_immediate(
-        run_formal_matrix(
+        run_legacy_matrix_compatibility(
             schedule,
             protocol,
             dataset,
@@ -327,6 +328,60 @@ def test_formal_runner_requires_ready_gold_mapping() -> None:
 
     assert report.status is SuiteStatus.blocked
     assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
+
+
+def test_formal_entry_rejects_legacy_schedule_before_generation_lookup() -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, dataset, schedule, generation = _ready_formal_schedule(root)
+    resolver = _GenerationStore(generation)
+
+    assert schedule.gold_mapping_mode == "LEGACY_COMPATIBILITY"
+    report = _drive_immediate(
+        run_formal_matrix(
+            schedule,
+            protocol,
+            dataset,
+            _UnexpectedRealExecutor(),
+            generation_resolver=resolver,
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
+    assert resolver.calls == 0
+    assert not report.query_records
+
+
+def test_legacy_compatibility_entry_remains_explicit_and_labeled() -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, dataset, schedule, generation = _ready_formal_schedule(root)
+    mapping = GoldMappingReport(
+        generation_id=generation.id,
+        generation_sha256=verify_generation_manifest(generation).generation_sha256,
+        dataset_sha256=schedule.dataset_sha256,
+        span_mappings=(),
+        path_mappings=(),
+        blockers=(),
+    )
+
+    report = _drive_immediate(
+        run_legacy_matrix_compatibility(
+            schedule,
+            protocol,
+            dataset,
+            mapping,
+            _SyntheticExecutor(fail_until=0),
+            generation_resolver=_GenerationStore(generation),
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert report.to_dict()["gold_mapping_mode"] == "LEGACY_COMPATIBILITY"
+    assert any(item.startswith("BLOCKED_PROVIDER:") for item in report.blockers)
 
 
 @pytest.mark.parametrize("mismatch", ["missing_id", "digest"])
@@ -352,7 +407,7 @@ def test_formal_runner_blocks_unverified_schedule_generation_before_provider(
     )
 
     report = _drive_immediate(
-        run_formal_matrix(
+        run_legacy_matrix_compatibility(
             schedule,
             protocol,
             dataset,
@@ -401,6 +456,28 @@ def test_generation_identity_is_written_through_matrix_and_query_artifacts(tmp_p
     rebuilt = build_report(manifest, [QueryRunRecord.model_validate(query)])
     assert rebuilt["generation_id"] == generation.id
     assert rebuilt["generation_sha256"] == verify_generation_manifest(generation).generation_sha256
+
+    bound_schedule = replace(
+        schedule,
+        gold_mapping_mode="STRICT_SEMANTIC",
+        dataset_manifest_sha256="a" * 64,
+        relation_expectations_sha256="b" * 64,
+        required_relation_ids=("00000000-0000-4000-8000-000000000001",),
+        required_relation_ids_sha256="c" * 64,
+        required_relation_queue_sha256="d" * 64,
+    )
+    bound_matrix = replace(matrix, schedule=bound_schedule)
+    bound_manifest = bound_matrix.to_dict()
+    bound_report = build_report(bound_manifest, [QueryRunRecord.model_validate(query)])
+    assert bound_report["dataset_manifest_sha256"] == "a" * 64
+    assert bound_report["dataset_content_sha256"] == bound_schedule.dataset_content_sha256
+    assert bound_report["relation_expectations_sha256"] == "b" * 64
+    assert bound_report["required_relation_ids"] == list(bound_schedule.required_relation_ids)
+    assert bound_report["required_relation_ids_sha256"] == "c" * 64
+    assert bound_report["required_relation_queue_sha256"] == "d" * 64
+    tampered_binding = {**bound_manifest, "relation_expectations_sha256": "e" * 64}
+    with pytest.raises(ValueError, match="relation_expectations_sha256"):
+        build_report(tampered_binding, [QueryRunRecord.model_validate(query)])
 
     mismatched_id = "55555555-5555-4555-8555-555555555555"
     mismatched_manifest = {**manifest, "generation_id": mismatched_id}

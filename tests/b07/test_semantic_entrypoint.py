@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,6 @@ from knowledge_weaver.evaluation.contracts import (
 )
 from knowledge_weaver.evaluation.dataset import DatasetSummary, LoadedDataset, load_dataset
 from knowledge_weaver.evaluation.generation_binding import verify_generation_manifest
-from knowledge_weaver.evaluation.gold_mapping import GoldMappingReport
 from knowledge_weaver.evaluation.persisted_projection import (
     PersistedGoldProjection,
     PostgresGoldProjectionLookup,
@@ -124,6 +124,12 @@ def _semantic_run_inputs() -> tuple[LoadedDataset, Any, PersistedGoldProjection]
             unanswerable_count=10,
         ),
         relation_expectations={DATA_RELATION_ID: expectation},
+        manifest_sha256=hashlib.sha256(
+            json.dumps(
+                manifest.model_dump(mode="json"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest(),
     )
     projection = PersistedGoldProjection(
         generation=generation,
@@ -257,7 +263,15 @@ def _database_for_projection(projection: PersistedGoldProjection) -> _Database:
         for item in projection.documents
     ]
     chunk_rows = [
-        SimpleNamespace(id=item.id, payload=item.model_dump(mode="json"))
+        SimpleNamespace(
+            id=item.id,
+            document_id=item.document_id,
+            parent_id=item.parent_id,
+            is_leaf=item.is_leaf,
+            text=item.text,
+            text_hash=item.text_hash,
+            payload=item.model_dump(mode="json"),
+        )
         for item in projection.chunks
     ]
     evidence_rows = [
@@ -265,6 +279,9 @@ def _database_for_projection(projection: PersistedGoldProjection) -> _Database:
             id=item.id,
             chunk_id=item.chunk_id,
             provenance_id=item.provenance_id,
+            start=item.start,
+            end=item.end,
+            quote=item.quote,
             payload=item.model_dump(mode="json"),
         )
         for item in projection.evidence
@@ -352,21 +369,12 @@ def test_formal_entry_loads_hash_bound_semantics_from_persisted_projection() -> 
     schedule = _schedule(dataset, protocol, projection)
     store = _PersistedStore(projection.generation, _database_for_projection(projection))
     expected_sha256 = verify_generation_manifest(projection.generation).generation_sha256
-    stale_external_mapping = GoldMappingReport(
-        generation_id="44444444-4444-4444-8444-444444444444",
-        generation_sha256="c" * 64,
-        dataset_sha256=schedule.dataset_sha256,
-        span_mappings=(),
-        path_mappings=(),
-        blockers=(),
-    )
 
     report = _drive_immediate(
         run_formal_matrix(
             schedule,
             protocol,
             dataset,
-            stale_external_mapping,
             _NoCallExecutor(),
             generation_resolver=store,
             policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
@@ -387,6 +395,12 @@ def test_formal_entry_loads_hash_bound_semantics_from_persisted_projection() -> 
     assert report.status is SuiteStatus.blocked
     assert any(item.startswith("BLOCKED_PROVIDER:") for item in report.blockers)
     assert not report.query_records
+    assert report.to_dict()["relation_expectations_sha256"] == dataset.manifest.relation_expectations_sha256
+    assert report.to_dict()["dataset_manifest_sha256"] == dataset.manifest_sha256
+    assert report.to_dict()["dataset_content_sha256"] == dataset.loaded_content_sha256
+    assert report.to_dict()["required_relation_ids"] == [DATA_RELATION_ID]
+    assert report.to_dict()["required_relation_ids_sha256"] == dataset.required_relation_ids_sha256
+    assert report.to_dict()["required_relation_queue_sha256"] == dataset.required_relation_queue_sha256
 
 
 def test_postgres_projection_requires_exact_persisted_member_rows() -> None:
@@ -411,7 +425,6 @@ def test_formal_entry_fails_closed_on_incomplete_persisted_semantics(missing: st
             schedule,
             protocol,
             dataset,
-            None,
             _NoCallExecutor(),
             generation_resolver=_GenerationStore(projection.generation),
             gold_projection_lookup=lookup,
@@ -442,7 +455,6 @@ def test_formal_entry_rejects_semantic_sidecar_without_hash_before_projection_lo
             schedule,
             protocol,
             dataset,
-            None,
             _NoCallExecutor(),
             generation_resolver=_GenerationStore(projection.generation),
             gold_projection_lookup=lookup,
@@ -454,3 +466,143 @@ def test_formal_entry_rejects_semantic_sidecar_without_hash_before_projection_lo
     assert report.status is SuiteStatus.blocked
     assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
     assert lookup.generation_ids == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("dataset_manifest_sha256", None),
+        ("dataset_content_sha256", "f" * 64),
+        ("relation_expectations_sha256", "f" * 64),
+        ("required_relation_ids_sha256", "e" * 64),
+        ("required_relation_queue_sha256", "d" * 64),
+        ("dataset_id", "replaced-dataset"),
+    ],
+)
+def test_formal_entry_rejects_old_or_replaced_schedule_binding_before_projection_load(
+    field: str, value: object
+) -> None:
+    dataset, protocol, projection = _semantic_run_inputs()
+    schedule = replace(_schedule(dataset, protocol, projection), **{field: value})
+    resolver = _PersistedStore(
+        projection.generation,
+        _database_for_projection(projection),
+    )
+    lookup = _ProjectionLookup(projection)
+
+    report = _drive_immediate(
+        run_formal_matrix(
+            schedule,
+            protocol,
+            dataset,
+            _NoCallExecutor(),
+            generation_resolver=resolver,
+            gold_projection_lookup=lookup,
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
+    assert resolver.calls == 0
+    assert lookup.generation_ids == []
+    assert not report.query_records
+
+
+def test_loaded_expectation_mapping_cannot_be_replaced_after_hash_verification() -> None:
+    dataset, _protocol, _projection = _semantic_run_inputs()
+
+    with pytest.raises(TypeError):
+        dataset.relation_expectations[DATA_RELATION_ID] = dataset.relation_expectations[
+            DATA_RELATION_ID
+        ]
+
+
+def test_formal_entry_blocks_mutated_loaded_expectation_content_before_provider() -> None:
+    dataset, protocol, projection = _semantic_run_inputs()
+    schedule = _schedule(dataset, protocol, projection)
+    dataset.relation_expectations[DATA_RELATION_ID].qualifier_values["replaced"] = True
+    resolver = _PersistedStore(
+        projection.generation,
+        _database_for_projection(projection),
+    )
+
+    report = _drive_immediate(
+        run_formal_matrix(
+            schedule,
+            protocol,
+            dataset,
+            _NoCallExecutor(),
+            generation_resolver=resolver,
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert any("loader-verified dataset content was replaced" in item for item in report.blockers)
+    assert resolver.calls == 0
+    assert not report.query_records
+
+
+@pytest.mark.parametrize(
+    ("result_index", "column", "mode"),
+    [
+        (11, "id", "payload"),
+        (11, "document_id", "row"),
+        (11, "parent_id", "row"),
+        (11, "is_leaf", "row"),
+        (11, "text", "row"),
+        (11, "text_hash", "row"),
+        (12, "id", "payload"),
+        (12, "chunk_id", "row"),
+        (12, "provenance_id", "row"),
+        (12, "start", "row"),
+        (12, "end", "row"),
+        (12, "quote", "row"),
+    ],
+)
+def test_formal_entry_rejects_chunk_or_evidence_column_payload_drift_before_provider(
+    result_index: int, column: str, mode: str
+) -> None:
+    dataset, protocol, projection = _semantic_run_inputs()
+    schedule = _schedule(dataset, protocol, projection)
+    database = _database_for_projection(projection)
+    row = database.value.results[result_index][0]
+    if mode == "payload":
+        row.payload[column] = "00000000-0000-4000-8000-000000000099"
+    elif column == "parent_id":
+        row.parent_id = "00000000-0000-4000-8000-000000000099"
+    elif column in {"document_id", "chunk_id", "provenance_id"}:
+        setattr(row, column, "00000000-0000-4000-8000-000000000099")
+    elif column == "is_leaf":
+        row.is_leaf = not row.is_leaf
+    elif column == "text":
+        row.text += "!"
+    elif column == "text_hash":
+        row.text_hash = "f" * 64
+    elif column in {"start", "end"}:
+        setattr(row, column, getattr(row, column) + 1)
+    elif column == "quote":
+        row.quote += "!"
+    else:
+        raise AssertionError(f"unhandled duplicate column: {column}")
+    store = _PersistedStore(projection.generation, database)
+
+    report = _drive_immediate(
+        run_formal_matrix(
+            schedule,
+            protocol,
+            dataset,
+            _NoCallExecutor(),
+            generation_resolver=store,
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
+    assert not any(item.startswith("BLOCKED_PROVIDER:") for item in report.blockers)
+    assert not report.query_records

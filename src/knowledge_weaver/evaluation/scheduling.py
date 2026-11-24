@@ -51,7 +51,16 @@ class ExperimentSuite:
 class MatrixSchedule:
     protocol_id: str
     protocol_sha256: str
+    dataset_id: str
+    dataset_version: str
     dataset_sha256: str
+    dataset_manifest_sha256: str | None
+    dataset_content_sha256: str
+    relation_expectations_sha256: str | None
+    required_relation_ids: tuple[str, ...]
+    required_relation_ids_sha256: str
+    required_relation_queue_sha256: str
+    gold_mapping_mode: str
     dataset_status: str
     generation_id: str | None
     generation_sha256: str | None
@@ -73,10 +82,19 @@ class MatrixSchedule:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "protocol_id": self.protocol_id,
             "protocol_sha256": self.protocol_sha256,
+            "dataset_id": self.dataset_id,
+            "dataset_version": self.dataset_version,
             "dataset_sha256": self.dataset_sha256,
+            "dataset_manifest_sha256": self.dataset_manifest_sha256,
+            "dataset_content_sha256": self.dataset_content_sha256,
+            "relation_expectations_sha256": self.relation_expectations_sha256,
+            "required_relation_ids": list(self.required_relation_ids),
+            "required_relation_ids_sha256": self.required_relation_ids_sha256,
+            "required_relation_queue_sha256": self.required_relation_queue_sha256,
+            "gold_mapping_mode": self.gold_mapping_mode,
             "dataset_status": self.dataset_status,
             "generation_id": self.generation_id,
             "generation_sha256": self.generation_sha256,
@@ -127,6 +145,22 @@ def build_formal_matrix(
         )
         if not dataset.manifest.blockers:
             blockers.append("BLOCKED_INPUTS: the prepared Gold dataset is not FROZEN")
+    if (
+        dataset.loaded_content_sha256 is None
+        or dataset.current_loaded_content_sha256 != dataset.loaded_content_sha256
+    ):
+        blockers.append("BLOCKED_INPUTS: loaded dataset content changed after verification")
+
+    has_semantic_sidecar = (
+        dataset.manifest.relation_expectations_file is not None
+        and dataset.manifest.relation_expectations_sha256 is not None
+    )
+    if has_semantic_sidecar and set(dataset.relation_expectations) != set(
+        dataset.required_relation_ids
+    ):
+        blockers.append(
+            "BLOCKED_GOLD_MAPPING: semantic expectations do not exactly cover the frozen relation queue"
+        )
 
     if not generation_id or not generation_sha256:
         blockers.append("BLOCKED_GENERATION: actual generation ID and SHA-256 are required")
@@ -218,8 +252,20 @@ def build_formal_matrix(
     return MatrixSchedule(
         protocol_id=protocol.protocol_id,
         protocol_sha256=_stable_hash(protocol.model_dump(mode="json")),
+        dataset_id=dataset.manifest.dataset_id,
+        dataset_version=dataset.manifest.dataset_version,
         dataset_sha256=dataset.manifest.cases_sha256
         or _stable_hash(dataset.manifest.model_dump(mode="json")),
+        dataset_manifest_sha256=dataset.manifest_sha256,
+        dataset_content_sha256=dataset.loaded_content_sha256
+        or dataset.current_loaded_content_sha256,
+        relation_expectations_sha256=dataset.manifest.relation_expectations_sha256,
+        required_relation_ids=tuple(sorted(dataset.required_relation_ids)),
+        required_relation_ids_sha256=dataset.required_relation_ids_sha256,
+        required_relation_queue_sha256=dataset.required_relation_queue_sha256,
+        gold_mapping_mode=(
+            "STRICT_SEMANTIC" if has_semantic_sidecar else "LEGACY_COMPATIBILITY"
+        ),
         dataset_status=dataset.manifest.status.value,
         generation_id=generation_id,
         generation_sha256=generation_sha256,

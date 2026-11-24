@@ -238,11 +238,38 @@ class PostgresGoldProjectionLookup:
                             "persisted SourceVersion file is outside or differs from Generation Documents"
                         )
 
+            for row, chunk_item in zip(chunk_rows, chunks, strict=True):
+                if (
+                    row.id,
+                    row.document_id,
+                    row.parent_id,
+                    row.is_leaf,
+                    row.text,
+                    row.text_hash,
+                ) != (
+                    chunk_item.id,
+                    chunk_item.document_id,
+                    chunk_item.parent_id,
+                    chunk_item.is_leaf,
+                    chunk_item.text,
+                    chunk_item.text_hash,
+                ):
+                    raise ValueError("persisted Chunk columns differ from its payload")
             for row, evidence_item in zip(evidence_rows, evidence, strict=True):
-                if (row.id, row.chunk_id, row.provenance_id) != (
+                if (
+                    row.id,
+                    row.chunk_id,
+                    row.provenance_id,
+                    row.start,
+                    row.end,
+                    row.quote,
+                ) != (
                     evidence_item.id,
                     evidence_item.chunk_id,
                     evidence_item.provenance_id,
+                    evidence_item.start,
+                    evidence_item.end,
+                    evidence_item.quote,
                 ):
                     raise ValueError("persisted Evidence columns differ from its payload")
             for row, provenance_item in zip(provenance_rows, provenance, strict=True):
