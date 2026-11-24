@@ -407,6 +407,7 @@ async def _run_matrix(
         ordered_cases = _seeded_case_order(test_cases, suite.seed)
         for cache_state in suite.cache_states:
             for case in ordered_cases:
+                # The reviewed case stays runner-owned; retries dispatch only its immutable blind input.
                 record = await run_query_with_retries(
                     executor,
                     case,

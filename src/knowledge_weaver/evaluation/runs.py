@@ -28,7 +28,7 @@ from knowledge_weaver.evaluation.generation_binding import (
 )
 from knowledge_weaver.evaluation.redaction import redact_text
 from knowledge_weaver.evaluation.scheduling import ExperimentSuite
-from knowledge_weaver.models.contracts import Generation
+from knowledge_weaver.models.contracts import Generation, Language
 
 NonEmpty = StringConstraints(strip_whitespace=True, min_length=1)
 CountKind = Literal["exact", "estimated", "unavailable"]
@@ -46,6 +46,14 @@ def _sum_known_decimals(values: list[Decimal | None]) -> Decimal | None:
 
 class RunModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class BlindBenchmarkInput(RunModel):
+    """The only case data exposed to a benchmark executor."""
+
+    query_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    language: Language
 
 
 class QueryMeasurements(RunModel):
@@ -126,8 +134,8 @@ class AttemptOutcome(RunModel):
             self.executed_generation_id, self.executed_generation_sha256
         ):
             raise ValueError("executor-confirmed Generation binding is invalid")
-        if self.status == "complete" and (self.failure_code is not None or self.measurements is None):
-            raise ValueError("a complete attempt requires measurements and no failure code")
+        if self.status == "complete" and self.failure_code is not None:
+            raise ValueError("a complete attempt cannot carry a failure code")
         if self.status == "failed" and not self.failure_code:
             raise ValueError("a failed attempt requires a failure code")
         if self.status == "complete" and self.retryable:
@@ -272,7 +280,7 @@ class BenchmarkExecutor(Protocol):
 
     async def execute_query(
         self,
-        case: PreparedBenchmarkCase,
+        query: BlindBenchmarkInput,
         suite: ExperimentSuite,
         *,
         attempt: int,
@@ -302,6 +310,11 @@ async def run_query_with_retries(
         raise ValueError("mock/synthetic provider results cannot enter a formal run")
     if formal_dataset and case.case.split.value != "test":
         raise ValueError("formal query runs are restricted to the frozen test split")
+    blind_input = BlindBenchmarkInput(
+        query_id=case.case.id,
+        question=case.case.question,
+        language=case.case.language,
+    )
     if (generation_id is None) != (generation_sha256 is None):
         raise ValueError("query execution Generation ID and digest must be supplied together")
     if generation_binding is not None and generation_resolver is not None:
@@ -343,7 +356,7 @@ async def run_query_with_retries(
                     generation=generation_binding.generation,
                     generation_sha256=generation_binding.generation_sha256,
                 )
-            outcome = await executor.execute_query(case, suite, **execution_kwargs)
+            outcome = await executor.execute_query(blind_input, suite, **execution_kwargs)
             if outcome.attempt != attempt_number:
                 raise ValueError("executor returned an attempt number that does not match")
             if outcome.provider_kind != executor.provider_kind:
@@ -355,6 +368,15 @@ async def run_query_with_retries(
                 or outcome.executed_generation_sha256 != generation_binding.generation_sha256
             ):
                 raise ValueError("executor did not confirm the verified Generation it queried")
+            if formal_dataset and outcome.measurements is not None:
+                outcome = outcome.model_copy(
+                    update={
+                        "status": "failed",
+                        "retryable": False,
+                        "failure_code": "EXECUTOR_SCORE_FORBIDDEN",
+                        "measurements": None,
+                    }
+                )
         except ProviderExecutionError as exc:
             outcome = AttemptOutcome(
                 attempt=attempt_number,

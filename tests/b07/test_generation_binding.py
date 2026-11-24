@@ -14,6 +14,7 @@ from knowledge_weaver.evaluation.generation_binding import (
 )
 from knowledge_weaver.evaluation.runs import (
     AttemptOutcome,
+    BlindBenchmarkInput,
     QueryMeasurements,
     run_query_with_retries,
 )
@@ -191,12 +192,13 @@ class _IdentityExecutor:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.query: BlindBenchmarkInput | None = None
         self.generation: Generation | None = None
         self.generation_sha256: str | None = None
 
     async def execute_query(
         self,
-        case,
+        query: BlindBenchmarkInput,
         suite,
         *,
         attempt: int,
@@ -205,6 +207,7 @@ class _IdentityExecutor:
         generation_sha256: str,
     ) -> AttemptOutcome:
         self.calls += 1
+        self.query = query
         self.generation = generation
         self.generation_sha256 = generation_sha256
         return AttemptOutcome(
@@ -271,6 +274,15 @@ def test_executor_receives_resolved_generation_and_content_digest() -> None:
     assert executor.calls == 1
     assert executor.generation is generation
     assert executor.generation_sha256 == generation_sha256
+    assert executor.query is not None
+    assert executor.query.model_dump() == {
+        "query_id": case.case.id,
+        "question": case.case.question,
+        "language": case.case.language,
+    }
+    assert set(executor.query.model_dump()) == {"query_id", "question", "language"}
+    with pytest.raises(ValueError):
+        executor.query.question = "mutated"  # type: ignore[misc]
     assert record.generation_id == generation.id
     assert record.generation_sha256 == generation_sha256
 

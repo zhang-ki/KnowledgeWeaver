@@ -32,6 +32,7 @@ from knowledge_weaver.evaluation.runner import (
 )
 from knowledge_weaver.evaluation.runs import (
     AttemptOutcome,
+    BlindBenchmarkInput,
     QueryMeasurements,
     QueryRunRecord,
     run_query_with_retries,
@@ -254,7 +255,7 @@ class _DisplayOnlyRealExecutor:
 
     async def execute_query(
         self,
-        case,
+        query: BlindBenchmarkInput,
         suite,
         *,
         attempt: int,
@@ -787,12 +788,13 @@ class _SyntheticExecutor:
 
     def __init__(self, *, fail_until: int = 2, permanent: bool = False) -> None:
         self.calls = 0
+        self.queries: list[BlindBenchmarkInput] = []
         self.fail_until = fail_until
         self.permanent = permanent
 
     async def execute_query(
         self,
-        case,
+        query: BlindBenchmarkInput,
         suite,
         *,
         attempt: int,
@@ -801,6 +803,7 @@ class _SyntheticExecutor:
         generation_sha256: str | None = None,
     ) -> AttemptOutcome:
         self.calls += 1
+        self.queries.append(query)
         if attempt <= self.fail_until:
             return AttemptOutcome(
                 attempt=attempt,
@@ -867,6 +870,13 @@ def test_runner_retains_retry_usage_and_marks_fixture_quality_ineligible() -> No
         )
     )
     assert executor.calls == 3
+    assert len(executor.queries) == 3
+    assert all(query is executor.queries[0] for query in executor.queries)
+    assert executor.queries[0].model_dump() == {
+        "query_id": case.case.id,
+        "question": case.case.question,
+        "language": case.case.language,
+    }
     assert record.status == "complete"
     assert record.total_tokens == 11
     assert record.tool_calls == 3
@@ -894,6 +904,29 @@ def test_runner_does_not_retry_configuration_failures() -> None:
     assert record.status == "failed"
     assert record.attempts[0].failure_code == "CONFIG_INVALID"
     assert record.input_tokens == 2
+
+
+def test_formal_runner_rejects_executor_supplied_gold_measurements() -> None:
+    case = _fixture()[0]
+    generation, _generation_sha256 = _make_generation()
+    executor = _DisplayOnlyRealExecutor()
+
+    record = _drive_immediate(
+        run_query_with_retries(
+            executor,
+            case,
+            _suite(),
+            formal_dataset=True,
+            generation_binding=verify_generation_manifest(generation),
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert executor.calls == 1
+    assert record.status == "failed"
+    assert record.attempts[-1].failure_code == "EXECUTOR_SCORE_FORBIDDEN"
+    assert record.total_tokens == 2
+    assert record.measurements is None
 
 
 def test_secret_redaction_covers_fields_bearer_url_password_and_key() -> None:
