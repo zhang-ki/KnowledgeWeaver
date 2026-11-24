@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -10,7 +11,9 @@ from knowledge_weaver.evaluation.local_generation import (
     DevLocalOpenAIChatProfile,
     DevLocalOpenAICompatibleGenerationProvider,
 )
+from knowledge_weaver.evaluation.runs import UnscoredAnswer
 from knowledge_weaver.models import Budget, CountKind, LLMRequest
+from knowledge_weaver.providers._common import StructuredResponseInvalid
 
 
 class _JsonTransport:
@@ -73,6 +76,16 @@ def _request() -> LLMRequest:
     )
 
 
+def _answer_request() -> LLMRequest:
+    return LLMRequest(
+        system_instruction="Answer using the supplied passages.",
+        untrusted_context='{"question":"Synthetic question","retrieved_passages":[]}',
+        response_schema=UnscoredAnswer.model_json_schema(),
+        max_output_tokens=64,
+        timeout_seconds=8,
+    )
+
+
 @pytest.mark.asyncio
 async def test_local_generation_uses_loopback_without_auth_and_keeps_usage() -> None:
     transport = _JsonTransport(
@@ -100,7 +113,74 @@ async def test_local_generation_uses_loopback_without_auth_and_keeps_usage() -> 
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["strict"] is True
     assert response_format["json_schema"]["schema"] == _request().response_schema
-    assert "Do not return status=answered with an empty claims list" in call["payload"]["messages"][0]["content"]
+    assert (
+        "at least one supporting evidence ID exactly from the retrieved passages into every claim"
+        in call["payload"]["messages"][0]["content"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_answer_schema_requires_citation_ids_without_mutating_request() -> None:
+    request = _answer_request()
+    evidence_id = "6ad55d0e-05da-4a50-91ba-d30b7ae4216f"
+    transport = _JsonTransport(
+        {
+            "id": "local-request-cited",
+            "model": "qwen3.5-4b-local",
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "status": "answered",
+                                "claims": [
+                                    {"text": "LARKSPUR", "evidence_ids": [evidence_id]}
+                                ],
+                                "unanswered": [],
+                            }
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 17, "completion_tokens": 8, "total_tokens": 25},
+        }
+    )
+
+    result = await _provider(transport).generate(request)
+
+    assert result.parsed_json is not None
+    assert result.parsed_json["claims"][0]["evidence_ids"] == [evidence_id]
+    assert request.response_schema["$defs"]["UnscoredClaim"]["properties"]["evidence_ids"].get("minItems") is None
+    outgoing_schema = transport.calls[0]["payload"]["response_format"]["json_schema"]["schema"]
+    assert outgoing_schema["$defs"]["UnscoredClaim"]["properties"]["evidence_ids"]["minItems"] == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {
+            "status": "answered",
+            "claims": [{"text": "LARKSPUR", "evidence_ids": []}],
+            "unanswered": [],
+        },
+        {"status": "answered", "claims": [], "unanswered": []},
+    ],
+)
+@pytest.mark.asyncio
+async def test_answered_local_response_without_cited_claim_fails_closed(
+    answer: dict[str, Any],
+) -> None:
+    transport = _JsonTransport(
+        {
+            "id": "local-request-empty-citation",
+            "model": "qwen3.5-4b-local",
+            "choices": [{"message": {"content": json.dumps(answer)}}],
+            "usage": {"prompt_tokens": 17, "completion_tokens": 5, "total_tokens": 22},
+        }
+    )
+
+    with pytest.raises(StructuredResponseInvalid):
+        await _provider(transport).generate(_answer_request())
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
 from urllib.parse import urlsplit
@@ -69,15 +70,15 @@ class DevLocalOpenAICompatibleGenerationProvider:
     async def generate(self, request: LLMRequest) -> LLMResult:
         system_instruction = (
             request.system_instruction
-            + "\n\nDo not return status=answered with an empty claims list. If the retrieved "
-            + "passages support the answer, set status to answered, include at least one concise "
-            + "supported claim, copy its supporting evidence ID or IDs from the passages, and set "
-            + "unanswered to an empty list. Use status=insufficient only if the passages do not "
-            + "support the answer; then leave claims empty and state the gap. Never put the word "
-            + "None in unanswered. Example shape: "
+            + "\n\nFor status=answered, return at least one concise supported claim and copy at "
+            + "least one supporting evidence ID exactly from the retrieved passages into every "
+            + "claim. If the passages do not support an answer, use status=insufficient, leave "
+            + "claims empty, and state the gap. Never put the word None in unanswered. "
+            + "Example shape: "
             + '{"status":"answered","claims":[{"text":"<supported answer>",'
             + '"evidence_ids":["<copy an evidence ID>"]}],"unanswered":[]}. Replace placeholders.'
         )
+        response_schema = _require_claim_evidence_ids(request.response_schema)
         payload = {
             "model": self.profile.model,
             "messages": [
@@ -90,7 +91,7 @@ class DevLocalOpenAICompatibleGenerationProvider:
                 "json_schema": {
                     "name": "b07_structured_answer",
                     "strict": True,
-                    "schema": request.response_schema,
+                    "schema": response_schema,
                 },
             },
             "temperature": 0,
@@ -126,7 +127,12 @@ class DevLocalOpenAICompatibleGenerationProvider:
             content = message.get("content") if isinstance(message, dict) else None
             if not isinstance(content, str):
                 raise TypeError
-            parsed = validate_json_response(json.loads(content), request.response_schema)
+            parsed = validate_json_response(json.loads(content), response_schema)
+            if parsed.get("status") == "answered" and not parsed.get("claims"):
+                raise StructuredResponseInvalid(
+                    "an answered local response must contain at least one cited claim",
+                    diagnostic={"failure_stage": "answered_claim_validation"},
+                )
             usage = parse_token_usage(body.get("usage"))
             revision = body.get("model")
             if not isinstance(revision, str) or not revision:
@@ -163,3 +169,41 @@ class DevLocalOpenAICompatibleGenerationProvider:
             ) from None
         await reservation.finish(usage)
         return result
+
+
+def _require_claim_evidence_ids(response_schema: dict[str, object]) -> dict[str, object]:
+    """Require citations on every B07 answer claim without mutating the caller's schema."""
+    schema = deepcopy(response_schema)
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return schema
+    claims_schema = properties.get("claims")
+    if claims_schema is None:
+        return schema
+    if not isinstance(claims_schema, dict):
+        raise TypeError("B07 answer schema claims property must be an object")
+    item_schema = claims_schema.get("items")
+    if not isinstance(item_schema, dict):
+        raise TypeError("B07 answer schema claims items must be an object")
+    reference = item_schema.get("$ref")
+    if isinstance(reference, str):
+        prefix = "#/$defs/"
+        if not reference.startswith(prefix):
+            raise ValueError("B07 answer schema claim reference is unsupported")
+        definitions = schema.get("$defs")
+        if not isinstance(definitions, dict):
+            raise TypeError("B07 answer schema claim definition is missing")
+        item_schema = definitions.get(reference[len(prefix):])
+    if not isinstance(item_schema, dict):
+        raise TypeError("B07 answer schema claim definition is invalid")
+    claim_properties = item_schema.get("properties")
+    if not isinstance(claim_properties, dict):
+        raise TypeError("B07 answer schema claim properties are missing")
+    evidence_schema = claim_properties.get("evidence_ids")
+    if not isinstance(evidence_schema, dict) or evidence_schema.get("type") != "array":
+        raise TypeError("B07 answer schema evidence_ids must be an array")
+    minimum = evidence_schema.get("minItems", 0)
+    if type(minimum) is not int:
+        raise TypeError("B07 answer schema evidence_ids minItems must be an integer")
+    evidence_schema["minItems"] = max(1, minimum)
+    return schema
