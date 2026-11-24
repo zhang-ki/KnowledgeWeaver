@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
+from knowledge_weaver.core.budget import BudgetLedger
+from knowledge_weaver.core.config import RemoteUseApproval, RuntimeSettings
 from knowledge_weaver.core.errors import ProviderUnavailable
 from knowledge_weaver.core.ids import sha256_text
 from knowledge_weaver.extraction import (
@@ -15,6 +19,7 @@ from knowledge_weaver.extraction import (
     scoped_alias_key,
 )
 from knowledge_weaver.models import (
+    Budget,
     Chunk,
     ChunkSpan,
     CountKind,
@@ -32,6 +37,7 @@ from knowledge_weaver.models import (
     SourceKind,
     StructureType,
 )
+from knowledge_weaver.providers import CloudGenerationProvider, OpenAIChatProfile
 
 CORPUS_ID = "11111111-1111-4111-8111-111111111111"
 SOURCE_ID = "00000000-0000-4000-8000-000000000001"
@@ -506,6 +512,144 @@ async def test_normative_specification_uses_separate_provenance_and_exact_modali
     assert observation["schema_version"] == 2
     assert observation["outcome"] == "EXECUTED_WITH_RELATIONS"
     assert observation["provider_configured"] is True
+
+
+@pytest.mark.asyncio
+async def test_normative_json_object_prompt_and_schema_repair_use_explicit_fields() -> None:
+    text = "The Copper Agent SHALL validate the Quartz Record."
+    request, _chunk = make_request(text)
+    valid_payload = {
+        "entities": [
+            {
+                "local_id": "agent",
+                "name": "Copper Agent",
+                "kind": "concept",
+                "mentions": [
+                    {"surface_form": "Copper Agent", "quote": text}
+                ],
+                "aliases": [],
+            },
+            {
+                "local_id": "record",
+                "name": "Quartz Record",
+                "kind": "concept",
+                "mentions": [
+                    {"surface_form": "Quartz Record", "quote": text}
+                ],
+                "aliases": [],
+            },
+        ],
+        "relations": [
+            {
+                "subject_local_id": "agent",
+                "predicate": "VALIDATES",
+                "object_local_id": "record",
+                "polarity": "positive",
+                "qualifiers": {"normative_modality": "SHALL"},
+                "confidence": 0.9,
+                "evidence": [{"surface_form": "SHALL", "quote": text}],
+            }
+        ],
+    }
+
+    class MockJsonTransport:
+        def __init__(self) -> None:
+            self.responses = [valid_payload, {"unexpected": []}, valid_payload]
+            self.requests: list[dict[str, Any]] = []
+
+        async def post_json(
+            self,
+            endpoint_url: str,
+            payload: dict[str, Any],
+            headers: dict[str, str],
+            *,
+            timeout_seconds: float,
+            local_only: bool = False,
+        ) -> dict[str, Any]:
+            self.requests.append(payload)
+            response = self.responses[len(self.requests) - 1]
+            return {
+                "id": f"mock-{len(self.requests)}",
+                "model": "fixture-normative-json-object-v1",
+                "choices": [
+                    {
+                        "message": {"content": json.dumps(response)},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 100,
+                    "total_tokens": 200,
+                },
+            }
+
+    transport = MockJsonTransport()
+    cloud_provider = CloudGenerationProvider(
+        OpenAIChatProfile(
+            endpoint_url="https://provider.example/v1/chat/completions",
+            model="fixture-normative-json-object-v1",
+            api_key=SecretStr("mock-only-secret"),
+            max_attempts=1,
+            retry_backoff_seconds=0,
+        ),
+        RemoteUseApproval(
+            external_data_approved=True,
+            budget_approved=True,
+            calls_explicitly_enabled=True,
+        ),
+        BudgetLedger(
+            Budget(
+                deadline_utc=datetime.now(UTC) + timedelta(minutes=2),
+                max_llm_calls=3,
+                max_total_tokens=30000,
+            )
+        ),
+        settings=RuntimeSettings(allow_remote=True, model_offline=False),
+        transport=transport,
+    )
+    extractor = KnowledgeExtractor(
+        cloud_provider,
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.markdown},
+        normative_source_ids={SOURCE_ID},
+        max_schema_repairs=1,
+    )
+
+    normal_result = await extractor.extract(request)
+    repaired_result = await extractor.extract(request)
+
+    assert len(transport.requests) == 3
+    assert normal_result.rejected_items == []
+    assert repaired_result.rejected_items == []
+    assert len(normal_result.relations) == len(repaired_result.relations) == 1
+    assert normal_result.relations[0].predicate is RelationPredicate.VALIDATES
+    assert normal_result.relations[0].qualifiers["normative_modality"] == "SHALL"
+    assert all(item.quote == text for item in normal_result.evidence)
+    assert extraction_observation(normal_result)["outcome"] == "EXECUTED_WITH_RELATIONS"
+
+    for payload in transport.requests:
+        assert payload["response_format"] == {"type": "json_object"}
+        assert "json_schema" not in payload["response_format"]
+        system_instruction = payload["messages"][0]["content"]
+        assert "authoritative JSON Schema" in system_instruction
+        assert '"additionalProperties":false' in system_instruction
+        assert '"required":["entities","relations"]' in system_instruction
+        for field_name in (
+            "local_id",
+            "surface_form",
+            "subject_local_id",
+            "predicate",
+            "object_local_id",
+            "polarity",
+            "qualifiers",
+            "evidence",
+            "normative_modality",
+        ):
+            assert field_name in system_instruction
+    assert "Repair `candidate_response`" in transport.requests[2]["messages"][0]["content"]
+    assert "`qualifiers.normative_modality`" in transport.requests[2]["messages"][0]["content"]
+    assert "`qualifiers.guard`" in transport.requests[2]["messages"][0]["content"]
 
 
 @pytest.mark.asyncio

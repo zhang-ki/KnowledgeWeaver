@@ -82,6 +82,7 @@ if TYPE_CHECKING:
 
 
 _EXTRACTION_ROUTING_PROFILE_VERSION = "kw-extraction-routing-v2"
+_NORMATIVE_PROMPT_VERSION = "kw-normative-response-schema-v2"
 
 
 def _source_extraction_profile_sha256(
@@ -94,6 +95,9 @@ def _source_extraction_profile_sha256(
         "profile_version": _EXTRACTION_ROUTING_PROFILE_VERSION,
         "source_kind": source.kind.value,
         "normative_source": normative_source,
+        "normative_prompt_version": (
+            _NORMATIVE_PROMPT_VERSION if normative_source else None
+        ),
         "provider_configured": (
             None if source.kind is SourceKind.python_repo else provider_configured
         ),
