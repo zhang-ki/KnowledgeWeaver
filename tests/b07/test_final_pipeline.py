@@ -20,6 +20,7 @@ from knowledge_weaver.evaluation.protocol import load_protocol
 from knowledge_weaver.evaluation.redaction import canonical_json_line
 from knowledge_weaver.evaluation.reporting import (
     build_report,
+    recompute_report_files,
     render_markdown_report,
     summarize_query_runs,
 )
@@ -433,7 +434,9 @@ def test_legacy_compatibility_entry_remains_explicit_and_labeled() -> None:
     assert any(item.startswith("BLOCKED_PROVIDER:") for item in report.blockers)
 
 
-def test_legacy_executor_branch_is_display_only_even_with_real_quality_shaped_output() -> None:
+def test_legacy_executor_branch_is_display_only_even_with_real_quality_shaped_output(
+    tmp_path: Path,
+) -> None:
     root = Path(__file__).resolve().parents[2]
     protocol, blocked_dataset, _schedule, generation = _ready_formal_schedule(root)
     template = _fixture()[0]
@@ -512,6 +515,86 @@ def test_legacy_executor_branch_is_display_only_even_with_real_quality_shaped_ou
     assert manifest["execution_mode"] == "LEGACY_DISPLAY_ONLY"
     assert manifest["expected_quality_query_runs"] == 0
     assert not manifest["formal_quality_eligible"]
+    assert manifest["schema_version"] == 4
+    assert len(manifest["expected_query_keys"]) == protocol.test_case_minimum * 2
+
+    with pytest.raises(ValueError, match="exactly cover"):
+        build_report(manifest, report.query_records[:-1])
+    with pytest.raises(ValueError, match="duplicate query key"):
+        build_report(
+            manifest,
+            [*report.query_records[:-1], report.query_records[0]],
+        )
+    for identity_change in (
+        {"system_id": "dense"},
+        {"budget_id": "high"},
+        {"seed": 29},
+        {"ablation_id": "A01"},
+    ):
+        mismatched_row = report.query_records[0].model_copy(update=identity_change)
+        with pytest.raises(ValueError, match="suite identity mismatch"):
+            build_report(manifest, [mismatched_row, *report.query_records[1:]])
+    inconsistent_suite_counts = {
+        **manifest,
+        "suite_statuses": [
+            {
+                **manifest["suite_statuses"][0],
+                "query_count": manifest["suite_statuses"][0]["query_count"] + 1,
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="suite query count"):
+        build_report(inconsistent_suite_counts, report.query_records)
+
+    paths = write_execution_artifacts(report, repository_root=tmp_path)
+    matrix_path = Path(paths["matrix_manifest"])
+    per_query_path = Path(paths["per_query"])
+    saved_manifest = json.loads(matrix_path.read_text(encoding="utf-8"))
+    assert saved_manifest["per_query_jsonl_sha256"] == paths["per_query_sha256"]
+    rebuilt_from_files = recompute_report_files(
+        matrix_path,
+        per_query_path,
+        tmp_path / "report.md",
+    )
+    assert rebuilt_from_files["query_record_count"] == len(report.query_records)
+
+    original_jsonl = per_query_path.read_bytes()
+    per_query_path.write_bytes(original_jsonl + b"\n")
+    with pytest.raises(ValueError, match="SHA-256"):
+        recompute_report_files(matrix_path, per_query_path, tmp_path / "tampered.md")
+
+    lines = original_jsonl.decode("utf-8").splitlines()
+    missing_jsonl = "\n".join(lines[:-1]) + "\n"
+    missing_manifest = {
+        **saved_manifest,
+        "per_query_jsonl_sha256": hashlib.sha256(missing_jsonl.encode("utf-8")).hexdigest(),
+    }
+    missing_manifest_path = tmp_path / "matrix-missing.json"
+    missing_jsonl_path = tmp_path / "per-query-missing.jsonl"
+    missing_manifest_path.write_text(json.dumps(missing_manifest), encoding="utf-8")
+    missing_jsonl_path.write_bytes(missing_jsonl.encode("utf-8"))
+    with pytest.raises(ValueError, match="exactly cover"):
+        recompute_report_files(
+            missing_manifest_path,
+            missing_jsonl_path,
+            tmp_path / "missing.md",
+        )
+
+    duplicate_jsonl = "\n".join([*lines[:-1], lines[0]]) + "\n"
+    duplicate_manifest = {
+        **saved_manifest,
+        "per_query_jsonl_sha256": hashlib.sha256(duplicate_jsonl.encode("utf-8")).hexdigest(),
+    }
+    duplicate_manifest_path = tmp_path / "matrix-duplicate.json"
+    duplicate_jsonl_path = tmp_path / "per-query-duplicate.jsonl"
+    duplicate_manifest_path.write_text(json.dumps(duplicate_manifest), encoding="utf-8")
+    duplicate_jsonl_path.write_bytes(duplicate_jsonl.encode("utf-8"))
+    with pytest.raises(ValueError, match="duplicate query key"):
+        recompute_report_files(
+            duplicate_manifest_path,
+            duplicate_jsonl_path,
+            tmp_path / "duplicate.md",
+        )
 
     # Legacy artifacts from before this guard may contain quality-shaped records.
     unsafe_rows = [record.model_copy(update={"formal_quality_eligible": True}) for record in report.query_records]

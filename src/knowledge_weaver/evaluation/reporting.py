@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import statistics
 from collections import defaultdict
@@ -273,6 +274,133 @@ def system_pareto_frontier(
     return [point.__dict__ for point in frontier]
 
 
+def _validate_query_coverage(
+    matrix_manifest: Mapping[str, Any],
+    schedule: Mapping[str, Any],
+    records: Sequence[QueryRunRecord],
+    *,
+    status: str,
+) -> None:
+    raw_suites = schedule.get("suites", [])
+    if not isinstance(raw_suites, list):
+        raise TypeError("matrix schedule suites must be a list")
+    suites: dict[str, Mapping[str, Any]] = {}
+    for suite in raw_suites:
+        if not isinstance(suite, Mapping) or not isinstance(suite.get("suite_id"), str):
+            raise TypeError("matrix schedule contains an invalid suite identity")
+        suite_id = suite["suite_id"]
+        if suite_id in suites:
+            raise ValueError("matrix schedule contains duplicate suite identities")
+        suites[suite_id] = suite
+
+    raw_expected = matrix_manifest.get("expected_query_keys")
+    expected_keys: set[tuple[str, str, str]] = set()
+    expected_counts: dict[str, int] = defaultdict(int)
+    if raw_expected is not None:
+        if not isinstance(raw_expected, list):
+            raise TypeError("expected query keys must be a list")
+        for item in raw_expected:
+            if not isinstance(item, Mapping):
+                raise TypeError("expected query key is malformed")
+            suite_id, case_id, cache_state = (
+                item.get("suite_id"),
+                item.get("case_id"),
+                item.get("cache_state"),
+            )
+            if (
+                not isinstance(suite_id, str)
+                or not isinstance(case_id, str)
+                or not isinstance(cache_state, str)
+                or cache_state not in {"cold", "warm"}
+            ):
+                raise TypeError("expected query key is malformed")
+            key = (suite_id, case_id, cache_state)
+            if key in expected_keys:
+                raise ValueError("expected query keys contain a duplicate")
+            if suite_id not in suites:
+                raise ValueError("expected query key references an unknown suite")
+            expected_keys.add(key)
+            expected_counts[suite_id] += 1
+        if expected_keys:
+            for suite_id, suite in suites.items():
+                expected_count = suite.get("expected_query_runs")
+                if expected_count is not None and expected_counts[suite_id] != expected_count:
+                    raise ValueError("expected query keys do not match a suite's scheduled query count")
+
+    actual_keys: set[tuple[str, str, str]] = set()
+    actual_counts: dict[str, int] = defaultdict(int)
+    for record in records:
+        suite = suites.get(record.suite_id)
+        if suites and suite is None:
+            raise ValueError("per-query record references an unknown suite")
+        if suite is not None and (
+            record.system_id != suite.get("system_id")
+            or record.budget_id != suite.get("budget_id")
+            or record.seed != suite.get("seed")
+            or record.ablation_id != suite.get("ablation_id")
+        ):
+            raise ValueError("per-query record suite identity mismatch")
+        key = (record.suite_id, record.case_id, record.cache_state)
+        if key in actual_keys:
+            raise ValueError("per-query records contain a duplicate query key")
+        if expected_keys and key not in expected_keys:
+            raise ValueError("per-query record is outside the expected query keys")
+        actual_keys.add(key)
+        actual_counts[record.suite_id] += 1
+
+    if status == "COMPLETE":
+        if raw_expected is None or not expected_keys:
+            raise ValueError("complete matrix is missing exact expected query keys")
+        if actual_keys != expected_keys:
+            raise ValueError("per-query records do not exactly cover the expected query keys")
+
+    raw_statuses = matrix_manifest.get("suite_statuses", [])
+    if not isinstance(raw_statuses, list):
+        raise TypeError("suite statuses must be a list")
+    status_by_suite: dict[str, Mapping[str, Any]] = {}
+    for item in raw_statuses:
+        if not isinstance(item, Mapping) or not isinstance(item.get("suite_id"), str):
+            raise TypeError("matrix contains an invalid suite status")
+        suite_id = item["suite_id"]
+        if suite_id in status_by_suite:
+            raise ValueError("matrix contains duplicate suite statuses")
+        if suites and suite_id not in suites:
+            raise ValueError("matrix status references an unknown suite")
+        if item.get("query_count") != actual_counts[suite_id]:
+            raise ValueError("suite query count differs from its per-query records")
+        status_by_suite[suite_id] = item
+
+    if status == "COMPLETE":
+        expected_total = matrix_manifest.get(
+            "expected_query_runs", schedule.get("expected_query_runs")
+        )
+        if expected_total != len(expected_keys):
+            raise ValueError("expected query keys do not match the matrix query count")
+        suite_total = matrix_manifest.get(
+            "formal_suite_count", schedule.get("formal_suite_count", len(suites))
+        )
+        if suite_total != len(suites):
+            raise ValueError("formal suite count differs from scheduled suite identities")
+        if not suites or set(status_by_suite) != set(suites):
+            raise ValueError("complete matrix does not contain every scheduled suite status")
+        for suite_id, suite in suites.items():
+            item = status_by_suite[suite_id]
+            if item.get("status") != "COMPLETE":
+                raise ValueError("complete matrix contains a non-complete suite")
+            if actual_counts[suite_id] != suite.get("expected_query_runs"):
+                raise ValueError("per-query records do not match a suite's scheduled query count")
+        if any(record.status != "complete" for record in records):
+            raise ValueError("complete matrix contains a failed per-query record")
+        display_only = (
+            matrix_manifest.get("display_only") is True
+            or schedule.get("gold_mapping_mode") == "LEGACY_COMPATIBILITY"
+        )
+        if not display_only and any(
+            not record.formal_quality_eligible for record in records
+        ):
+            raise ValueError("complete formal matrix contains a query without required quality review")
+
+
 def build_report(
     matrix_manifest: Mapping[str, Any], records: Sequence[QueryRunRecord]
 ) -> dict[str, Any]:
@@ -343,6 +471,9 @@ def build_report(
     failed_count = sum(item.get("status") == "FAILED" for item in suite_statuses)
     complete_count = sum(item.get("status") == "COMPLETE" for item in suite_statuses)
     status = matrix_manifest.get("status", schedule.get("status", "BLOCKED"))
+    if not isinstance(status, str):
+        raise TypeError("matrix status must be a string")
+    _validate_query_coverage(matrix_manifest, schedule, records, status=status)
     report_records = (
         [record.model_copy(update={"formal_quality_eligible": False}) for record in records]
         if display_only
@@ -531,8 +662,20 @@ def recompute_report_files(
     matrix_manifest_path: Path, per_query_path: Path, report_path: Path
 ) -> dict[str, Any]:
     matrix = json.loads(matrix_manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(matrix, Mapping):
+        raise TypeError("matrix manifest must be an object")
+    expected_jsonl_sha256 = matrix.get("per_query_jsonl_sha256")
+    jsonl_bytes = per_query_path.read_bytes()
+    actual_jsonl_sha256 = hashlib.sha256(jsonl_bytes).hexdigest()
+    if (
+        not isinstance(expected_jsonl_sha256, str)
+        or len(expected_jsonl_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_jsonl_sha256)
+        or expected_jsonl_sha256 != actual_jsonl_sha256
+    ):
+        raise ValueError("per-query JSONL SHA-256 does not match the matrix manifest")
     records: list[QueryRunRecord] = []
-    for line_number, line in enumerate(per_query_path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(jsonl_bytes.decode("utf-8").splitlines(), start=1):
         if not line.strip():
             raise ValueError(f"blank per-query JSONL row at line {line_number}")
         records.append(QueryRunRecord.model_validate_json(line))

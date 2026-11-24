@@ -67,6 +67,7 @@ class MatrixExecutionReport:
     status: SuiteStatus
     suite_statuses: tuple[SuiteExecutionStatus, ...]
     query_records: tuple[QueryRunRecord, ...]
+    expected_query_keys: tuple[tuple[str, str, str], ...] = ()
     blockers: tuple[str, ...] = ()
     policy_training_summary: Mapping[str, Any] | None = None
 
@@ -109,7 +110,7 @@ class MatrixExecutionReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "status": self.status.value,
             "execution_mode": self.execution_mode,
             "display_only": self.display_only,
@@ -127,6 +128,10 @@ class MatrixExecutionReport:
             "gold_mapping_mode": self.schedule.gold_mapping_mode,
             "formal_suite_count": len(self.schedule.suites),
             "expected_query_runs": self.schedule.expected_query_runs,
+            "expected_query_keys": [
+                {"suite_id": suite_id, "case_id": case_id, "cache_state": cache_state}
+                for suite_id, case_id, cache_state in self.expected_query_keys
+            ],
             "expected_quality_query_runs": (
                 0 if self.display_only else self.schedule.expected_quality_query_runs
             ),
@@ -400,6 +405,12 @@ async def _run_matrix(
         return _blocked_report(schedule, "BLOCKED_INPUTS: scheduled case count differs from frozen test split")
 
     budget_by_id: dict[str, BudgetSpec] = {item.id: item for item in protocol.budgets}
+    expected_query_keys = tuple(
+        (suite.suite_id, case.case.id, cache_state)
+        for suite in schedule.suites
+        for cache_state in suite.cache_states
+        for case in _seeded_case_order(test_cases, suite.seed)
+    )
     records: list[QueryRunRecord] = []
     suite_statuses: list[SuiteExecutionStatus] = []
     for suite in schedule.suites:
@@ -461,6 +472,7 @@ async def _run_matrix(
         status=status,
         suite_statuses=tuple(suite_statuses),
         query_records=tuple(records),
+        expected_query_keys=expected_query_keys,
         blockers=(),
         policy_training_summary=policy_training_summary,
     )
@@ -517,16 +529,20 @@ def write_execution_artifacts(
 
     manifest_path = target / "matrix_manifest.json"
     per_query_path = target / "per_query.jsonl"
-    manifest_text = json.dumps(
-        json.loads(canonical_json_line(report.to_dict())),
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-    ) + "\n"
     query_text = "".join(
         canonical_json_line(item.model_dump(mode="json")) + "\n"
         for item in report.query_records
     )
+    manifest_payload = report.to_dict()
+    manifest_payload["per_query_jsonl_sha256"] = hashlib.sha256(
+        query_text.encode("utf-8")
+    ).hexdigest()
+    manifest_text = json.dumps(
+        json.loads(canonical_json_line(manifest_payload)),
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+    ) + "\n"
     manifest_path.write_text(manifest_text, encoding="utf-8", newline="\n")
     per_query_path.write_text(query_text, encoding="utf-8", newline="\n")
     return {
