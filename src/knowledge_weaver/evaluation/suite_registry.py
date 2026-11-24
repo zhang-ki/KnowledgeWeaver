@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal
 
+from knowledge_weaver.evaluation.agent_adapter import AgentSuiteRouteAdapter
 from knowledge_weaver.evaluation.protocol import (
     AblationSpec,
     BudgetSpec,
@@ -228,7 +229,17 @@ def build_suite_registry(
             "BLOCKED_CACHE_CONTROL_PORT: suite registry has no frozen B04 cache-control profile"
         )
         if route_id.startswith("agent."):
-            blockers.append("BLOCKED_B06_TRACE_PORT: AgentService does not expose ordered retrieval trace")
+            adapter = route_binding.adapter if route_binding is not None else None
+            supports_trace = (
+                isinstance(adapter, AgentSuiteRouteAdapter)
+                and adapter.matches_route(route_id)
+                and getattr(adapter, "config_sha256", None)
+                == (route_binding.config_sha256 if route_binding is not None else None)
+            )
+            if not supports_trace:
+                blockers.append(
+                    "BLOCKED_B06_TRACE_PORT: suite has no matching frozen Agent trace adapter"
+                )
         elif route_binding is None:
             blockers.append(f"BLOCKED_ROUTE_BINDING: {route_id} has no runtime adapter")
         if generation_config_sha256 is None:

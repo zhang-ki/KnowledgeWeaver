@@ -29,6 +29,7 @@ from knowledge_weaver.evaluation.generation_binding import (
 from knowledge_weaver.evaluation.redaction import redact_text
 from knowledge_weaver.evaluation.scheduling import ExperimentSuite
 from knowledge_weaver.models.contracts import (
+    AgentExecutionResult,
     Generation,
     Language,
     ModelTokenUsage,
@@ -112,6 +113,7 @@ class QueryMeasurements(RunModel):
 class UnscoredClaim(RunModel):
     text: str = Field(min_length=1)
     evidence_ids: tuple[str, ...] = ()
+    relation_ids: tuple[str, ...] = ()
 
 
 class UnscoredAnswer(RunModel):
@@ -141,6 +143,7 @@ class ExecutionOutput(RunModel):
     retrieval_usage: Usage
     provider_usage: ExecutorProviderUsage
     response_summary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    agent_execution: AgentExecutionResult | None = None
 
 
 class AttemptOutcome(RunModel):

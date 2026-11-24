@@ -4,6 +4,10 @@ from types import SimpleNamespace
 import pytest
 from test_generation_binding import _make_generation
 
+from knowledge_weaver.evaluation.agent_adapter import (
+    AgentSuiteRouteAdapter,
+    build_agent_suite_adapters,
+)
 from knowledge_weaver.evaluation.dataset import load_dataset
 from knowledge_weaver.evaluation.protocol import load_protocol
 from knowledge_weaver.evaluation.runner import _registered_suite_blocker
@@ -37,6 +41,14 @@ def _registry_inputs():
         generation_sha256=generation_sha256,
     )
     return protocol, dataset, schedule
+
+
+class _AgentServiceStub:
+    async def investigate(self, request):
+        raise AssertionError("registry construction must not call AgentService")
+
+    async def investigate_with_trace(self, request, execution_profile):
+        raise AssertionError("registry construction must not call AgentService")
 
 
 def test_registry_freezes_all_111_suites_and_unique_config_identities() -> None:
@@ -124,3 +136,39 @@ def test_route_binding_rejects_mismatched_implementation_and_bad_config_hash() -
             config_sha256="Z" * 64,
             adapter=object(),
         )
+
+
+def test_agent_trace_routes_are_unique_and_keep_b04_blocker() -> None:
+    protocol, _dataset, schedule = _registry_inputs()
+    adapters = build_agent_suite_adapters(_AgentServiceStub())
+    assert "agent.fixed" not in adapters
+    assert len(adapters) == 13
+    assert len({adapter.config_sha256 for adapter in adapters.values()}) == 13
+    assert len({id(adapter) for adapter in adapters.values()}) == 13
+    assert all(isinstance(adapter, AgentSuiteRouteAdapter) for adapter in adapters.values())
+    registry = build_suite_registry(
+        schedule,
+        protocol,
+        route_bindings={
+            route_id: RouteBinding(
+                route_id=route_id,
+                implementation_id=route_id,
+                config_sha256=adapter.config_sha256,
+                adapter=adapter,
+            )
+            for route_id, adapter in adapters.items()
+        },
+        generation_config_sha256="d" * 64,
+    )
+
+    rule = registry.plan_for("system/rule/standard/seed-17")
+    segr = registry.plan_for("system/segr/standard/seed-17")
+    ablation = registry.plan_for("ablation/A01/standard/seed-17")
+    fixed = registry.plan_for("system/fixed_agent/standard/seed-17")
+
+    assert not any("B06_TRACE_PORT" in item for item in rule.blockers)
+    assert any("CACHE_CONTROL_PORT" in item for item in rule.blockers)
+    assert not any("B06_TRACE_PORT" in item for item in segr.blockers)
+    assert not any("B06_TRACE_PORT" in item for item in ablation.blockers)
+    assert any("B06_TRACE_PORT" in item for item in fixed.blockers)
+    assert rule.executable is False

@@ -12,7 +12,11 @@ from typing import Literal
 from pydantic import ValidationError
 
 from knowledge_weaver.core.errors import KnowledgeWeaverError, ProviderUnavailable
-from knowledge_weaver.evaluation.generation_binding import verify_generation_manifest
+from knowledge_weaver.evaluation.agent_adapter import AgentSuiteRouteAdapter
+from knowledge_weaver.evaluation.generation_binding import (
+    VerifiedGeneration,
+    verify_generation_manifest,
+)
 from knowledge_weaver.evaluation.protocol import EvaluationProtocol
 from knowledge_weaver.evaluation.runs import (
     AttemptOutcome,
@@ -22,6 +26,7 @@ from knowledge_weaver.evaluation.runs import (
     ExecutorProviderUsage,
     ProviderExecutionError,
     UnscoredAnswer,
+    UnscoredClaim,
 )
 from knowledge_weaver.evaluation.scheduling import ExperimentSuite
 from knowledge_weaver.evaluation.suite_registry import (
@@ -35,9 +40,11 @@ from knowledge_weaver.models.contracts import (
     CountKind,
     Generation,
     LLMRequest,
+    ModelTokenUsage,
     QueryContext,
     RetrievalQuery,
     RetrievalResult,
+    Usage,
 )
 from knowledge_weaver.ports import GenerationProvider, KnowledgeStore, Retriever
 from knowledge_weaver.providers.fake import FakeGenerationProvider
@@ -79,6 +86,92 @@ def _citation_resolutions(
     )
 
 
+def _combined_count_kind(values: list[CountKind]) -> CountKind:
+    if not values or any(value is CountKind.unavailable for value in values):
+        return CountKind.unavailable
+    if any(value is CountKind.estimated for value in values):
+        return CountKind.estimated
+    return CountKind.exact
+
+
+def _agent_execution_output(result: object) -> tuple[ExecutionOutput, ModelTokenUsage, str]:
+    from knowledge_weaver.models import AgentExecutionResult
+
+    if type(result) is not AgentExecutionResult:
+        raise TypeError("Agent B06 trace result has an unsupported DTO type")
+    steps = result.retrieval_steps
+    retrieval_hits = tuple(hit for step in steps for hit in step.hits)
+    retrieved_paths = tuple(path for step in steps for path in step.paths)
+    step_usages = [step.usage for step in steps]
+    retrieval_usage = Usage(
+        elapsed_ms=sum(item.elapsed_ms for item in step_usages),
+        tool_calls=sum(item.tool_calls for item in step_usages),
+        llm_calls=sum(item.llm_calls for item in step_usages),
+        input_tokens=sum(item.input_tokens for item in step_usages),
+        output_tokens=sum(item.output_tokens for item in step_usages),
+        count_kind=_combined_count_kind([item.count_kind for item in step_usages]),
+    )
+    provider_calls = list(result.provider_calls)
+    completed_calls = [
+        item for item in provider_calls if item.status == "complete" and item.usage is not None
+    ]
+    raw_fields: dict[str, int] = {}
+    for call in completed_calls:
+        assert call.usage is not None
+        for name, value in call.usage.raw_fields.items():
+            raw_fields[name] = raw_fields.get(name, 0) + value
+    provider_usage = ModelTokenUsage(
+        input_tokens=sum(item.usage.input_tokens for item in completed_calls if item.usage),
+        output_tokens=sum(item.usage.output_tokens for item in completed_calls if item.usage),
+        count_kind=_combined_count_kind(
+            [
+                call.usage.count_kind
+                for call in completed_calls
+                if call.usage is not None
+            ]
+            + ([CountKind.unavailable] if len(completed_calls) != len(provider_calls) else [])
+        ),
+        raw_fields=raw_fields,
+    )
+    models = tuple(dict.fromkeys(item.model for item in completed_calls if item.model))
+    revisions = tuple(dict.fromkeys(item.revision for item in completed_calls if item.revision))
+    model = "+".join(models) if models else "no-provider-call"
+    revision = "+".join(revisions) if revisions else "no-provider-call"
+    answer = UnscoredAnswer(
+        status=result.answer.status.value,
+        claims=tuple(
+            UnscoredClaim(
+                text=claim.text,
+                evidence_ids=tuple(claim.evidence_ids),
+                relation_ids=tuple(claim.relation_ids),
+            )
+            for claim in result.answer.claims
+        ),
+        unanswered=tuple(result.answer.unanswered),
+    )
+    citations = tuple(
+        CitationResolution(evidence_id=evidence_id, resolves_to_original=True)
+        for evidence_id in result.validated_citation_ids
+    )
+    payload = result.model_dump(mode="json")
+    response_sha256 = _canonical_sha256(payload)
+    output = ExecutionOutput(
+        retrieval_hits=retrieval_hits,
+        retrieved_paths=retrieved_paths,
+        answer=answer,
+        citations=citations,
+        retrieval_usage=retrieval_usage,
+        provider_usage=ExecutorProviderUsage(
+            usage=provider_usage,
+            model=model,
+            revision=revision,
+        ),
+        response_summary_sha256=response_sha256,
+        agent_execution=result,
+    )
+    return output, provider_usage, f"{model}@{revision}"
+
+
 def _route_adapter_matches(route_id: str, adapter: object) -> bool:
     if route_id == "retriever.bm25":
         return isinstance(adapter, Bm25Retriever)
@@ -99,6 +192,10 @@ def _route_adapter_matches(route_id: str, adapter: object) -> bool:
             and _hybrid_channels_match(adapter)
         )
     return False
+
+
+def _agent_route_adapter_matches(route_id: str, adapter: object) -> bool:
+    return isinstance(adapter, AgentSuiteRouteAdapter) and adapter.matches_route(route_id)
 
 
 def _hybrid_channels_match(adapter: HybridRetriever) -> bool:
@@ -153,16 +250,20 @@ class PublicPortBenchmarkExecutor:
                 route_id, binding.adapter
             ):
                 raise ValueError(f"route adapter does not match its frozen implementation: {route_id}")
-        retrievers = {
+            if route_id.startswith("agent.") and not _agent_route_adapter_matches(
+                route_id, binding.adapter
+            ):
+                raise ValueError(f"route adapter does not match its frozen Agent profile: {route_id}")
+        cache_routes = {
             route_id: binding.adapter
             for route_id, binding in registry.route_bindings.items()
-            if route_id.startswith("retriever.")
+            if route_id.startswith(("retriever.", "agent."))
         }
         self.cache_state_controller = CacheStateController.for_retrievers(
-            retrievers,
+            cache_routes,
             uncontrolled_by_route={
                 route_id: (f"{route_id}/answer-provider/shared-cache",)
-                for route_id in retrievers
+                for route_id in cache_routes
             },
         )
 
@@ -188,18 +289,27 @@ class PublicPortBenchmarkExecutor:
         self._validate_suite_identity(plan, suite)
         if plan.scope not in {"formal", "dev_vertical_slice"}:
             raise ValueError("suite execution scope is not registered")
-        if plan.route_id.startswith("agent."):
-            raise ValueError("BLOCKED_B06_TRACE_PORT: AgentService has no public ordered retrieval trace")
+        is_agent_route = plan.route_id.startswith("agent.")
+        binding = self.registry.binding_for(plan.route_id)
+        if is_agent_route:
+            if binding is None or not _agent_route_adapter_matches(
+                plan.route_id, binding.adapter
+            ):
+                raise ValueError(
+                    "BLOCKED_B06_TRACE_PORT: Agent suite has no matching public trace adapter"
+                )
+        elif binding is None or not _route_adapter_matches(plan.route_id, binding.adapter):
+            raise ValueError("suite route has no matching public Retriever adapter")
         if not plan.executable:
             raise ValueError("suite route is blocked: " + "; ".join(plan.blockers))
         if plan.generation_config_sha256 != self.generation_config_sha256:
             raise ValueError("suite generator config SHA differs from the executor")
-        binding = self.registry.binding_for(plan.route_id)
-        if binding is None or not _route_adapter_matches(plan.route_id, binding.adapter):
-            raise ValueError("suite route has no matching public Retriever adapter")
+        assert binding is not None
         if binding.config_sha256 != plan.route_config_sha256:
             raise ValueError("suite route config SHA differs from the bound adapter")
-        if not isinstance(binding.adapter, Retriever):
+        if is_agent_route and not isinstance(binding.adapter, AgentSuiteRouteAdapter):
+            raise TypeError("frozen Agent route does not satisfy the B07 Agent trace adapter")
+        if not is_agent_route and not isinstance(binding.adapter, Retriever):
             raise TypeError("frozen route adapter does not satisfy the public Retriever port")
 
         budget_spec = next(item for item in self.protocol.budgets if item.id == suite.budget_id)
@@ -260,6 +370,47 @@ class PublicPortBenchmarkExecutor:
                     model_revision="cache-scope-incomplete",
                     cache_state_receipt=cache_receipt,
                     elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                )
+            if isinstance(binding.adapter, AgentSuiteRouteAdapter):
+                agent_result = await binding.adapter.execute(
+                    query,
+                    suite,
+                    plan,
+                    self.protocol,
+                    generation=VerifiedGeneration(
+                        generation=verified.generation,
+                        generation_sha256=verified.generation_sha256,
+                    ),
+                    context=context,
+                    budget=budget,
+                    generation_config_sha256=self.generation_config_sha256,
+                    cache_state=cache_state,
+                    cache_state_receipt=cache_receipt,
+                )
+                output, _, model_revision = _agent_execution_output(
+                    agent_result
+                )
+                aggregate = agent_result.aggregate_usage
+                return AttemptOutcome(
+                    attempt=attempt,
+                    status="complete",
+                    provider_kind=self.provider_kind,
+                    provider_profile=self.provider_profile,
+                    model_revision=model_revision,
+                    input_tokens=aggregate.input_tokens,
+                    output_tokens=aggregate.output_tokens,
+                    tool_calls=aggregate.tool_calls,
+                    llm_calls=aggregate.llm_calls,
+                    steps=len(agent_result.retrieval_steps),
+                    count_kind=_COUNT_KIND_LITERALS[aggregate.count_kind],
+                    elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                    strategy_latency_ms=output.retrieval_usage.elapsed_ms,
+                    cache_state=cache_state,
+                    executed_generation_id=agent_result.generation_id,
+                    executed_generation_sha256=agent_result.generation_sha256,
+                    response_summary_sha256=output.response_summary_sha256,
+                    cache_state_receipt=cache_receipt,
+                    execution_output=output,
                 )
             result = await binding.adapter.retrieve(
                 RetrievalQuery(text=query.question, context=context, top_k=20)
