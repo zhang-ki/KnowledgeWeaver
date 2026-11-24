@@ -8,7 +8,7 @@ from knowledge_weaver.models import ExtractionRequest, ExtractionResult, SourceK
 from knowledge_weaver.ports import Extractor as ExtractorPort
 from knowledge_weaver.ports import GenerationProvider
 
-from .ast_extractor import extract_static_python
+from .ast_extractor import _PythonSourceIndex, extract_static_python
 from .text_extractor import StructuredTextExtractor
 
 EXTRACTION_OBSERVATION_PREFIX = "EXTRACTION_OBSERVATION_V2:"
@@ -116,6 +116,8 @@ class KnowledgeExtractor(ExtractorPort):
         normative_source_ids: set[str] | frozenset[str] | None = None,
         timeout_seconds: float = 30.0,
         max_schema_repairs: int = 1,
+        _python_source_index: _PythonSourceIndex | None = None,
+        _python_source_version_id: str | None = None,
     ) -> None:
         if corpus_id is not None and not corpus_id.strip():
             raise ValueError("corpus_id must be non-empty when supplied")
@@ -129,6 +131,8 @@ class KnowledgeExtractor(ExtractorPort):
         self.normative_source_ids = frozenset(normative_source_ids or ())
         self.timeout_seconds = timeout_seconds
         self.max_schema_repairs = max_schema_repairs
+        self._python_source_index = _python_source_index
+        self._python_source_version_id = _python_source_version_id
 
     def _corpus_id_for_source(self, source_id: str) -> str | None:
         return self.corpus_ids_by_source.get(source_id, self.corpus_id)
@@ -141,7 +145,12 @@ class KnowledgeExtractor(ExtractorPort):
             request.document.relative_path,
             self.source_kinds_by_id,
         ):
-            result = extract_static_python(request, corpus_id=corpus_id)
+            result = extract_static_python(
+                request,
+                corpus_id=corpus_id,
+                source_index=self._python_source_index,
+                source_version_id=self._python_source_version_id,
+            )
             observation = _observation(
                 request,
                 result,

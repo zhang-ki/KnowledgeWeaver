@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +18,10 @@ from knowledge_weaver.core.ids import (
     sha256_text,
 )
 from knowledge_weaver.extraction import KnowledgeExtractor
+from knowledge_weaver.extraction.ast_extractor import (
+    _build_python_source_index,
+    _PythonSourceIndex,
+)
 from knowledge_weaver.extraction.extractor import EXTRACTION_OBSERVATION_PREFIX
 from knowledge_weaver.indexing.bm25 import TOKENIZER_VERSION, Bm25Index
 from knowledge_weaver.indexing.dense import QdrantDenseIndex
@@ -83,6 +87,7 @@ if TYPE_CHECKING:
 
 _EXTRACTION_ROUTING_PROFILE_VERSION = "kw-extraction-routing-v2"
 _NORMATIVE_PROMPT_VERSION = "kw-normative-response-schema-v3"
+_PYTHON_SOURCE_INDEX_VERSION = "kw-python-source-index-v1"
 
 
 def _source_extraction_profile_sha256(
@@ -101,6 +106,11 @@ def _source_extraction_profile_sha256(
         "provider_configured": (
             None if source.kind is SourceKind.python_repo else provider_configured
         ),
+        "python_source_index_version": (
+            _PYTHON_SOURCE_INDEX_VERSION
+            if source.kind is SourceKind.python_repo
+            else None
+        ),
     }
     return sha256_text(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -113,6 +123,40 @@ def _extraction_observations(result: ExtractionResult) -> list[str]:
         for warning in result.warnings
         if warning.startswith(EXTRACTION_OBSERVATION_PREFIX)
     ]
+
+
+def _python_source_index_for_version(
+    source: Source,
+    source_version: SourceVersion,
+    *,
+    documents_by_id: Mapping[str, Document],
+    corpus_id: str,
+) -> _PythonSourceIndex | None:
+    if source.kind is not SourceKind.python_repo or source_version.source_id != source.id:
+        return None
+    documents: list[Document] = []
+    incomplete_code_set = False
+    for entry in source_version.files:
+        is_python_file = entry.relative_path.casefold().endswith((".py", ".pyi"))
+        document = documents_by_id.get(entry.document_id)
+        if (
+            document is None
+            or document.source_id != source.id
+            or document.relative_path.replace("\\", "/").casefold()
+            != entry.relative_path.replace("\\", "/").casefold()
+            or document.raw_hash != entry.raw_hash
+        ):
+            incomplete_code_set = incomplete_code_set or is_python_file
+            continue
+        documents.append(document)
+    if incomplete_code_set:
+        documents = []
+    return _build_python_source_index(
+        source_id=source.id,
+        source_version_id=source_version.id,
+        corpus_id=corpus_id,
+        documents=documents,
+    )
 
 
 class PipelineService:
@@ -273,6 +317,12 @@ class PipelineService:
                 chunks_by_doc = {doc_id: await self._load_doc_chunks(session, doc_id) for doc_id in reused}
                 for parsed_document in parsed.parsed_source.documents:
                     chunks_by_doc[parsed_document.id] = self.chunker.split(parsed_document, self.chunk_config)
+                python_source_index = _python_source_index_for_version(
+                    source,
+                    version,
+                    documents_by_id=all_docs,
+                    corpus_id=request.corpus_id,
+                )
                 extractor = self.extractor
                 if extractor is None or isinstance(extractor, KnowledgeExtractor):
                     inherited_source_kinds = (
@@ -300,6 +350,10 @@ class PipelineService:
                         ),
                         max_schema_repairs=(
                             extractor.max_schema_repairs if extractor is not None else 1
+                        ),
+                        _python_source_index=python_source_index,
+                        _python_source_version_id=(
+                            version.id if python_source_index is not None else None
                         ),
                     )
                 extraction_observations: list[str] = []

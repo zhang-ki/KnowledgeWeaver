@@ -18,6 +18,7 @@ from knowledge_weaver.extraction import (
     propose_text_alignment,
     scoped_alias_key,
 )
+from knowledge_weaver.extraction.ast_extractor import _build_python_source_index
 from knowledge_weaver.models import (
     Budget,
     Chunk,
@@ -45,6 +46,7 @@ SECOND_SOURCE_ID = "00000000-0000-4000-8000-000000000002"
 DOCUMENT_ID = "00000000-0000-4000-8000-000000000101"
 CHUNK_ID = "00000000-0000-4000-8000-000000000201"
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "b02"
+SOURCE_VERSION_ID = "00000000-0000-4000-8000-000000000301"
 
 
 def make_request(
@@ -101,6 +103,14 @@ def make_request(
         producer_fingerprint="b02-extractor-test-v1",
     )
     return request, chunk
+
+
+def run_immediate(awaitable: Any) -> Any:
+    try:
+        awaitable.send(None)
+    except StopIteration as completed:
+        return completed.value
+    raise AssertionError("expected the Python extraction path to complete immediately")
 
 
 def normative_extractor(provider: QueueProvider) -> KnowledgeExtractor:
@@ -206,6 +216,204 @@ async def test_ast_emits_located_static_relations_and_rejects_dynamic_calls() ->
     assert all(relation.provenance_id in provenance_ids for relation in result.relations)
     for evidence in result.evidence:
         evidence.assert_matches_chunk(chunk)
+
+
+@pytest.mark.parametrize(
+    "import_statement",
+    [
+        "from pkg.target import transform as tx",
+        "from .target import transform as tx",
+    ],
+)
+def test_ast_import_alias_resolves_to_same_source_definition(
+    import_statement: str,
+) -> None:
+    target_request, target_chunk = make_request(
+        "def transform(value):\n    return value\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000111",
+        chunk_id="00000000-0000-4000-8000-000000000211",
+    )
+    caller_request, caller_chunk = make_request(
+        f"{import_statement}\n\ndef caller(value):\n    return tx(value)\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000112",
+        chunk_id="00000000-0000-4000-8000-000000000212",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    caller_result = run_immediate(extractor.extract(caller_request))
+    target_result = run_immediate(extractor.extract(target_request))
+
+    target = next(
+        entity
+        for entity in target_result.entities
+        if entity.canonical_name == "pkg.target.transform"
+        and entity.kind is EntityKind.function
+    )
+    call = next(
+        relation
+        for relation in caller_result.relations
+        if relation.predicate is RelationPredicate.CALLS
+    )
+    assert call.object_id == target.id
+    call_mentions = [
+        mention
+        for mention in caller_result.mentions
+        if mention.entity_id == target.id
+    ]
+    assert len(call_mentions) == 1
+    call_evidence = next(
+        evidence
+        for evidence in caller_result.evidence
+        if evidence.id == call_mentions[0].evidence_id
+    )
+    assert call_evidence.chunk_id == caller_chunk.id
+    assert call_evidence.quote == "tx(value)"
+    definition_mentions = [
+        mention
+        for mention in target_result.mentions
+        if mention.entity_id == target.id
+    ]
+    assert len(definition_mentions) == 1
+    definition_evidence = next(
+        evidence
+        for evidence in target_result.evidence
+        if evidence.id == definition_mentions[0].evidence_id
+    )
+    assert definition_evidence.chunk_id == target_chunk.id
+    assert "def transform" in definition_evidence.quote
+
+
+@pytest.mark.parametrize(
+    ("caller_text", "source_id", "source_version_id", "extra_documents"),
+    [
+        (
+            "from pkg.target import transform as tx\ndef caller():\n    tx()\n",
+            SOURCE_ID,
+            SOURCE_VERSION_ID,
+            [
+                ("pkg/target.py", "def transform():\n    return None\n"),
+                ("pkg/target/__init__.py", "def transform():\n    return None\n"),
+            ],
+        ),
+        (
+            "from pkg.missing import transform as tx\ndef caller():\n    tx()\n",
+            SOURCE_ID,
+            SOURCE_VERSION_ID,
+            [],
+        ),
+        (
+            "from pkg import transform as tx\ndef caller():\n    tx()\n",
+            SOURCE_ID,
+            SOURCE_VERSION_ID,
+            [("pkg/__init__.py", "from .target import transform\n"), ("pkg/target.py", "def transform():\n    return None\n")],
+        ),
+        (
+            "from pkg.target import transform as tx\ndef caller(tx):\n    tx()\n",
+            SOURCE_ID,
+            SOURCE_VERSION_ID,
+            [("pkg/target.py", "def transform():\n    return None\n")],
+        ),
+        (
+            "from pkg.target import transform as tx\ndef caller():\n    tx()\n",
+            SECOND_SOURCE_ID,
+            SOURCE_VERSION_ID,
+            [("pkg/target.py", "def transform():\n    return None\n")],
+        ),
+        (
+            "from pkg.target import transform as tx\ndef caller():\n    tx()\n",
+            SOURCE_ID,
+            "00000000-0000-4000-8000-000000000302",
+            [("pkg/target.py", "def transform():\n    return None\n")],
+        ),
+    ],
+)
+def test_ast_source_index_leaves_ambiguous_or_unbound_targets_unresolved(
+    caller_text: str,
+    source_id: str,
+    source_version_id: str,
+    extra_documents: list[tuple[str, str]],
+) -> None:
+    caller_request, _caller_chunk = make_request(
+        caller_text,
+        path="pkg/caller.py",
+        source_id=source_id,
+        document_id="00000000-0000-4000-8000-000000000121",
+        chunk_id="00000000-0000-4000-8000-000000000221",
+    )
+    documents = [caller_request.document]
+    for index, (path, text) in enumerate(extra_documents, start=1):
+        request, _chunk = make_request(
+            text,
+            path=path,
+            document_id=f"00000000-0000-4000-8000-{index:012d}",
+            chunk_id=f"00000000-0000-4000-8001-{index:012d}",
+        )
+        documents.append(request.document)
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=documents,
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo, SECOND_SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=source_version_id,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+
+    assert not any(item.predicate is RelationPredicate.CALLS for item in result.relations)
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+
+
+def test_ast_source_index_rejects_dynamic_import_calls() -> None:
+    target_request, _target_chunk = make_request(
+        "def transform():\n    return None\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000131",
+        chunk_id="00000000-0000-4000-8000-000000000231",
+    )
+    caller_request, _caller_chunk = make_request(
+        "import importlib\n\n"
+        "def caller():\n"
+        "    module = importlib.import_module('pkg.target')\n"
+        "    module.transform()\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000132",
+        chunk_id="00000000-0000-4000-8000-000000000232",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+
+    assert not any(item.predicate is RelationPredicate.CALLS for item in result.relations)
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
 
 
 @pytest.mark.asyncio

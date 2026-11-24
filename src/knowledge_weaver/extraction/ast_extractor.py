@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import ast
 import re
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from knowledge_weaver.core.ids import canonical_json
+from knowledge_weaver.core.ids import canonical_json, entity_id
 from knowledge_weaver.models import (
+    Document,
     Entity,
     EntityKind,
     ExtractionRequest,
@@ -121,6 +124,247 @@ def _identity_key(source_id: str, module_path: str, qualname: str, kind: EntityK
     )
 
 
+@dataclass(frozen=True)
+class _IndexedDefinition:
+    entity: Entity
+    module_name: str
+
+
+@dataclass(frozen=True)
+class _PythonSourceIndex:
+    source_id: str
+    source_version_id: str
+    corpus_id: str
+    definitions: Mapping[str, tuple[_IndexedDefinition, ...]]
+    module_counts: Mapping[str, int]
+    opaque_exports: frozenset[str]
+    opaque_modules: frozenset[str]
+
+    def matches(self, *, source_id: str, source_version_id: str | None, corpus_id: str) -> bool:
+        return (
+            source_id == self.source_id
+            and source_version_id == self.source_version_id
+            and corpus_id == self.corpus_id
+        )
+
+    def resolve(
+        self,
+        qualified_name: str,
+        *,
+        expected: EntityKind,
+        source_id: str,
+        source_version_id: str | None,
+        corpus_id: str,
+    ) -> Entity | None:
+        if not self.matches(
+            source_id=source_id,
+            source_version_id=source_version_id,
+            corpus_id=corpus_id,
+        ):
+            return None
+        parts = qualified_name.split(".")
+        if not qualified_name or any(not part for part in parts):
+            return None
+        prefixes = {".".join(parts[:index]) for index in range(1, len(parts) + 1)}
+        if prefixes.intersection(self.opaque_modules | self.opaque_exports):
+            return None
+        candidates = self.definitions.get(qualified_name, ())
+        if len(candidates) != 1:
+            return None
+        candidate = candidates[0]
+        module_parts = candidate.module_name.split(".")
+        if any(
+            self.module_counts.get(".".join(module_parts[:index]), 0) > 1
+            for index in range(1, len(module_parts) + 1)
+        ):
+            return None
+        if self.module_counts.get(candidate.module_name) != 1:
+            return None
+        if expected is EntityKind.function:
+            if candidate.entity.kind not in {EntityKind.function, EntityKind.class_}:
+                return None
+        elif candidate.entity.kind is not expected:
+            return None
+        return candidate.entity
+
+
+class _DefinitionIndexVisitor(ast.NodeVisitor):
+    def __init__(
+        self,
+        document: Document,
+        *,
+        corpus_id: str,
+        module_name: str,
+        definitions: dict[str, list[_IndexedDefinition]],
+    ) -> None:
+        self.document = document
+        self.corpus_id = corpus_id
+        self.module_name = module_name
+        self.definitions = definitions
+        self.frames = [module_name]
+
+    def _visit_definition(
+        self,
+        node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+        kind: EntityKind,
+    ) -> None:
+        qualname = f"{self.frames[-1]}.{node.name}"
+        identity = _identity_key(
+            self.document.source_id,
+            self.document.relative_path,
+            qualname,
+            kind,
+        )
+        entity = Entity(
+            id=entity_id(self.corpus_id, kind.value, identity),
+            corpus_id=self.corpus_id,
+            kind=kind,
+            canonical_name=qualname,
+            namespace=_namespace(self.document.source_id),
+            identity_key=identity,
+            aliases=[node.name],
+        )
+        self.definitions.setdefault(qualname, []).append(
+            _IndexedDefinition(entity=entity, module_name=self.module_name)
+        )
+        self.frames.append(qualname)
+        for statement in node.body:
+            self.visit(statement)
+        self.frames.pop()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._visit_definition(node, EntityKind.class_)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_definition(node, EntityKind.function)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_definition(node, EntityKind.function)
+
+
+def _package_name(relative_path: str) -> str:
+    path = PurePosixPath(relative_path.replace("\\", "/"))
+    module_name = _module_name(relative_path)
+    if path.stem == "__init__":
+        return module_name
+    return module_name.rpartition(".")[0]
+
+
+def _resolve_import_module(
+    *, relative_path: str, level: int, imported_module: str | None
+) -> str | None:
+    if level == 0:
+        return imported_module or ""
+    package_parts = [part for part in _package_name(relative_path).split(".") if part]
+    keep = len(package_parts) - level + 1
+    if not package_parts or keep < 1:
+        return None
+    return ".".join([*package_parts[:keep], *(imported_module or "").split(".")]).strip(".")
+
+
+class _ReExportVisitor(ast.NodeVisitor):
+    """Record module-level import aliases that may be re-exported to callers."""
+
+    def __init__(self, module_name: str) -> None:
+        self.module_name = module_name
+        self.opaque_exports: set[str] = set()
+        self.opaque_modules: set[str] = set()
+        self.scope_depth = 0
+
+    def visit_Import(self, node: ast.Import) -> None:
+        if self.scope_depth == 0:
+            for alias in node.names:
+                local_name = alias.asname or alias.name.split(".", 1)[0]
+                self.opaque_exports.add(f"{self.module_name}.{local_name}")
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if self.scope_depth != 0:
+            return
+        if any(alias.name == "*" for alias in node.names):
+            self.opaque_modules.add(self.module_name)
+            return
+        for alias in node.names:
+            local_name = alias.asname or alias.name
+            self.opaque_exports.add(f"{self.module_name}.{local_name}")
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.scope_depth += 1
+        for statement in node.body:
+            self.visit(statement)
+        self.scope_depth -= 1
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.scope_depth += 1
+        for statement in node.body:
+            self.visit(statement)
+        self.scope_depth -= 1
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.scope_depth += 1
+        for statement in node.body:
+            self.visit(statement)
+        self.scope_depth -= 1
+
+
+def _build_python_source_index(
+    *,
+    source_id: str,
+    source_version_id: str,
+    corpus_id: str,
+    documents: Iterable[Document],
+) -> _PythonSourceIndex:
+    definitions: dict[str, list[_IndexedDefinition]] = defaultdict(list)
+    module_counts: dict[str, int] = defaultdict(int)
+    opaque_exports: set[str] = set()
+    opaque_modules: set[str] = set()
+    for document in documents:
+        if (
+            document.source_id != source_id
+            or not document.relative_path.casefold().endswith((".py", ".pyi"))
+            or not document.normalized_text.strip()
+        ):
+            continue
+        try:
+            tree = ast.parse(document.normalized_text, filename=document.relative_path)
+        except (SyntaxError, ValueError, TypeError):
+            continue
+        module_name = _module_name(document.relative_path)
+        module_counts[module_name] += 1
+        module_identity = _identity_key(
+            source_id, document.relative_path, module_name, EntityKind.module
+        )
+        module_entity = Entity(
+            id=entity_id(corpus_id, EntityKind.module.value, module_identity),
+            corpus_id=corpus_id,
+            kind=EntityKind.module,
+            canonical_name=module_name,
+            namespace=_namespace(source_id),
+            identity_key=module_identity,
+        )
+        definitions[module_name].append(
+            _IndexedDefinition(entity=module_entity, module_name=module_name)
+        )
+        _DefinitionIndexVisitor(
+            document,
+            corpus_id=corpus_id,
+            module_name=module_name,
+            definitions=definitions,
+        ).visit(tree)
+        reexports = _ReExportVisitor(module_name)
+        reexports.visit(tree)
+        opaque_exports.update(reexports.opaque_exports)
+        opaque_modules.update(reexports.opaque_modules)
+    return _PythonSourceIndex(
+        source_id=source_id,
+        source_version_id=source_version_id,
+        corpus_id=corpus_id,
+        definitions={name: tuple(items) for name, items in definitions.items()},
+        module_counts=dict(module_counts),
+        opaque_exports=frozenset(opaque_exports),
+        opaque_modules=frozenset(opaque_modules),
+    )
+
+
 class _StaticExtractor(ast.NodeVisitor):
     def __init__(
         self,
@@ -128,6 +372,8 @@ class _StaticExtractor(ast.NodeVisitor):
         builder: ExtractionBuilder,
         module_entity: Entity,
         provenance: Any,
+        source_index: _PythonSourceIndex | None,
+        source_version_id: str | None,
     ) -> None:
         self.request = request
         self.builder = builder
@@ -137,11 +383,14 @@ class _StaticExtractor(ast.NodeVisitor):
         self.module_name = _module_name(self.document.relative_path)
         self.module_entity = module_entity
         self.provenance = provenance
+        self.source_index = source_index
+        self.source_version_id = source_version_id
         self.frames = [_Frame(self.module_name, module_entity, None)]
         self.symbols_by_scope: dict[str, dict[str, Entity]] = {self.module_name: {}}
         self.class_members: dict[str, dict[str, Entity]] = {}
         self.imports_by_scope: dict[str, dict[str, _ImportBinding]] = {}
         self.shadowed_by_scope: dict[str, set[str]] = {}
+        self.star_import_scopes: set[str] = set()
 
     @property
     def frame(self) -> _Frame:
@@ -292,6 +541,8 @@ class _StaticExtractor(ast.NodeVisitor):
         return None
 
     def _name_is_ambiguous(self, scope: str, name: str) -> bool:
+        if scope in self.star_import_scopes:
+            return True
         is_shadowed = name in self.shadowed_by_scope.get(scope, set())
         is_both_imported_and_defined = (
             name in self.symbols_by_scope.get(scope, {})
@@ -328,6 +579,11 @@ class _StaticExtractor(ast.NodeVisitor):
                 return target
             imported = self.resolve_import(expression.id)
             if imported is not None:
+                indexed = self._resolve_indexed_import(
+                    imported.qualified_prefix, expected=expected
+                )
+                if self.source_index is not None:
+                    return indexed
                 if expected == EntityKind.module:
                     return imported.entity
                 evidence = self._expression_evidence(expression)
@@ -351,14 +607,41 @@ class _StaticExtractor(ast.NodeVisitor):
             if local is not None and local.kind == EntityKind.class_:
                 return self.class_members.get(local.id, {}).get(suffix)
             imported = self.resolve_import(root)
-            if imported is not None and imported.is_module:
+            if imported is not None:
                 qualified = ".".join(part for part in [imported.qualified_prefix, suffix] if part)
+                indexed = self._resolve_indexed_import(qualified, expected=expected)
+                if self.source_index is not None:
+                    return indexed
+                if not imported.is_module:
+                    return None
                 evidence = self._expression_evidence(expression)
                 if evidence is None:
                     return None
                 surface = self._source_text(expression)
                 return self.external_reference(qualified, expected, evidence, surface)
         return None
+
+    def _resolve_indexed_import(
+        self, qualified_name: str, *, expected: EntityKind
+    ) -> Entity | None:
+        if self.source_index is None or self.builder.corpus_id is None:
+            return None
+        indexed = self.source_index.resolve(
+            qualified_name,
+            expected=expected,
+            source_id=self.document.source_id,
+            source_version_id=self.source_version_id,
+            corpus_id=self.builder.corpus_id,
+        )
+        if indexed is None:
+            return None
+        return self.builder.add_entity(
+            indexed.kind,
+            indexed.canonical_name,
+            indexed.namespace,
+            indexed.identity_key,
+            indexed.aliases,
+        )
 
     def _attribute_chain(self, expression: ast.Attribute) -> tuple[str, str] | None:
         parts = [expression.attr]
@@ -461,17 +744,20 @@ class _ImportVisitor(ast.NodeVisitor):
                 f"No input chunk span covers an import statement at line {node.lineno}.",
             )
             return
-        module = node.module or ""
-        if node.level:
-            current = self.analyzer.module_name.split(".")[:-1]
-            keep = max(0, len(current) - node.level + 1)
-            module = ".".join([*current[:keep], module]).strip(".")
+        module = _resolve_import_module(
+            relative_path=self.analyzer.document.relative_path,
+            level=node.level,
+            imported_module=node.module,
+        )
+        if module is None:
+            module = ""
         for alias in node.names:
             if alias.name == "*":
                 self.analyzer.builder.reject(
                     "STAR_IMPORT_UNRESOLVED",
                     f"Star import target is unresolved at line {node.lineno}.",
                 )
+                self.analyzer.star_import_scopes.add(self.frame.qualname)
                 continue
             local_name = alias.asname or alias.name
             qualified = ".".join(part for part in [module, alias.name] if part)
@@ -497,7 +783,13 @@ class _ImportVisitor(ast.NodeVisitor):
         return entity
 
     def _bind(self, local_name: str, binding: _ImportBinding) -> None:
-        self.analyzer.imports_by_scope.setdefault(self.frame.qualname, {})[local_name] = binding
+        scope_imports = self.analyzer.imports_by_scope.setdefault(self.frame.qualname, {})
+        if local_name in scope_imports:
+            self.analyzer.shadowed_by_scope.setdefault(self.frame.qualname, set()).add(
+                local_name
+            )
+            return
+        scope_imports[local_name] = binding
 
 
 class _BindingVisitor(ast.NodeVisitor):
@@ -990,7 +1282,11 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
 
 
 def extract_static_python(
-    request: ExtractionRequest, *, corpus_id: str | None
+    request: ExtractionRequest,
+    *,
+    corpus_id: str | None,
+    source_index: _PythonSourceIndex | None = None,
+    source_version_id: str | None = None,
 ) -> ExtractionResult:
     builder = ExtractionBuilder(request, corpus_id=corpus_id)
     if corpus_id is None:
@@ -1040,7 +1336,14 @@ def extract_static_python(
         )
         return builder.result()
 
-    analyzer = _StaticExtractor(request, builder, module_entity, producer)
+    analyzer = _StaticExtractor(
+        request,
+        builder,
+        module_entity,
+        producer,
+        source_index,
+        source_version_id,
+    )
     analyzer.visit(tree)
     import_visitor = _ImportVisitor(analyzer)
     import_visitor.visit(tree)
