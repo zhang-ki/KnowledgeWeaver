@@ -117,6 +117,17 @@ def _source_extraction_profile_sha256(
     )
 
 
+def _generation_member_hashes(members: Mapping[str, set[str]]) -> dict[str, str]:
+    """Hash persisted members, explicitly recording empty visible Entity/Relation sets."""
+    hash_members = dict(members)
+    hash_members.setdefault("entity", set())
+    hash_members.setdefault("relation", set())
+    return {
+        kind: sha256_text("\n".join(sorted(ids)))
+        for kind, ids in sorted(hash_members.items())
+    }
+
+
 def _extraction_observations(result: ExtractionResult) -> list[str]:
     return [
         warning
@@ -410,7 +421,7 @@ class PipelineService:
                 )
                 await self._inject("after_indexes")
                 await self._validate_generation(session, members)
-                member_hashes = {kind: sha256_text("\n".join(sorted(ids))) for kind, ids in sorted(members.items())}
+                member_hashes = _generation_member_hashes(members)
                 index_manifest["member_hashes"] = member_hashes
                 generation.generation_hash = sha256_text(json.dumps({"source_version_ids": generation.source_version_ids, "member_hashes": member_hashes, "index_manifest": index_manifest}, sort_keys=True, separators=(",", ":")))
                 index_manifest["generation_hash"] = generation.generation_hash
@@ -527,7 +538,7 @@ class PipelineService:
             index_manifest, embed_fingerprint = await self._build_indexes(session, request.corpus_id, new_generation_id, members)
             await self._inject("after_facts")
             await self._inject("after_indexes")
-            member_hashes = {kind: sha256_text("\n".join(sorted(ids))) for kind, ids in sorted(members.items())}
+            member_hashes = _generation_member_hashes(members)
             index_manifest["member_hashes"] = member_hashes
             row.generation_hash = sha256_text(json.dumps({"source_version_ids": versions, "member_hashes": member_hashes, "index_manifest": index_manifest}, sort_keys=True, separators=(",", ":")))
             index_manifest["generation_hash"] = row.generation_hash

@@ -116,6 +116,36 @@ def _with_source_version_membership(
     )
 
 
+def _rebind_generation_manifest(
+    generation: Generation, manifest: dict[str, object]
+) -> Generation:
+    manifest = dict(manifest)
+    manifest.pop("generation_hash", None)
+    member_hashes = manifest["member_hashes"]
+    payload = {
+        "source_version_ids": generation.source_version_ids,
+        "member_hashes": member_hashes,
+        "index_manifest": manifest,
+    }
+    manifest["generation_hash"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return generation.model_copy(update={"index_manifest": manifest})
+
+
+def _with_empty_entity_relation_members(generation: Generation) -> Generation:
+    manifest = dict(generation.index_manifest)
+    member_hashes = dict(manifest["member_hashes"])
+    empty_hash = hashlib.sha256(b"").hexdigest()
+    member_hashes["entity"] = empty_hash
+    member_hashes["relation"] = empty_hash
+    manifest["member_hashes"] = member_hashes
+    empty_generation = generation.model_copy(
+        update={"entity_ids": [], "relation_ids": []}
+    )
+    return _rebind_generation_manifest(empty_generation, manifest)
+
+
 def test_source_version_membership_verifies_with_publisher_sorting() -> None:
     generation, _ = _make_generation()
 
@@ -123,6 +153,26 @@ def test_source_version_membership_verifies_with_publisher_sorting() -> None:
 
     assert verified.generation_sha256 == generation.index_manifest["generation_hash"]
     assert generation.source_version_ids != sorted(generation.source_version_ids)
+
+
+def test_empty_entity_relation_members_require_explicit_canonical_hashes() -> None:
+    generation = _with_empty_entity_relation_members(_make_generation()[0])
+    empty_hash = hashlib.sha256(b"").hexdigest()
+
+    verified = verify_generation_manifest(generation)
+
+    assert generation.index_manifest["member_hashes"]["entity"] == empty_hash
+    assert generation.index_manifest["member_hashes"]["relation"] == empty_hash
+    assert verified.generation_sha256 == generation.index_manifest["generation_hash"]
+
+    for kind in ("entity", "relation"):
+        manifest = dict(generation.index_manifest)
+        member_hashes = dict(manifest["member_hashes"])
+        member_hashes.pop(kind)
+        manifest["member_hashes"] = member_hashes
+        malformed = _rebind_generation_manifest(generation, manifest)
+        with pytest.raises(GenerationBindingError, match="membership"):
+            verify_generation_manifest(malformed)
 
 
 def test_source_version_membership_requires_hash() -> None:

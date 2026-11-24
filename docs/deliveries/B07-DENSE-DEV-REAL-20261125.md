@@ -138,3 +138,26 @@ This run replaces the earlier in-memory hydration attempt as evidence for one is
 - Pytest ran with a temporary per-process `WindowsSelectorEventLoopPolicy`; the default Proactor loop had hung while creating its local self-pipe in the restricted runner. No shared runtime configuration or dependency was changed.
 - Code commit: `1fe20196a89625aae1e012713960ff386bab086b` (parent `c9f4bfa43a2748c2dfe55a01223e91d642e17f00`). Rollback ref `refs/codex/rollback/b07-pg-dense-citation-schema-20261125-001` points to that parent. The required baseline `1052ddcc75c09acf1199889df152bceaffab1915` remains an ancestor.
 - No formal gate or threshold was relaxed. The remaining formal blockers are the frozen dataset, B03 empty-member hash consistency for text-only sources, B04 cache-state control, and B06 ordered Agent trace.
+
+## Continuation: B03 empty Entity/Relation member hashes — 2026-11-25
+
+### Contract and minimal change
+
+- Continued from `e133b5d761b2f81cc8412356c6619016500fe27b` on `task/b07-blind-formal-executor`; required baseline `1052ddcc75c09acf1199889df152bceaffab1915` remains an ancestor.
+- Before changing the publisher, verified the existing B07 verifier contract: `SHA256(b"")` is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. A present `entity`/`relation` key with this value verifies an empty membership set; an absent key is rejected. The verifier and its requirements were not relaxed.
+- The B03 production publisher now hashes an explicit empty set for `entity` and `relation` at both Generation publication sites (source ingest and source deletion). It leaves the membership rows untouched and does not mutate the caller's member mapping. No failed Generation, existing corpus pointer, or B04/B06 port was changed.
+- Regressions cover canonical empty hashes and non-mutation in B03, verifier acceptance of explicit empty hashes, and isolated rejection of each missing key in B07.
+
+### Isolated real PG/Qdrant validation
+
+- New self-authored Markdown source: `.kw/runtime/verification/B03-PG-Qdrant-Empty-Members-20261125-ed437d2b/source/empty-members.md`; source file SHA-256 `83b3d2d90136ab1c2837c859ba667ee4ba694b041807b8655a143156100dab64`.
+- Created only new corpus `b4773007-1e1f-4af0-b800-a51933167c3e`, source `d080dd2b-121b-45cd-aeb6-367c88ee2720`, SourceVersion `06a553c8-9383-559f-be52-9ed83044d069`, Document `2e94fa27-e069-53d6-8de7-1a140a58bce5`, READY Generation `9022bb0d-293b-45f5-b81e-5efd2ead6335`, and Qdrant collection `kw_c54307cc4f1d0fcf34314395`.
+- The persisted Generation has no Entity or Relation IDs; each corresponding member hash is the canonical empty SHA above. The formal `verify_generation_manifest` accepted the persisted Generation. Its Generation SHA-256 is `9732ff462f9495883a357f56a1fb95e879ef277fa508d96160c31ea1f7601bec`.
+- PostgreSQL read-back verified two persisted Chunks and two Evidence records. Qwen `qwen3-embedding-0.6b` produced 1024-dimensional document embeddings for both chunks; Qdrant contains and verifies two points for this Generation in the new collection.
+- Isolation checks passed: all pre-existing corpus active-Generation pointers were unchanged; the prior failed Generation `3a5aaf48-d7c2-4b10-b349-82b920536946` retained its original digest/state and still omits both empty-set keys; its Qdrant collection `kw_774c211ed558c99c684816fa` remained at 2 points. No old object was repaired in place.
+- Raw one-line process stdout is preserved at `.kw/runtime/verification/B03-PG-Qdrant-Empty-Members-20261125-ed437d2b/stdout.txt` (`status=PASS`, canonical empty hash, IDs and isolation checks above). The actual process exit code is preserved at the adjacent `exit_code.txt`: `0`. Full structured evidence is in `result.json`; local client compatibility warnings are preserved in `stderr.txt`.
+
+### Focused verification and Git
+
+- Targeted B03/B07 tests: `tests/b03/test_pipeline_service.py::test_generation_member_hashes_materialize_empty_entity_relation_without_mutating_members` and `tests/b07/test_generation_binding.py`; result before the live run: 13 passed. Final targeted rerun and Ruff/diff-check are recorded with the commit below.
+- Allowed tracked scope for this continuation: `src/knowledge_weaver/storage/pipeline.py`, `tests/b03/test_pipeline_service.py`, `tests/b07/test_generation_binding.py`, and this delivery document only. No dependency synchronization, formal Test run, paid inference, B04/B06 interface change, database/Data edit, or shared-ledger edit was made.

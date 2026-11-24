@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,7 @@ from knowledge_weaver.providers.fake import FakeEmbeddingProvider
 from knowledge_weaver.storage import Database, PipelineService
 from knowledge_weaver.storage.pipeline import (
     _extraction_observations,
+    _generation_member_hashes,
     _source_extraction_profile_sha256,
 )
 from knowledge_weaver.storage.schema import (
@@ -132,6 +134,23 @@ def test_source_extraction_profile_and_report_observations_are_bound() -> None:
         warnings=[observation, "unstructured extractor warning"],
     )
     assert _extraction_observations(result) == [observation]
+
+
+def test_generation_member_hashes_materialize_empty_entity_relation_without_mutating_members() -> None:
+    source_version_id = "11111111-1111-4111-8111-111111111111"
+    chunk_id = "22222222-2222-4222-8222-222222222222"
+    members = {"source_version": {source_version_id}, "chunk": {chunk_id}}
+    original_members = {kind: set(ids) for kind, ids in members.items()}
+
+    hashes = _generation_member_hashes(members)
+
+    expected_empty_hash = hashlib.sha256(b"").hexdigest()
+    assert hashes["entity"] == expected_empty_hash
+    assert hashes["relation"] == expected_empty_hash
+    assert hashes["source_version"] == hashlib.sha256(source_version_id.encode()).hexdigest()
+    assert hashes["chunk"] == hashlib.sha256(chunk_id.encode()).hexdigest()
+    assert members == original_members
+    assert "entity" not in members and "relation" not in members
 
 
 class _ConfiguredFakeEmbeddingProvider:
