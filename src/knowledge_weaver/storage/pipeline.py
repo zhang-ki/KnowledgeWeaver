@@ -82,7 +82,7 @@ if TYPE_CHECKING:
 
 
 _EXTRACTION_ROUTING_PROFILE_VERSION = "kw-extraction-routing-v2"
-_NORMATIVE_PROMPT_VERSION = "kw-normative-response-schema-v2"
+_NORMATIVE_PROMPT_VERSION = "kw-normative-response-schema-v3"
 
 
 def _source_extraction_profile_sha256(

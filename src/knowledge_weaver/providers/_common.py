@@ -12,6 +12,14 @@ from knowledge_weaver.core.errors import ProviderUnavailable
 from knowledge_weaver.models import CountKind, ModelTokenUsage
 
 
+class StructuredResponseInvalid(ProviderUnavailable):
+    """Provider JSON rejection with safe structural diagnostics for one repair."""
+
+    def __init__(self, message: str, *, diagnostic: dict[str, Any]) -> None:
+        self.response_diagnostic = diagnostic
+        super().__init__(message, category="response_invalid", retryable=False)
+
+
 def auth_headers(
     api_key: SecretStr | None,
     *,
@@ -99,11 +107,30 @@ def validate_json_response(value: Any, schema: dict[str, Any]) -> dict[str, Any]
             category="request_invalid",
             retryable=False,
         ) from None
-    except ValidationError:
-        raise ProviderUnavailable(
+    except ValidationError as exc:
+        diagnostic: dict[str, Any] = {
+            "failure_stage": "json_schema_validation",
+            "keyword": str(exc.validator or "schema"),
+            "path": list(exc.absolute_path),
+        }
+        if exc.validator == "required" and isinstance(exc.instance, dict):
+            required = exc.validator_value
+            if isinstance(required, list):
+                diagnostic["missing_required_keys"] = sorted(
+                    str(key) for key in required if key not in exc.instance
+                )
+        elif exc.validator == "additionalProperties" and isinstance(exc.instance, dict):
+            properties = exc.schema.get("properties", {})
+            if isinstance(properties, dict):
+                diagnostic["extra_keys"] = sorted(
+                    str(key) for key in exc.instance if key not in properties
+                )
+        elif exc.validator == "type":
+            diagnostic["expected_type"] = exc.validator_value
+            diagnostic["actual_type"] = type(exc.instance).__name__
+        raise StructuredResponseInvalid(
             "provider response did not match the requested schema",
-            category="response_invalid",
-            retryable=False,
+            diagnostic=diagnostic,
         ) from None
     return value
 

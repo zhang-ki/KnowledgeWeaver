@@ -515,6 +515,69 @@ async def test_normative_specification_uses_separate_provenance_and_exact_modali
 
 
 @pytest.mark.asyncio
+async def test_normative_unless_condition_keeps_exact_direction_and_evidence() -> None:
+    text = (
+        "The Bronze Reviewer SHALL validate the Marble Record unless the Onyx Lock is active."
+    )
+    payload = {
+        "entities": [
+            {
+                "local_id": "reviewer",
+                "name": "Bronze Reviewer",
+                "kind": "concept",
+                "mentions": [{"surface_form": "Bronze Reviewer", "quote": text}],
+                "aliases": [],
+            },
+            {
+                "local_id": "record",
+                "name": "Marble Record",
+                "kind": "concept",
+                "mentions": [{"surface_form": "Marble Record", "quote": text}],
+                "aliases": [],
+            },
+            {
+                "local_id": "lock",
+                "name": "Onyx Lock",
+                "kind": "concept",
+                "mentions": [{"surface_form": "Onyx Lock", "quote": text}],
+                "aliases": [],
+            },
+        ],
+        "relations": [
+            {
+                "subject_local_id": "reviewer",
+                "predicate": "VALIDATES",
+                "object_local_id": "record",
+                "polarity": "positive",
+                "qualifiers": {
+                    "normative_modality": "SHALL",
+                    "condition": "unless the Onyx Lock is active.",
+                },
+                "evidence": [{"surface_form": "SHALL", "quote": text}],
+            }
+        ],
+    }
+    request, _chunk = make_request(text, path="docs/standards/reviewer.md")
+    result = await normative_extractor(QueueProvider([payload])).extract(request)
+
+    assert len(result.relations) == 1
+    relation = result.relations[0]
+    entities = {item.id: item.canonical_name for item in result.entities}
+    assert entities[relation.subject_id] == "Bronze Reviewer"
+    assert relation.predicate is RelationPredicate.VALIDATES
+    assert entities[relation.object_id] == "Marble Record"
+    assert relation.polarity is Polarity.positive
+    assert relation.qualifiers == {
+        "normative_modality": "SHALL",
+        "condition": "unless the Onyx Lock is active.",
+    }
+    assert len(relation.evidence_ids) == 1
+    evidence = next(item for item in result.evidence if item.id == relation.evidence_ids[0])
+    assert evidence.quote == text
+    assert request.chunks[0].text[evidence.start:evidence.end] == evidence.quote
+
+
+@pytest.mark.asyncio
 async def test_normative_json_object_prompt_and_schema_repair_use_explicit_fields() -> None:
     text = "The Copper Agent SHALL validate the Quartz Record."
     request, _chunk = make_request(text)
@@ -554,7 +617,13 @@ async def test_normative_json_object_prompt_and_schema_repair_use_explicit_field
 
     class MockJsonTransport:
         def __init__(self) -> None:
-            self.responses = [valid_payload, {"unexpected": []}, valid_payload]
+            self.responses: list[tuple[dict[str, Any] | str, str]] = [
+                (valid_payload, "stop"),
+                ('{"entities": [', "length"),
+                (valid_payload, "stop"),
+                ({"unexpected": []}, "stop"),
+                (valid_payload, "stop"),
+            ]
             self.requests: list[dict[str, Any]] = []
 
         async def post_json(
@@ -567,14 +636,15 @@ async def test_normative_json_object_prompt_and_schema_repair_use_explicit_field
             local_only: bool = False,
         ) -> dict[str, Any]:
             self.requests.append(payload)
-            response = self.responses[len(self.requests) - 1]
+            response, finish_reason = self.responses[len(self.requests) - 1]
+            content = response if isinstance(response, str) else json.dumps(response)
             return {
                 "id": f"mock-{len(self.requests)}",
                 "model": "fixture-normative-json-object-v1",
                 "choices": [
                     {
-                        "message": {"content": json.dumps(response)},
-                        "finish_reason": "stop",
+                        "message": {"content": content},
+                        "finish_reason": finish_reason,
                     }
                 ],
                 "usage": {
@@ -601,7 +671,7 @@ async def test_normative_json_object_prompt_and_schema_repair_use_explicit_field
         BudgetLedger(
             Budget(
                 deadline_utc=datetime.now(UTC) + timedelta(minutes=2),
-                max_llm_calls=3,
+                max_llm_calls=5,
                 max_total_tokens=30000,
             )
         ),
@@ -618,11 +688,14 @@ async def test_normative_json_object_prompt_and_schema_repair_use_explicit_field
 
     normal_result = await extractor.extract(request)
     repaired_result = await extractor.extract(request)
+    schema_repaired_result = await extractor.extract(request)
 
-    assert len(transport.requests) == 3
+    assert len(transport.requests) == 5
     assert normal_result.rejected_items == []
     assert repaired_result.rejected_items == []
+    assert schema_repaired_result.rejected_items == []
     assert len(normal_result.relations) == len(repaired_result.relations) == 1
+    assert len(schema_repaired_result.relations) == 1
     assert normal_result.relations[0].predicate is RelationPredicate.VALIDATES
     assert normal_result.relations[0].qualifiers["normative_modality"] == "SHALL"
     assert all(item.quote == text for item in normal_result.evidence)
@@ -631,6 +704,7 @@ async def test_normative_json_object_prompt_and_schema_repair_use_explicit_field
     for payload in transport.requests:
         assert payload["response_format"] == {"type": "json_object"}
         assert "json_schema" not in payload["response_format"]
+        assert payload["max_tokens"] == 4000
         system_instruction = payload["messages"][0]["content"]
         assert "authoritative JSON Schema" in system_instruction
         assert '"additionalProperties":false' in system_instruction
@@ -647,9 +721,25 @@ async def test_normative_json_object_prompt_and_schema_repair_use_explicit_field
             "normative_modality",
         ):
             assert field_name in system_instruction
-    assert "Repair `candidate_response`" in transport.requests[2]["messages"][0]["content"]
-    assert "`qualifiers.normative_modality`" in transport.requests[2]["messages"][0]["content"]
-    assert "`qualifiers.guard`" in transport.requests[2]["messages"][0]["content"]
+    for repair_request in (transport.requests[2], transport.requests[4]):
+        repair_instruction = repair_request["messages"][0]["content"]
+        assert "Repair `candidate_response`" in repair_instruction
+        assert "`qualifiers.normative_modality`" in repair_instruction
+        assert "`qualifiers.guard`" in repair_instruction
+        assert "`response_diagnostic`" in repair_instruction
+
+    truncation_context = json.loads(transport.requests[2]["messages"][1]["content"])
+    assert truncation_context["candidate_response"] is None
+    assert truncation_context["response_diagnostic"] == {
+        "failure_stage": "content_json_parse",
+        "finish_reason": "length",
+        "content_truncated": True,
+    }
+    schema_context = json.loads(transport.requests[4]["messages"][1]["content"])
+    assert schema_context["response_diagnostic"]["failure_stage"] == "json_schema_validation"
+    assert schema_context["response_diagnostic"]["keyword"] == "additionalProperties"
+    assert schema_context["response_diagnostic"]["path"] == []
+    assert schema_context["response_diagnostic"]["extra_keys"] == ["unexpected"]
 
 
 @pytest.mark.asyncio
