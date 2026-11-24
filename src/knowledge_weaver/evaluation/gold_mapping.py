@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -48,6 +49,14 @@ class GoldMappingStatus(StrEnum):
     missing_evidence = "MISSING_GENERATION_EVIDENCE"
 
 
+DIRECT_CALL_PHYSICAL_LINE_BOUNDARY_ADAPTER_VERSION = (
+    "kw-g3-physical-line-boundary-evidence/v1"
+)
+STATIC_CALL_RESOLUTION_QUALIFIER_ADAPTER_VERSION = (
+    "kw-g3-static-call-resolution-qualifier/v1"
+)
+
+
 @dataclass(frozen=True)
 class GoldSpanMapping:
     case_id: str
@@ -76,6 +85,7 @@ class GoldPathMapping:
     relation_ids: tuple[str, ...] = ()
     traversed_reverse: tuple[bool, ...] = ()
     evidence_ids_by_edge: tuple[tuple[str, ...], ...] = ()
+    adapter_versions_by_edge: tuple[tuple[str, ...], ...] = ()
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -99,7 +109,7 @@ class GoldMappingReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "generation_id": self.generation_id,
             "generation_sha256": self.generation_sha256,
             "dataset_sha256": self.dataset_sha256,
@@ -423,28 +433,264 @@ def _relation_evidence_closure(
     return tuple(sorted(set().union(*intersections)))
 
 
+def _ast_offset(text: str, line_offsets: Sequence[int], line: int, byte_column: int) -> int | None:
+    if line < 1 or line > len(line_offsets):
+        return None
+    line_start = line_offsets[line - 1]
+    line_end = line_offsets[line] if line < len(line_offsets) else len(text)
+    line_text = text[line_start:line_end]
+    try:
+        column = len(line_text.encode("utf-8")[:byte_column].decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
+    return line_start + column if column <= len(line_text) else None
+
+
+def _ast_node_interval(
+    node: ast.AST, text: str, line_offsets: Sequence[int]
+) -> tuple[int, int] | None:
+    start_line = getattr(node, "lineno", None)
+    start_column = getattr(node, "col_offset", None)
+    end_line = getattr(node, "end_lineno", None)
+    end_column = getattr(node, "end_col_offset", None)
+    if (
+        not isinstance(start_line, int)
+        or not isinstance(start_column, int)
+        or not isinstance(end_line, int)
+        or not isinstance(end_column, int)
+    ):
+        return None
+    start = _ast_offset(text, line_offsets, start_line, start_column)
+    end = _ast_offset(text, line_offsets, end_line, end_column)
+    if start is None or end is None or end <= start:
+        return None
+    return start, end
+
+
+def _module_qualname(relative_path: str) -> str:
+    path = PurePosixPath(relative_path.replace("\\", "/")).with_suffix("")
+    parts = path.parts[:-1] if path.parts and path.parts[-1] == "__init__" else path.parts
+    return ".".join(parts)
+
+
+def _evidence_document_interval(
+    evidence: Evidence, context: _SemanticProjectionContext
+) -> tuple[Document, int, int] | None:
+    chunk = context.chunks_by_id.get(evidence.chunk_id)
+    if chunk is None:
+        return None
+    try:
+        evidence.assert_matches_chunk(chunk)
+    except ValueError:
+        return None
+    document = context.documents_by_id.get(chunk.document_id)
+    if document is None:
+        return None
+    intervals = {
+        (
+            span.document_start + evidence.start - span.chunk_start,
+            span.document_start + evidence.end - span.chunk_start,
+        )
+        for span in chunk.spans
+        if span.chunk_start <= evidence.start and evidence.end <= span.chunk_end
+    }
+    if len(intervals) != 1:
+        return None
+    start, end = next(iter(intervals))
+    if document.normalized_text[start:end] != evidence.quote:
+        return None
+    return document, start, end
+
+
+def _is_direct_callsite_evidence(
+    evidence: Evidence,
+    document: Document,
+    evidence_start: int,
+    evidence_end: int,
+    expectation: GoldRelationExpectation,
+) -> bool:
+    """Prove Evidence is an AST call or its direct containing statement."""
+    text = document.normalized_text
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    line_offsets = [0]
+    line_offsets.extend(index + 1 for index, char in enumerate(text) if char == "\n")
+    parents = {
+        id(child): parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    module_name = _module_qualname(document.relative_path)
+    expected_subject = expectation.subject.qualified_symbol
+    expected_object = expectation.object.qualified_symbol
+    expected_object_name = expected_object.rsplit(".", 1)[-1]
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        call_interval = _ast_node_interval(node, text, line_offsets)
+        if call_interval is None:
+            continue
+        parent = parents.get(id(node))
+        statement_interval: tuple[int, int] | None = None
+        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return, ast.Expr)) and getattr(
+            parent, "value", None
+        ) is node:
+            statement_interval = _ast_node_interval(parent, text, line_offsets)
+        if (evidence_start, evidence_end) not in {call_interval, statement_interval}:
+            continue
+
+        if isinstance(node.func, ast.Attribute):
+            target_name = node.func.attr
+            if not isinstance(node.func.value, ast.Name) or node.func.value.id not in {"self", "cls"}:
+                continue
+            class_scopes: list[str] = []
+            ancestor = parents.get(id(node))
+            while ancestor is not None:
+                if isinstance(ancestor, ast.ClassDef):
+                    class_scopes.append(ancestor.name)
+                ancestor = parents.get(id(ancestor))
+            if not class_scopes:
+                continue
+            lexical_owner = ".".join([module_name, *reversed(class_scopes)])
+            if expected_object.rsplit(".", 1)[0] != lexical_owner:
+                continue
+        elif isinstance(node.func, ast.Name):
+            target_name = node.func.id
+            if expected_object.rsplit(".", 1)[0] != module_name:
+                continue
+        else:
+            continue
+        if target_name != expected_object_name:
+            continue
+
+        scopes: list[str] = []
+        ancestor = parents.get(id(node))
+        while ancestor is not None:
+            if isinstance(ancestor, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                scopes.append(ancestor.name)
+            ancestor = parents.get(id(ancestor))
+        if not scopes:
+            continue
+        subject_qualname = ".".join([module_name, *reversed(scopes)])
+        if subject_qualname == expected_subject:
+            return True
+    return False
+
+
+def _physical_line_boundary_closure(
+    evidence: Evidence,
+    span: GoldSpanMapping,
+    expectation: GoldRelationExpectation,
+    context: _SemanticProjectionContext,
+) -> bool:
+    if len(span.document_intervals) != 1:
+        return False
+    gold_document_id, gold_start, gold_end = span.document_intervals[0]
+    evidence_interval = _evidence_document_interval(evidence, context)
+    if evidence_interval is None:
+        return False
+    document, evidence_start, evidence_end = evidence_interval
+    if document.id != gold_document_id or evidence_end != gold_end or evidence_start <= gold_start:
+        return False
+    text = document.normalized_text
+    if gold_start != 0 and text[gold_start - 1] != "\n":
+        return False
+    physical_prefix = text[gold_start:evidence_start]
+    if not physical_prefix or any(char not in " \t" for char in physical_prefix):
+        return False
+    if (
+        hashlib.sha256(text[gold_start:gold_end].encode("utf-8")).hexdigest()
+        != span.quote_sha256
+        or text[gold_start:gold_end] != physical_prefix + evidence.quote
+        or text[evidence_start:evidence_end] != evidence.quote
+    ):
+        return False
+    if not _is_direct_callsite_evidence(
+        evidence, document, evidence_start, evidence_end, expectation
+    ):
+        return False
+    return any(
+        _evidence_matches_endpoint(evidence, endpoint, expectation.evidence_basis, context)
+        for endpoint in (expectation.subject, expectation.object)
+    )
+
+
 def _direct_call_evidence_closure(
     relation: Relation,
     mapped_spans: Sequence[GoldSpanMapping],
+    expectation: GoldRelationExpectation,
     context: _SemanticProjectionContext,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], str | None]:
     """Require exact quoted source evidence for strict source-code CALLS edges."""
     relation_evidence_ids = set(relation.evidence_ids)
     closed_ids: set[str] = set()
+    used_boundary_adapter = False
     for span in mapped_spans:
-        exact_ids = {
-            evidence_id
-            for evidence_id in set(span.evidence_ids) & relation_evidence_ids
-            if evidence_id in context.evidence_by_id
-            and hashlib.sha256(
-                context.evidence_by_id[evidence_id].quote.encode("utf-8")
-            ).hexdigest()
-            == span.quote_sha256
-        }
+        if len(span.document_intervals) != 1:
+            return (), None
+        gold_document_id, gold_start, gold_end = span.document_intervals[0]
+        exact_ids: set[str] = set()
+        boundary_ids: set[str] = set()
+        for evidence_id in relation_evidence_ids:
+            evidence = context.evidence_by_id.get(evidence_id)
+            if evidence is None:
+                continue
+            interval = _evidence_document_interval(evidence, context)
+            if interval is None:
+                continue
+            document, evidence_start, evidence_end = interval
+            if (
+                document.id != gold_document_id
+                or not _is_direct_callsite_evidence(
+                    evidence,
+                    document,
+                    evidence_start,
+                    evidence_end,
+                    expectation,
+                )
+                or not any(
+                    _evidence_matches_endpoint(
+                        evidence, endpoint, expectation.evidence_basis, context
+                    )
+                    for endpoint in (expectation.subject, expectation.object)
+                )
+            ):
+                continue
+            evidence = context.evidence_by_id[evidence_id]
+            if (
+                evidence_id in span.evidence_ids
+                and evidence_start == gold_start
+                and evidence_end == gold_end
+                and evidence.quote == document.normalized_text[gold_start:gold_end]
+                and hashlib.sha256(evidence.quote.encode("utf-8")).hexdigest()
+                == span.quote_sha256
+                and any(
+                    _evidence_matches_endpoint(
+                        evidence, endpoint, expectation.evidence_basis, context
+                    )
+                    for endpoint in (expectation.subject, expectation.object)
+                )
+            ):
+                exact_ids.add(evidence_id)
+            elif _physical_line_boundary_closure(
+                evidence, span, expectation, context
+            ):
+                boundary_ids.add(evidence_id)
+        selected_ids = exact_ids or boundary_ids
+        if not selected_ids:
+            return (), None
         if not exact_ids:
-            return ()
-        closed_ids.update(exact_ids)
-    return tuple(sorted(closed_ids))
+            used_boundary_adapter = True
+        closed_ids.update(selected_ids)
+    return (
+        tuple(sorted(closed_ids)),
+        DIRECT_CALL_PHYSICAL_LINE_BOUNDARY_ADAPTER_VERSION
+        if used_boundary_adapter
+        else None,
+    )
 
 
 def _source_version_for_endpoint(
@@ -620,6 +866,27 @@ def _outcome_kind(
     return GoldOutcomeKind.fact
 
 
+def _semantic_qualifiers(
+    relation: Relation,
+    expectation: GoldRelationExpectation,
+    context: _SemanticProjectionContext,
+) -> tuple[Mapping[str, Any], str | None]:
+    """Remove only the known AST resolver label from static source-code CALLS."""
+    provenance = context.provenance_by_id.get(relation.provenance_id)
+    if (
+        expectation.evidence_basis is GoldEvidenceBasis.source_code
+        and expectation.predicate is RelationPredicate.CALLS
+        and provenance is not None
+        and provenance.method is ProvenanceMethod.STATIC_ANALYSIS
+        and relation.qualifiers.get("resolution") == "static_symbol"
+    ):
+        return (
+            {key: value for key, value in relation.qualifiers.items() if key != "resolution"},
+            STATIC_CALL_RESOLUTION_QUALIFIER_ADAPTER_VERSION,
+        )
+    return relation.qualifiers, None
+
+
 def _relation_provenance_matches(
     relation: Relation,
     expectation: GoldRelationExpectation,
@@ -684,15 +951,21 @@ def _semantic_projection_failure(
     *,
     mapped_evidence_groups: Sequence[GoldSpanMapping],
     context: _SemanticProjectionContext,
-) -> tuple[tuple[str, ...], str | None]:
+) -> tuple[tuple[str, ...], str | None, tuple[str, ...]]:
     if relation.predicate is not expectation.predicate:
-        return (), "does not match the expected predicate"
+        return (), "does not match the expected predicate", ()
     if relation.polarity is not expectation.polarity:
-        return (), "does not match the expected polarity"
+        return (), "does not match the expected polarity", ()
     if expectation.qualifier_review_state is GoldQualifierReviewState.unreviewed:
-        return (), "cannot be resolved because its qualifier review is UNREVIEWED"
-    if _canonical_hash(relation.qualifiers) != _canonical_hash(expectation.qualifier_values):
-        return (), "does not match the exact reviewed qualifier set"
+        return (), "cannot be resolved because its qualifier review is UNREVIEWED", ()
+    semantic_qualifiers, qualifier_adapter_version = _semantic_qualifiers(
+        relation, expectation, context
+    )
+    adapter_versions = (
+        [qualifier_adapter_version] if qualifier_adapter_version is not None else []
+    )
+    if _canonical_hash(semantic_qualifiers) != _canonical_hash(expectation.qualifier_values):
+        return (), "does not match the exact reviewed qualifier set", ()
     if (
         _outcome_kind(
             relation.predicate,
@@ -701,9 +974,9 @@ def _semantic_projection_failure(
         )
         is not expectation.outcome_kind
     ):
-        return (), "does not match the expected result outcome kind"
+        return (), "does not match the expected result outcome kind", ()
     if _RESULT_ROLES.get(relation.predicate, "relation_object") != expectation.result_role:
-        return (), "does not match the expected result role"
+        return (), "does not match the expected result role", ()
 
     subject = context.entities_by_id.get(relation.subject_id)
     object_ = context.entities_by_id.get(relation.object_id)
@@ -717,28 +990,31 @@ def _semantic_projection_failure(
             "has an endpoint direction mismatch"
             if swapped
             else "has no candidate matching exact source-bound endpoints"
-        )
+        ), ()
 
     if (
         expectation.evidence_basis is GoldEvidenceBasis.source_code
         and expectation.predicate is RelationPredicate.CALLS
     ):
-        closed_ids = _direct_call_evidence_closure(
-            relation, mapped_evidence_groups, context
+        closed_ids, adapter_version = _direct_call_evidence_closure(
+            relation, mapped_evidence_groups, expectation, context
         )
         if not closed_ids:
             return (
                 (),
                 "does not close through exact direct callsite Evidence for every reviewed Gold quote",
+                (),
             )
+        if adapter_version is not None:
+            adapter_versions.append(adapter_version)
     else:
         closed_ids = _relation_evidence_closure(
             relation, [set(span.evidence_ids) for span in mapped_evidence_groups]
         )
     if not closed_ids:
-        return (), "does not close over Evidence for every reviewed Gold quote"
+        return (), "does not close over Evidence for every reviewed Gold quote", ()
     if not _relation_provenance_matches(relation, expectation, context):
-        return (), "does not close through the expected Generation Provenance chain"
+        return (), "does not close through the expected Generation Provenance chain", ()
     endpoints = (expectation.subject, expectation.object)
     if any(
         not any(
@@ -753,8 +1029,8 @@ def _semantic_projection_failure(
         for evidence_id in relation.evidence_ids
         if evidence_id in context.evidence_by_id
     ) or any(evidence_id not in context.evidence_by_id for evidence_id in relation.evidence_ids):
-        return (), "contains Evidence outside its exact source, version, path, or basis"
-    return closed_ids, None
+        return (), "contains Evidence outside its exact source, version, path, or basis", ()
+    return closed_ids, None, tuple(adapter_versions)
 
 
 def _resolve_runtime_relation(
@@ -765,34 +1041,34 @@ def _resolve_runtime_relation(
     relations: Sequence[Relation],
     relation_expectations: Mapping[str, GoldRelationExpectation] | None,
     semantic_context: _SemanticProjectionContext,
-) -> tuple[Relation | None, tuple[str, ...], str | None]:
+) -> tuple[Relation | None, tuple[str, ...], str | None, tuple[str, ...]]:
     direct = relation_by_id.get(edge_relation_id)
     expectation = (relation_expectations or {}).get(edge_relation_id)
     if direct is not None:
         if expectation is not None:
-            closed_ids, failure = _semantic_projection_failure(
+            closed_ids, failure, adapter_version = _semantic_projection_failure(
                 direct,
                 expectation,
                 mapped_evidence_groups=mapped_evidence_groups,
                 context=semantic_context,
             )
             if failure:
-                return None, (), failure
-            return direct, closed_ids, None
+                return None, (), failure, ()
+            return direct, closed_ids, None, adapter_version
         closed = _relation_evidence_closure(
             direct, [set(span.evidence_ids) for span in mapped_evidence_groups]
         )
         if not closed:
-            return None, (), "does not close over Evidence for every reviewed Gold quote"
-        return direct, closed, None
+            return None, (), "does not close over Evidence for every reviewed Gold quote", ()
+        return direct, closed, None, ()
     if expectation is None:
-        return None, (), None
+        return None, (), None, ()
 
-    matches: list[tuple[Relation, tuple[str, ...]]] = []
+    matches: list[tuple[Relation, tuple[str, ...], tuple[str, ...]]] = []
     has_direction_mismatch = False
     failures: set[str] = set()
     for candidate in relations:
-        closed, failure = _semantic_projection_failure(
+        closed, failure, adapter_version = _semantic_projection_failure(
             candidate,
             expectation,
             mapped_evidence_groups=mapped_evidence_groups,
@@ -804,12 +1080,12 @@ def _resolve_runtime_relation(
             failures.add(failure)
             continue
         if failure is None:
-            matches.append((candidate, closed))
+            matches.append((candidate, closed, adapter_version))
     if len(matches) > 1:
-        return None, (), "has multiple semantic candidates"
+        return None, (), "has multiple semantic candidates", ()
     if not matches:
         if has_direction_mismatch:
-            return None, (), "has an endpoint direction mismatch"
+            return None, (), "has an endpoint direction mismatch", ()
         for preferred_failure in (
             "cannot be resolved because its qualifier review is UNREVIEWED",
             "does not match the exact reviewed qualifier set",
@@ -822,10 +1098,10 @@ def _resolve_runtime_relation(
             "contains Evidence outside its exact source, version, path, or basis",
         ):
             if preferred_failure in failures:
-                return None, (), preferred_failure
-        return None, (), "has no candidate matching its exact endpoints and Evidence for every Gold quote"
-    relation, closed_ids = matches[0]
-    return relation, closed_ids, None
+                return None, (), preferred_failure, ()
+        return None, (), "has no candidate matching its exact endpoints and Evidence for every Gold quote", ()
+    relation, closed_ids, adapter_versions = matches[0]
+    return relation, closed_ids, None, adapter_versions
 
 
 def map_gold_to_generation(
@@ -956,6 +1232,7 @@ def map_gold_to_generation(
             mapped_relations: list[str] = []
             mapped_directions: list[bool] = []
             edge_evidence: list[tuple[str, ...]] = []
+            edge_adapter_versions: list[tuple[str, ...]] = []
             previous_to_id: str | None = None
             failure: str | None = None
             for edge_index, edge in enumerate(reviewed_path.edges):
@@ -986,7 +1263,7 @@ def map_gold_to_generation(
                     mapped_evidence_groups.append(span_mapping)
                 if failure:
                     break
-                relation, closed_ids, resolution_failure = _resolve_runtime_relation(
+                relation, closed_ids, resolution_failure, adapter_version = _resolve_runtime_relation(
                     edge.relation_id,
                     mapped_evidence_groups,
                     relation_by_id=relation_by_id,
@@ -1031,6 +1308,7 @@ def map_gold_to_generation(
                 mapped_relations.append(relation.id)
                 mapped_directions.append(edge.traversed_reverse)
                 edge_evidence.append(closed_ids)
+                edge_adapter_versions.append(adapter_version)
                 previous_to_id = step_to_id
             status = GoldMappingStatus.mapped if failure is None else GoldMappingStatus.unmapped
             path = GoldPathMapping(
@@ -1040,6 +1318,7 @@ def map_gold_to_generation(
                 relation_ids=tuple(mapped_relations),
                 traversed_reverse=tuple(mapped_directions),
                 evidence_ids_by_edge=tuple(edge_evidence),
+                adapter_versions_by_edge=tuple(edge_adapter_versions),
                 reason=failure,
             )
             path_mappings.append(path)
