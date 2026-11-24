@@ -10,10 +10,12 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
+from knowledge_weaver.evaluation.contracts import PreparedBenchmarkCase
 from knowledge_weaver.evaluation.dataset import LoadedDataset
 from knowledge_weaver.evaluation.generation_binding import (
     GenerationBindingError,
     PersistedGenerationLookup,
+    VerifiedGeneration,
     resolve_generation,
     valid_generation_binding,
     verify_generation_manifest,
@@ -25,6 +27,7 @@ from knowledge_weaver.evaluation.persisted_projection import (
     PostgresGoldProjectionLookup,
 )
 from knowledge_weaver.evaluation.protocol import BudgetSpec, EvaluationProtocol
+from knowledge_weaver.evaluation.query_metrics import compute_query_measurements
 from knowledge_weaver.evaluation.redaction import canonical_json_line
 from knowledge_weaver.evaluation.runs import (
     BenchmarkExecutor,
@@ -32,9 +35,11 @@ from knowledge_weaver.evaluation.runs import (
     run_query_with_retries,
 )
 from knowledge_weaver.evaluation.scheduling import (
+    ExperimentSuite,
     MatrixSchedule,
     SuiteStatus,
 )
+from knowledge_weaver.evaluation.suite_registry import SuiteExecutionRegistry
 
 CaseT = TypeVar("CaseT")
 
@@ -144,6 +149,195 @@ class MatrixExecutionReport:
         }
 
 
+@dataclass(frozen=True)
+class DenseDevSliceReport:
+    suite_id: str
+    registry_sha256: str
+    generation_id: str
+    generation_sha256: str
+    dataset_content_sha256: str
+    query_records: tuple[QueryRunRecord, ...]
+    status: str
+    formal: bool = False
+    synthetic_fixture: bool = False
+    cache_state_enforced: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "scope": "DEV_ONLY_DENSE_VERTICAL_SLICE",
+            "suite_id": self.suite_id,
+            "registry_sha256": self.registry_sha256,
+            "generation_id": self.generation_id,
+            "generation_sha256": self.generation_sha256,
+            "dataset_content_sha256": self.dataset_content_sha256,
+            "status": self.status,
+            "formal": False,
+            "synthetic_fixture": self.synthetic_fixture,
+            "cache_state_enforced": self.cache_state_enforced,
+            "query_count": len(self.query_records),
+            "completed_query_count": sum(item.status == "complete" for item in self.query_records),
+        }
+
+
+def _score_query_record_with_gold(
+    record: QueryRunRecord,
+    case: PreparedBenchmarkCase,
+    mapping_report: GoldMappingReport,
+    *,
+    formal_test: bool,
+) -> QueryRunRecord:
+    """Score only runner-owned Gold against an executor's unscored output."""
+    if record.status != "complete" or not record.attempts:
+        return record
+    final = record.attempts[-1]
+    output = final.execution_output
+    if output is None:
+        return record
+    benchmark_case = case.case
+    citation_count = sum(len(claim.evidence_ids) for claim in output.answer.claims)
+    resolution = {item.evidence_id: item.resolves_to_original for item in output.citations}
+    citation_resolvability = tuple(
+        resolution.get(evidence_id, False)
+        for claim in output.answer.claims
+        for evidence_id in claim.evidence_ids
+    )
+    measurements = compute_query_measurements(
+        benchmark_case,
+        mapping_report,
+        ranked_chunk_ids=[hit.chunk_id for hit in output.retrieval_hits],
+        retrieved_paths=output.retrieved_paths,
+        citation_count=citation_count,
+        citation_reviewed=False,
+        citation_resolvability=citation_resolvability,
+        abstained=output.answer.status != "answered",
+    )
+    scored_attempt = final.model_copy(update={"measurements": measurements})
+    attempts = [*record.attempts[:-1], scored_attempt]
+    quality_eligible = False
+    if formal_test and record.provider_kind == "real":
+        quality_eligible = (
+            benchmark_case.answerable
+            and measurements.answer_correctness is not None
+            and measurements.citation_precision is not None
+            and measurements.human_reviewer_id is not None
+            and measurements.human_reviewed_at is not None
+        ) or (
+            not benchmark_case.answerable
+            and measurements.unanswerable_refusal_accuracy is not None
+            and measurements.unanswerable_false_citation_rate is not None
+        )
+    return record.model_copy(
+        update={
+            "attempts": attempts,
+            "measurements": measurements,
+            "formal_quality_eligible": quality_eligible,
+        }
+    )
+
+
+async def run_dense_dev_slice(
+    protocol: EvaluationProtocol,
+    dataset: LoadedDataset,
+    mapping_report: GoldMappingReport,
+    executor: BenchmarkExecutor,
+    registry: SuiteExecutionRegistry,
+    *,
+    generation_binding: VerifiedGeneration,
+    retry_delay_seconds: float = 0.25,
+) -> DenseDevSliceReport:
+    """Run all frozen Dev cases through the Dense public port; return non-formal records."""
+    from knowledge_weaver.evaluation.generation_binding import verify_generation_manifest
+
+    if not isinstance(generation_binding, VerifiedGeneration):
+        raise TypeError("Dense Dev execution requires a verified Generation binding")
+    if (
+        not dataset.ready
+        or dataset.loaded_content_sha256 is None
+        or dataset.current_loaded_content_sha256 != dataset.loaded_content_sha256
+    ):
+        raise ValueError("Dense Dev execution requires unchanged loader-verified frozen inputs")
+    if dataset.manifest.cases_sha256 is None:
+        raise ValueError("Dense Dev execution requires the frozen dataset case hash")
+    verified = verify_generation_manifest(generation_binding.generation)
+    if verified.generation_sha256 != generation_binding.generation_sha256:
+        raise ValueError("Dense Dev Generation binding digest differs from its manifest")
+    if (
+        mapping_report.blockers
+        or mapping_report.dataset_sha256 != dataset.manifest.cases_sha256
+        or mapping_report.generation_id != verified.id
+        or mapping_report.generation_sha256 != verified.generation_sha256
+    ):
+        raise ValueError("Dense Dev Gold mapping is blocked or bound to another dataset/Generation")
+    dev_cases = tuple(item for item in dataset.cases if item.case.split.value == "dev")
+    expected_dev_count = dataset.summary.split_counts.get("dev", 0) if dataset.summary else 0
+    if not dev_cases or len(dev_cases) != expected_dev_count:
+        raise ValueError("Dense Dev slice must cover the complete frozen Dev split")
+    suite_id = "dev/dense/standard/seed-17"
+    plan = registry.plan_for(suite_id)
+    if (
+        plan.scope != "dev_vertical_slice"
+        or plan.system_id != "dense"
+        or plan.budget_id != "standard"
+        or plan.seed != 17
+        or plan.dataset_content_sha256 != dataset.loaded_content_sha256
+        or not plan.executable
+    ):
+        raise ValueError("Dense Dev registry plan is not executable for the supplied frozen inputs")
+    if getattr(executor, "registry", None) is not registry:
+        raise ValueError("executor and runner must use the same immutable suite registry")
+    suite = ExperimentSuite(
+        suite_id=suite_id,
+        kind="dev",
+        system_id="dense",
+        budget_id="standard",
+        seed=17,
+        ablation_id=None,
+        status=SuiteStatus.planned,
+        blockers=(),
+        cache_states=("cold",),
+        expected_query_runs=len(dev_cases),
+    )
+    budget = next(item for item in protocol.budgets if item.id == "standard")
+    records: list[QueryRunRecord] = []
+    for case in _seeded_case_order(dev_cases, 17):
+        record = await run_query_with_retries(
+            executor,
+            case,
+            suite,
+            formal_dataset=False,
+            cache_state="cold",
+            generation_binding=verified,
+            retry_delay_seconds=retry_delay_seconds,
+        )
+        record = _score_query_record_with_gold(
+            record, case, mapping_report, formal_test=False
+        )
+        violations = _budget_violations(record, budget)
+        if violations:
+            record = record.model_copy(
+                update={
+                    "status": "failed",
+                    "formal_quality_eligible": False,
+                    "budget_violations": violations,
+                }
+            )
+        if record.formal_quality_eligible:
+            raise AssertionError("a Dev-only result cannot become formal-quality eligible")
+        records.append(record)
+    complete = all(item.status == "complete" for item in records)
+    return DenseDevSliceReport(
+        suite_id=suite_id,
+        registry_sha256=registry.sha256,
+        generation_id=verified.id,
+        generation_sha256=verified.generation_sha256,
+        dataset_content_sha256=dataset.loaded_content_sha256,
+        query_records=tuple(records),
+        status="DEV_ONLY_COMPLETE" if complete else "DEV_ONLY_PARTIAL",
+        synthetic_fixture=executor.provider_kind != "real",
+    )
+
+
 def _block_schedule(schedule: MatrixSchedule, reason: str) -> MatrixSchedule:
     blockers = tuple(dict.fromkeys((*schedule.blockers, reason)))
     suites = tuple(
@@ -151,6 +345,36 @@ def _block_schedule(schedule: MatrixSchedule, reason: str) -> MatrixSchedule:
         for suite in schedule.suites
     )
     return replace(schedule, status=SuiteStatus.blocked, suites=suites, blockers=blockers)
+
+
+def _registered_suite_blocker(
+    schedule: MatrixSchedule,
+    protocol: EvaluationProtocol,
+    executor: BenchmarkExecutor,
+) -> str | None:
+    registry = getattr(executor, "registry", None)
+    if registry is None:
+        return None
+    if not isinstance(registry, SuiteExecutionRegistry):
+        return "BLOCKED_EXECUTION_REGISTRY: executor registry has an unsupported type"
+    if registry.protocol_id != protocol.protocol_id:
+        return "BLOCKED_EXECUTION_REGISTRY: registry protocol ID differs from the schedule"
+    if {suite.suite_id for suite in schedule.suites} - set(registry.plans):
+        return "BLOCKED_EXECUTION_REGISTRY: one or more scheduled suites have no frozen route plan"
+    for suite in schedule.suites:
+        plan = registry.plan_for(suite.suite_id)
+        if (
+            plan.scope != "formal"
+            or plan.system_id != suite.system_id
+            or plan.ablation_id != suite.ablation_id
+            or plan.budget_id != suite.budget_id
+            or plan.seed != suite.seed
+            or plan.dataset_content_sha256 != schedule.dataset_content_sha256
+        ):
+            return "BLOCKED_EXECUTION_REGISTRY: scheduled suite identity differs from the registry"
+        if not plan.executable:
+            return plan.blockers[0] if plan.blockers else "BLOCKED_EXECUTION_REGISTRY: suite is disabled"
+    return None
 
 
 def _blocked_report(schedule: MatrixSchedule, reason: str | None = None) -> MatrixExecutionReport:
@@ -395,6 +619,10 @@ async def _run_matrix(
             "BLOCKED_POLICY: formal train/dev cost and selection evidence is unavailable",
         )
 
+    registry_blocker = _registered_suite_blocker(schedule, protocol, executor)
+    if registry_blocker is not None:
+        return _blocked_report(schedule, registry_blocker)
+
     test_cases = tuple(item for item in dataset.cases if item.case.split.value == "test")
     if len(test_cases) < protocol.test_case_minimum:
         return _blocked_report(schedule, "BLOCKED_INPUTS: frozen test split is below 40 cases")
@@ -427,6 +655,12 @@ async def _run_matrix(
                     cache_state=cache_state,
                     generation_binding=verified_generation,
                     retry_delay_seconds=retry_delay_seconds,
+                )
+                record = _score_query_record_with_gold(
+                    record,
+                    case,
+                    gold_mapping,
+                    formal_test=not compatibility_mode,
                 )
                 violations = _budget_violations(record, budget_by_id[suite.budget_id])
                 if violations:

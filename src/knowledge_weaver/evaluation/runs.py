@@ -28,7 +28,14 @@ from knowledge_weaver.evaluation.generation_binding import (
 )
 from knowledge_weaver.evaluation.redaction import redact_text
 from knowledge_weaver.evaluation.scheduling import ExperimentSuite
-from knowledge_weaver.models.contracts import Generation, Language
+from knowledge_weaver.models.contracts import (
+    Generation,
+    Language,
+    ModelTokenUsage,
+    Path,
+    RetrievalHit,
+    Usage,
+)
 
 NonEmpty = StringConstraints(strip_whitespace=True, min_length=1)
 CountKind = Literal["exact", "estimated", "unavailable"]
@@ -101,6 +108,40 @@ class QueryMeasurements(RunModel):
         return self
 
 
+class UnscoredClaim(RunModel):
+    text: str = Field(min_length=1)
+    evidence_ids: tuple[str, ...] = ()
+
+
+class UnscoredAnswer(RunModel):
+    status: Literal["answered", "insufficient", "conflicted"]
+    claims: tuple[UnscoredClaim, ...] = ()
+    unanswered: tuple[str, ...] = ()
+
+
+class CitationResolution(RunModel):
+    evidence_id: str = Field(min_length=1)
+    resolves_to_original: bool
+
+
+class ExecutorProviderUsage(RunModel):
+    usage: ModelTokenUsage
+    model: str = Field(min_length=1)
+    revision: str = Field(min_length=1)
+
+
+class ExecutionOutput(RunModel):
+    """Raw, unscored evidence and answer returned by an execution adapter."""
+
+    retrieval_hits: tuple[RetrievalHit, ...]
+    retrieved_paths: tuple[Path, ...] = ()
+    answer: UnscoredAnswer
+    citations: tuple[CitationResolution, ...] = ()
+    retrieval_usage: Usage
+    provider_usage: ExecutorProviderUsage
+    response_summary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class AttemptOutcome(RunModel):
     attempt: int = Field(ge=1, le=3)
     status: Literal["complete", "failed"]
@@ -124,6 +165,7 @@ class AttemptOutcome(RunModel):
     executed_generation_id: str | None = None
     executed_generation_sha256: str | None = None
     response_summary_sha256: str | None = None
+    execution_output: ExecutionOutput | None = None
     measurements: QueryMeasurements | None = None
 
     @model_validator(mode="after")
@@ -257,6 +299,10 @@ class ProviderExecutionError(RuntimeError):
         model_revision: str,
         input_tokens: int = 0,
         output_tokens: int = 0,
+        tool_calls: int = 0,
+        llm_calls: int = 0,
+        steps: int = 0,
+        strategy_latency_ms: int = 0,
         count_kind: CountKind = "unavailable",
         currency_cost_usd: Decimal | None = None,
         currency_cost_cny: Decimal | None = None,
@@ -268,6 +314,10 @@ class ProviderExecutionError(RuntimeError):
         self.model_revision = model_revision
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
+        self.tool_calls = tool_calls
+        self.llm_calls = llm_calls
+        self.steps = steps
+        self.strategy_latency_ms = strategy_latency_ms
         self.count_kind = count_kind
         self.currency_cost_usd = currency_cost_usd
         self.currency_cost_cny = currency_cost_cny
@@ -388,10 +438,14 @@ async def run_query_with_retries(
                 failure_code=exc.code,
                 input_tokens=exc.input_tokens,
                 output_tokens=exc.output_tokens,
+                tool_calls=exc.tool_calls,
+                llm_calls=exc.llm_calls,
+                steps=exc.steps,
                 count_kind=exc.count_kind,
                 currency_cost_usd=exc.currency_cost_usd,
                 currency_cost_cny=exc.currency_cost_cny,
                 elapsed_ms=exc.elapsed_ms,
+                strategy_latency_ms=exc.strategy_latency_ms,
                 cache_state=cache_state,
             )
         except Exception as exc:  # noqa: BLE001 - preserve unexpected failures in the run artifact.
