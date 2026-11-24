@@ -416,6 +416,38 @@ def test_ast_source_index_rejects_dynamic_import_calls() -> None:
     assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
 
 
+def test_ast_source_index_rejects_relative_import_beyond_package_root() -> None:
+    target_request, _target_chunk = make_request(
+        "def transform():\n    return None\n",
+        path="target.py",
+        document_id="00000000-0000-4000-8000-000000000151",
+        chunk_id="00000000-0000-4000-8000-000000000251",
+    )
+    caller_request, _caller_chunk = make_request(
+        "from .target import transform as tx\ndef caller():\n    tx()\n",
+        path="caller.py",
+        document_id="00000000-0000-4000-8000-000000000152",
+        chunk_id="00000000-0000-4000-8000-000000000252",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+
+    assert not any(item.predicate is RelationPredicate.CALLS for item in result.relations)
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+
+
 @pytest.mark.asyncio
 async def test_ast_distinguishes_explicit_returns_raises_guards_and_fallthrough() -> None:
     text = (

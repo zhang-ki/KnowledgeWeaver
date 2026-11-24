@@ -35,6 +35,7 @@ class _ImportBinding:
     entity: Entity
     qualified_prefix: str
     is_module: bool
+    resolvable: bool = True
 
 
 def _line_offsets(text: str) -> list[int]:
@@ -579,6 +580,8 @@ class _StaticExtractor(ast.NodeVisitor):
                 return target
             imported = self.resolve_import(expression.id)
             if imported is not None:
+                if self.source_index is not None and not imported.resolvable:
+                    return None
                 indexed = self._resolve_indexed_import(
                     imported.qualified_prefix, expected=expected
                 )
@@ -608,6 +611,8 @@ class _StaticExtractor(ast.NodeVisitor):
                 return self.class_members.get(local.id, {}).get(suffix)
             imported = self.resolve_import(root)
             if imported is not None:
+                if self.source_index is not None and not imported.resolvable:
+                    return None
                 qualified = ".".join(part for part in [imported.qualified_prefix, suffix] if part)
                 indexed = self._resolve_indexed_import(qualified, expected=expected)
                 if self.source_index is not None:
@@ -744,13 +749,12 @@ class _ImportVisitor(ast.NodeVisitor):
                 f"No input chunk span covers an import statement at line {node.lineno}.",
             )
             return
-        module = _resolve_import_module(
+        resolved_module = _resolve_import_module(
             relative_path=self.analyzer.document.relative_path,
             level=node.level,
             imported_module=node.module,
         )
-        if module is None:
-            module = ""
+        module = resolved_module or ""
         for alias in node.names:
             if alias.name == "*":
                 self.analyzer.builder.reject(
@@ -762,7 +766,15 @@ class _ImportVisitor(ast.NodeVisitor):
             local_name = alias.asname or alias.name
             qualified = ".".join(part for part in [module, alias.name] if part)
             target = self._import_entity(qualified, local_name, evidence)
-            self._bind(local_name, _ImportBinding(target, qualified, False))
+            self._bind(
+                local_name,
+                _ImportBinding(
+                    target,
+                    qualified,
+                    False,
+                    resolvable=resolved_module is not None,
+                ),
+            )
 
     def _import_entity(self, qualified_name: str, local_name: str, evidence: Any) -> Entity:
         entity = self.analyzer.external_reference(
