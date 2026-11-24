@@ -1,19 +1,78 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import PurePosixPath
 
-from knowledge_weaver.models import ExtractionRequest, ExtractionResult
+from knowledge_weaver.models import ExtractionRequest, ExtractionResult, SourceKind
 from knowledge_weaver.ports import Extractor as ExtractorPort
 from knowledge_weaver.ports import GenerationProvider
 
 from .ast_extractor import extract_static_python
 from .text_extractor import StructuredTextExtractor
 
+EXTRACTION_OBSERVATION_PREFIX = "EXTRACTION_OBSERVATION_V1:"
 
-def _is_normative_specification(path_text: str) -> bool:
-    path = PurePosixPath(path_text.replace("\\", "/"))
-    return "specifications" in path.parts and path.suffix.casefold() in {".html", ".txt"}
+
+def _is_python_source(
+    source_id: str, relative_path: str, source_kinds_by_id: Mapping[str, SourceKind]
+) -> bool:
+    source_kind = source_kinds_by_id.get(source_id)
+    if source_kind is not None:
+        return source_kind is SourceKind.python_repo
+    # Direct ExtractionRequest callers predate source-kind routing. Retain their
+    # source-format fallback while ingested documents use the authoritative kind.
+    return PurePosixPath(relative_path.replace("\\", "/")).suffix.casefold() in {
+        ".py",
+        ".pyi",
+    }
+
+
+def _observation(
+    request: ExtractionRequest,
+    result: ExtractionResult,
+    *,
+    lane: str,
+    source_kind: SourceKind | None,
+    provider_configured: bool | None,
+    corpus_id: str | None,
+    provider_required: bool,
+) -> str:
+    valid_leaf_chunks = sum(
+        chunk.document_id == request.document.id and chunk.is_leaf
+        for chunk in request.chunks
+    )
+    accepted_entities = len(result.entities)
+    accepted_mentions = len(result.mentions)
+    accepted_relations = len(result.relations)
+    if corpus_id is None:
+        outcome = "NOT_ATTEMPTED_MISSING_CORPUS_SCOPE"
+    elif provider_required and not provider_configured:
+        outcome = "PROVIDER_NOT_CONFIGURED"
+    elif valid_leaf_chunks == 0:
+        outcome = "NOT_ATTEMPTED_NO_LEAF_CHUNKS"
+    elif accepted_entities + accepted_mentions + accepted_relations:
+        outcome = "EXECUTED_WITH_CANDIDATES"
+    else:
+        outcome = "EXECUTED_NO_CANDIDATES"
+    payload = {
+        "schema_version": 1,
+        "source_id": request.document.source_id,
+        "document_id": request.document.id,
+        "source_kind": source_kind.value if source_kind is not None else "UNKNOWN",
+        "lane": lane,
+        "outcome": outcome,
+        "provider_configured": provider_configured,
+        "leaf_chunk_count": valid_leaf_chunks,
+        "accepted_entity_count": accepted_entities,
+        "accepted_mention_count": accepted_mentions,
+        "accepted_relation_count": accepted_relations,
+        "rejected_item_count": len(result.rejected_items),
+        "rejection_codes": sorted({item.code for item in result.rejected_items}),
+    }
+    return EXTRACTION_OBSERVATION_PREFIX + json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
 
 
 class KnowledgeExtractor(ExtractorPort):
@@ -31,6 +90,8 @@ class KnowledgeExtractor(ExtractorPort):
         *,
         corpus_id: str | None = None,
         corpus_ids_by_source: Mapping[str, str] | None = None,
+        source_kinds_by_id: Mapping[str, SourceKind] | None = None,
+        normative_source_ids: set[str] | frozenset[str] | None = None,
         timeout_seconds: float = 30.0,
         max_schema_repairs: int = 1,
     ) -> None:
@@ -39,6 +100,11 @@ class KnowledgeExtractor(ExtractorPort):
         self.generation_provider = generation_provider
         self.corpus_id = corpus_id
         self.corpus_ids_by_source = dict(corpus_ids_by_source or {})
+        self.source_kinds_by_id = {
+            source_id: SourceKind(source_kind)
+            for source_id, source_kind in (source_kinds_by_id or {}).items()
+        }
+        self.normative_source_ids = frozenset(normative_source_ids or ())
         self.timeout_seconds = timeout_seconds
         self.max_schema_repairs = max_schema_repairs
 
@@ -47,15 +113,40 @@ class KnowledgeExtractor(ExtractorPort):
 
     async def extract(self, request: ExtractionRequest) -> ExtractionResult:
         corpus_id = self._corpus_id_for_source(request.document.source_id)
-        if request.document.relative_path.casefold().endswith((".py", ".pyi")):
-            return extract_static_python(request, corpus_id=corpus_id)
+        source_kind = self.source_kinds_by_id.get(request.document.source_id)
+        if _is_python_source(
+            request.document.source_id,
+            request.document.relative_path,
+            self.source_kinds_by_id,
+        ):
+            result = extract_static_python(request, corpus_id=corpus_id)
+            observation = _observation(
+                request,
+                result,
+                lane="PYTHON_AST",
+                source_kind=source_kind,
+                provider_configured=None,
+                corpus_id=corpus_id,
+                provider_required=False,
+            )
+            return result.model_copy(update={"warnings": [*result.warnings, observation]})
+
+        normative_specification = request.document.source_id in self.normative_source_ids
         extractor = StructuredTextExtractor(
             self.generation_provider,
             corpus_id=corpus_id,
             timeout_seconds=self.timeout_seconds,
             max_schema_repairs=self.max_schema_repairs,
-            normative_specification=_is_normative_specification(
-                request.document.relative_path
-            ),
+            normative_specification=normative_specification,
         )
-        return await extractor.extract(request)
+        result = await extractor.extract(request)
+        observation = _observation(
+            request,
+            result,
+            lane=("NORMATIVE_TEXT" if normative_specification else "STRUCTURED_TEXT"),
+            source_kind=source_kind,
+            provider_configured=self.generation_provider is not None,
+            corpus_id=corpus_id,
+            provider_required=True,
+        )
+        return result.model_copy(update={"warnings": [*result.warnings, observation]})

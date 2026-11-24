@@ -29,6 +29,7 @@ from knowledge_weaver.models import (
     ProvenanceMethod,
     PythonLocator,
     RelationPredicate,
+    SourceKind,
     StructureType,
 )
 
@@ -94,6 +95,25 @@ def make_request(
         producer_fingerprint="b02-extractor-test-v1",
     )
     return request, chunk
+
+
+def normative_extractor(provider: QueueProvider) -> KnowledgeExtractor:
+    return KnowledgeExtractor(
+        provider,
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.markdown},
+        normative_source_ids={SOURCE_ID},
+    )
+
+
+def extraction_observation(result) -> dict[str, Any]:
+    warnings = [
+        item
+        for item in result.warnings
+        if item.startswith("EXTRACTION_OBSERVATION_V1:")
+    ]
+    assert len(warnings) == 1
+    return json.loads(warnings[0].split(":", 1)[1])
 
 
 class QueueProvider:
@@ -462,11 +482,11 @@ async def test_normative_specification_uses_separate_provenance_and_exact_modali
     }
     request, _chunk = make_request(
         text,
-        path="sources/specifications/nist/recovery.html",
+        path="docs/standards/recovery.html",
     )
     provider = QueueProvider([payload])
 
-    result = await KnowledgeExtractor(provider, corpus_id=CORPUS_ID).extract(request)
+    result = await normative_extractor(provider).extract(request)
 
     assert len(result.relations) == 1
     assert result.relations[0].predicate is RelationPredicate.INVALIDATES
@@ -481,6 +501,10 @@ async def test_normative_specification_uses_separate_provenance_and_exact_modali
     assert "normative specification" in call.system_instruction.casefold()
     assert "gold" not in call.untrusted_context.casefold()
     assert all(item.quote == text for item in result.evidence)
+    observation = extraction_observation(result)
+    assert observation["lane"] == "NORMATIVE_TEXT"
+    assert observation["outcome"] == "EXECUTED_WITH_CANDIDATES"
+    assert observation["provider_configured"] is True
 
 
 @pytest.mark.asyncio
@@ -516,12 +540,10 @@ async def test_normative_specification_rejects_modality_not_present_in_quote() -
     }
     request, _chunk = make_request(
         text,
-        path="sources/specifications/nist/recovery.html",
+        path="docs/standards/recovery.html",
     )
 
-    result = await KnowledgeExtractor(
-        QueueProvider([payload]), corpus_id=CORPUS_ID
-    ).extract(request)
+    result = await normative_extractor(QueueProvider([payload])).extract(request)
 
     assert result.relations == []
     assert any(
@@ -566,18 +588,56 @@ async def test_normative_specification_rejects_guard_not_present_in_quote() -> N
     }
     request, _chunk = make_request(
         text,
-        path="sources/specifications/nist/recovery.html",
+        path="docs/standards/recovery.html",
     )
 
-    result = await KnowledgeExtractor(
-        QueueProvider([payload]), corpus_id=CORPUS_ID
-    ).extract(request)
+    result = await normative_extractor(QueueProvider([payload])).extract(request)
 
     assert result.relations == []
     assert any(
         item.code == "NORMATIVE_MODALITY_OR_GUARD_UNVERIFIED"
         for item in result.rejected_items
     )
+
+
+@pytest.mark.asyncio
+async def test_source_type_and_normative_metadata_drive_text_routing_and_outcome() -> None:
+    request, _chunk = make_request(
+        "Ordinary text without a normative profile.",
+        path="archive/specifications/guide.html",
+    )
+    no_provider = await KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.markdown},
+    ).extract(request)
+    no_provider_observation = extraction_observation(no_provider)
+    assert no_provider_observation["lane"] == "STRUCTURED_TEXT"
+    assert no_provider_observation["outcome"] == "PROVIDER_NOT_CONFIGURED"
+    assert no_provider_observation["provider_configured"] is False
+
+    empty_provider = QueueProvider([{"entities": [], "relations": []}])
+    executed_empty = await KnowledgeExtractor(
+        empty_provider,
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.markdown},
+    ).extract(request)
+    empty_observation = extraction_observation(executed_empty)
+    assert len(empty_provider.calls) == 1
+    assert empty_observation["lane"] == "STRUCTURED_TEXT"
+    assert empty_observation["outcome"] == "EXECUTED_NO_CANDIDATES"
+
+
+@pytest.mark.asyncio
+async def test_python_source_kind_overrides_file_suffix_for_lane_selection() -> None:
+    request, _chunk = make_request("ordinary text", path="notes.txt")
+    result = await KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+    ).extract(request)
+    observation = extraction_observation(result)
+    assert observation["lane"] == "PYTHON_AST"
+    assert observation["outcome"] == "EXECUTED_NO_CANDIDATES"
+    assert "AST_PARSE_FAILED" in observation["rejection_codes"]
 
 
 @pytest.mark.asyncio

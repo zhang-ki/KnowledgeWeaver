@@ -13,9 +13,20 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from knowledge_weaver.core.errors import KnowledgeWeaverError
-from knowledge_weaver.models import DeleteSourceRequest, IngestRequest, Source, SourceKind
+from knowledge_weaver.extraction.extractor import EXTRACTION_OBSERVATION_PREFIX
+from knowledge_weaver.models import (
+    DeleteSourceRequest,
+    ExtractionResult,
+    IngestRequest,
+    Source,
+    SourceKind,
+)
 from knowledge_weaver.providers.fake import FakeEmbeddingProvider
 from knowledge_weaver.storage import Database, PipelineService
+from knowledge_weaver.storage.pipeline import (
+    _extraction_observations,
+    _source_extraction_profile_sha256,
+)
 from knowledge_weaver.storage.schema import (
     CorpusRow,
     EvidenceRow,
@@ -91,6 +102,36 @@ def _source(root: Path, corpus_id: str, source_id: str) -> Source:
         display_name="synthetic B03 source",
         created_at=datetime.now(UTC),
     )
+
+
+def test_source_extraction_profile_and_report_observations_are_bound() -> None:
+    source = _source(Path("synthetic"), str(uuid4()), str(uuid4()))
+    structured_profile = _source_extraction_profile_sha256(
+        source, normative_source=False, provider_configured=False
+    )
+    normative_profile = _source_extraction_profile_sha256(
+        source, normative_source=True, provider_configured=False
+    )
+    configured_profile = _source_extraction_profile_sha256(
+        source, normative_source=False, provider_configured=True
+    )
+    code_profile = _source_extraction_profile_sha256(
+        source.model_copy(update={"kind": SourceKind.python_repo}),
+        normative_source=False,
+        provider_configured=None,
+    )
+    assert len(structured_profile) == 64
+    assert len(
+        {structured_profile, normative_profile, configured_profile, code_profile}
+    ) == 4
+
+    observation = EXTRACTION_OBSERVATION_PREFIX + '{"schema_version":1,"lane":"NORMATIVE_TEXT","outcome":"PROVIDER_NOT_CONFIGURED"}'
+    result = ExtractionResult(
+        document_id=str(uuid4()),
+        chunk_ids=[],
+        warnings=[observation, "unstructured extractor warning"],
+    )
+    assert _extraction_observations(result) == [observation]
 
 
 class _ConfiguredFakeEmbeddingProvider:
