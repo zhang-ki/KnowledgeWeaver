@@ -968,6 +968,60 @@ def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_m
     assert bad_report.path_mappings[0].status is GoldMappingStatus.unmapped
 
 
+def test_strict_calls_requires_exact_direct_source_evidence_not_function_context() -> None:
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    call_expectation = _semantic_expectation(predicate=RelationPredicate.CALLS)
+    broad_only_relation = relations[0].model_copy(
+        update={"predicate": RelationPredicate.CALLS, "evidence_ids": [evidence[0].id]}
+    )
+
+    broad_only_report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [broad_only_relation],
+        _expected_relation_entities(),
+        call_expectation,
+    )
+
+    assert broad_only_report.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert "exact direct callsite Evidence" in (broad_only_report.path_mappings[0].reason or "")
+
+    quote = prepared.case.gold[0].quote
+    quote_start = document.normalized_text.index(quote)
+    direct_evidence = Evidence(
+        id=EVIDENCE_TWO_ID,
+        chunk_id=CHUNK_ONE_ID,
+        start=quote_start,
+        end=quote_start + len(quote),
+        quote=quote,
+        locator=evidence[0].locator,
+        provenance_id=PROVENANCE_ID,
+    )
+    evidence_with_direct = [*evidence, direct_evidence]
+    relation_with_direct = broad_only_relation.model_copy(
+        update={"evidence_ids": [evidence[0].id, direct_evidence.id]}
+    )
+    exact_report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence_with_direct,
+        [relation_with_direct],
+        _expected_relation_entities(),
+        call_expectation,
+    )
+
+    assert exact_report.ready
+    assert exact_report.path_mappings[0].evidence_ids_by_edge == ((direct_evidence.id,),)
+
+
 def test_direct_gold_relation_id_validates_explicit_semantics() -> None:
     from knowledge_weaver.models.contracts import Polarity, RelationPredicate
 

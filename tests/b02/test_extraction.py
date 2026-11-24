@@ -218,6 +218,46 @@ async def test_ast_emits_located_static_relations_and_rejects_dynamic_calls() ->
         evidence.assert_matches_chunk(chunk)
 
 
+def test_ast_call_relation_includes_exact_direct_assignment_statement_evidence() -> None:
+    text = (
+        "class PyJWT:\n"
+        "    def decode(self, token):\n"
+        "        result = self.decode_complete(token)\n"
+        "        return result\n"
+        "    def decode_complete(self, token):\n"
+        "        return token\n"
+    )
+    request, chunk = make_request(text, path="sources/repositories/pyjwt/api_jwt.py")
+    result = run_immediate(KnowledgeExtractor(corpus_id=CORPUS_ID).extract(request))
+    entities = {item.id: item.canonical_name for item in result.entities}
+    relation = next(
+        item
+        for item in result.relations
+        if item.predicate is RelationPredicate.CALLS
+        and entities[item.subject_id].endswith("PyJWT.decode")
+        and entities[item.object_id].endswith("PyJWT.decode_complete")
+    )
+    relation_evidence = {
+        item.id: item
+        for item in result.evidence
+        if item.id in relation.evidence_ids
+    }
+
+    assert any(
+        item.quote == "result = self.decode_complete(token)"
+        and item.locator.kind == "python"
+        and item.locator.line_start == 3
+        for item in relation_evidence.values()
+    )
+    assert any(
+        item.quote == "self.decode_complete(token)"
+        and item.locator.line_start == 3
+        for item in relation_evidence.values()
+    )
+    for item in relation_evidence.values():
+        item.assert_matches_chunk(chunk)
+
+
 @pytest.mark.parametrize(
     "import_statement",
     [

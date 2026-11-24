@@ -423,6 +423,30 @@ def _relation_evidence_closure(
     return tuple(sorted(set().union(*intersections)))
 
 
+def _direct_call_evidence_closure(
+    relation: Relation,
+    mapped_spans: Sequence[GoldSpanMapping],
+    context: _SemanticProjectionContext,
+) -> tuple[str, ...]:
+    """Require exact quoted source evidence for strict source-code CALLS edges."""
+    relation_evidence_ids = set(relation.evidence_ids)
+    closed_ids: set[str] = set()
+    for span in mapped_spans:
+        exact_ids = {
+            evidence_id
+            for evidence_id in set(span.evidence_ids) & relation_evidence_ids
+            if evidence_id in context.evidence_by_id
+            and hashlib.sha256(
+                context.evidence_by_id[evidence_id].quote.encode("utf-8")
+            ).hexdigest()
+            == span.quote_sha256
+        }
+        if not exact_ids:
+            return ()
+        closed_ids.update(exact_ids)
+    return tuple(sorted(closed_ids))
+
+
 def _source_version_for_endpoint(
     endpoint: GoldEndpointExpectation, context: _SemanticProjectionContext
 ) -> tuple[Source, SourceVersion] | None:
@@ -658,7 +682,7 @@ def _semantic_projection_failure(
     relation: Relation,
     expectation: GoldRelationExpectation,
     *,
-    mapped_evidence_groups: Sequence[set[str]],
+    mapped_evidence_groups: Sequence[GoldSpanMapping],
     context: _SemanticProjectionContext,
 ) -> tuple[tuple[str, ...], str | None]:
     if relation.predicate is not expectation.predicate:
@@ -695,7 +719,22 @@ def _semantic_projection_failure(
             else "has no candidate matching exact source-bound endpoints"
         )
 
-    closed_ids = _relation_evidence_closure(relation, mapped_evidence_groups)
+    if (
+        expectation.evidence_basis is GoldEvidenceBasis.source_code
+        and expectation.predicate is RelationPredicate.CALLS
+    ):
+        closed_ids = _direct_call_evidence_closure(
+            relation, mapped_evidence_groups, context
+        )
+        if not closed_ids:
+            return (
+                (),
+                "does not close through exact direct callsite Evidence for every reviewed Gold quote",
+            )
+    else:
+        closed_ids = _relation_evidence_closure(
+            relation, [set(span.evidence_ids) for span in mapped_evidence_groups]
+        )
     if not closed_ids:
         return (), "does not close over Evidence for every reviewed Gold quote"
     if not _relation_provenance_matches(relation, expectation, context):
@@ -720,7 +759,7 @@ def _semantic_projection_failure(
 
 def _resolve_runtime_relation(
     edge_relation_id: str,
-    mapped_evidence_groups: Sequence[set[str]],
+    mapped_evidence_groups: Sequence[GoldSpanMapping],
     *,
     relation_by_id: Mapping[str, Relation],
     relations: Sequence[Relation],
@@ -740,7 +779,9 @@ def _resolve_runtime_relation(
             if failure:
                 return None, (), failure
             return direct, closed_ids, None
-        closed = _relation_evidence_closure(direct, mapped_evidence_groups)
+        closed = _relation_evidence_closure(
+            direct, [set(span.evidence_ids) for span in mapped_evidence_groups]
+        )
         if not closed:
             return None, (), "does not close over Evidence for every reviewed Gold quote"
         return direct, closed, None
@@ -775,6 +816,7 @@ def _resolve_runtime_relation(
             "has no candidate matching exact source-bound endpoints",
             "does not match the expected result outcome kind",
             "does not match the expected result role",
+            "does not close through exact direct callsite Evidence for every reviewed Gold quote",
             "does not close over Evidence for every reviewed Gold quote",
             "does not close through the expected Generation Provenance chain",
             "contains Evidence outside its exact source, version, path, or basis",
@@ -917,7 +959,7 @@ def map_gold_to_generation(
             previous_to_id: str | None = None
             failure: str | None = None
             for edge_index, edge in enumerate(reviewed_path.edges):
-                mapped_evidence_groups: list[set[str]] = []
+                mapped_evidence_groups: list[GoldSpanMapping] = []
                 for quote_hash in edge.evidence_quote_sha256:
                     span_mappings_for_quote = mappings_by_case_quote.get(
                         (case.case.id, quote_hash), []
@@ -941,7 +983,7 @@ def map_gold_to_generation(
                             "does not resolve to a mapped span"
                         )
                         break
-                    mapped_evidence_groups.append(set(span_mapping.evidence_ids))
+                    mapped_evidence_groups.append(span_mapping)
                 if failure:
                     break
                 relation, closed_ids, resolution_failure = _resolve_runtime_relation(

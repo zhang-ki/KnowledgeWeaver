@@ -1057,11 +1057,16 @@ class _BindingVisitor(ast.NodeVisitor):
 
 
 class _CallAndInheritanceVisitor(ast.NodeVisitor):
-    def __init__(self, analyzer: _StaticExtractor) -> None:
+    def __init__(self, analyzer: _StaticExtractor, tree: ast.AST) -> None:
         self.analyzer = analyzer
         self.frames = analyzer.frames
         self.guards: list[tuple[dict[str, str], ast.expr]] = []
         self.function_nodes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+        self.parents = {
+            id(child): parent
+            for parent in ast.walk(tree)
+            for child in ast.iter_child_nodes(parent)
+        }
 
     @property
     def frame(self) -> _Frame:
@@ -1107,6 +1112,22 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
         ):
             return evidence_items
         return [*evidence_items, function_evidence]
+
+    def _direct_call_statement_evidence(self, node: ast.Call) -> Any | None:
+        parent = self.parents.get(id(node))
+        if not isinstance(
+            parent,
+            (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return, ast.Expr),
+        ) or getattr(parent, "value", None) is not node:
+            return None
+        statement_range = _node_range(
+            parent, self.analyzer.text, self.analyzer.line_offsets
+        )
+        if statement_range is None:
+            return None
+        return self.analyzer.builder.evidence_at_doc_range(
+            *statement_range, self.analyzer.provenance
+        )
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         class_entity = self.analyzer.symbols_by_scope.get(self.frame.qualname, {}).get(node.name)
@@ -1421,6 +1442,9 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
             surface = ast.get_source_segment(self.analyzer.text, node.func) or target.canonical_name
             self.analyzer.builder.add_mention(target, evidence, surface)
             relation_evidence = [evidence]
+            statement_evidence = self._direct_call_statement_evidence(node)
+            if statement_evidence is not None:
+                relation_evidence.append(statement_evidence)
             qualifiers: dict[str, Any] = {"resolution": "static_symbol"}
             if self.guards:
                 qualifiers["guard"] = [item for item, _expression in self.guards]
@@ -1511,6 +1535,6 @@ def extract_static_python(
     import_visitor.visit(tree)
     binding_visitor = _BindingVisitor(analyzer)
     binding_visitor.visit(tree)
-    resolution_visitor = _CallAndInheritanceVisitor(analyzer)
+    resolution_visitor = _CallAndInheritanceVisitor(analyzer, tree)
     resolution_visitor.visit(tree)
     return builder.result()
