@@ -41,6 +41,7 @@ from knowledge_weaver.models.contracts import (
 )
 from knowledge_weaver.ports import GenerationProvider, KnowledgeStore, Retriever
 from knowledge_weaver.providers.fake import FakeGenerationProvider
+from knowledge_weaver.retrieval.cache_state import CacheStateController, CacheStateReceipt
 from knowledge_weaver.retrieval.hybrid import HybridRetriever
 from knowledge_weaver.retrieval.indexed import (
     Bm25Retriever,
@@ -64,6 +65,18 @@ _COUNT_KIND_LITERALS: dict[
 def _canonical_sha256(value: object) -> str:
     encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _citation_resolutions(
+    cited_ids: tuple[str, ...], valid_ids: set[str]
+) -> tuple[CitationResolution, ...]:
+    return tuple(
+        CitationResolution(
+            evidence_id=evidence_id,
+            resolves_to_original=evidence_id in valid_ids,
+        )
+        for evidence_id in cited_ids
+    )
 
 
 def _route_adapter_matches(route_id: str, adapter: object) -> bool:
@@ -140,6 +153,18 @@ class PublicPortBenchmarkExecutor:
                 route_id, binding.adapter
             ):
                 raise ValueError(f"route adapter does not match its frozen implementation: {route_id}")
+        retrievers = {
+            route_id: binding.adapter
+            for route_id, binding in registry.route_bindings.items()
+            if route_id.startswith("retriever.")
+        }
+        self.cache_state_controller = CacheStateController.for_retrievers(
+            retrievers,
+            uncontrolled_by_route={
+                route_id: (f"{route_id}/answer-provider/shared-cache",)
+                for route_id in retrievers
+            },
+        )
 
     async def execute_query(
         self,
@@ -191,7 +216,51 @@ class PublicPortBenchmarkExecutor:
         steps = 1
         llm_calls = 0
         strategy_latency_ms = 0
+        cache_receipt: CacheStateReceipt | None = None
         try:
+            try:
+                cache_receipt = await self.cache_state_controller.prepare(
+                    plan.route_id, context, cache_state
+                )
+            except Exception as exc:
+                raise ProviderExecutionError(
+                    "CACHE_STATE_PREPARATION_FAILED",
+                    retryable=False,
+                    provider_profile=self.provider_profile,
+                    model_revision="cache-control-unavailable",
+                    elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                ) from exc
+            if not isinstance(cache_receipt, CacheStateReceipt):
+                raise ProviderExecutionError(
+                    "CACHE_RECEIPT_MISSING",
+                    retryable=False,
+                    provider_profile=self.provider_profile,
+                    model_revision="cache-control-unavailable",
+                    elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                )
+            if (
+                cache_receipt.route_id != plan.route_id
+                or cache_receipt.requested_state != cache_state
+                or cache_receipt.config_sha256
+                != self.cache_state_controller.config_sha256_for(plan.route_id)
+            ):
+                raise ProviderExecutionError(
+                    "CACHE_RECEIPT_CONFIG_MISMATCH",
+                    retryable=False,
+                    provider_profile=self.provider_profile,
+                    model_revision="cache-control-invalid",
+                    cache_state_receipt=cache_receipt,
+                    elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                )
+            if not cache_receipt.complete or cache_receipt.applied_state != cache_state:
+                raise ProviderExecutionError(
+                    "CACHE_SCOPE_INCOMPLETE",
+                    retryable=False,
+                    provider_profile=self.provider_profile,
+                    model_revision="cache-scope-incomplete",
+                    cache_state_receipt=cache_receipt,
+                    elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                )
             result = await binding.adapter.retrieve(
                 RetrievalQuery(text=query.question, context=context, top_k=20)
             )
@@ -226,13 +295,7 @@ class PublicPortBenchmarkExecutor:
                 else None
             )
             valid_citations = set(citation_check.valid_ids) if citation_check else set()
-            citation_status = tuple(
-                CitationResolution(
-                    evidence_id=evidence_id,
-                    resolves_to_original=evidence_id in valid_citations,
-                )
-                for evidence_id in cited_ids
-            )
+            citation_status = _citation_resolutions(cited_ids, valid_citations)
             answer_payload = answer.model_dump(mode="json")
             response_sha256 = _canonical_sha256(answer_payload)
             output = ExecutionOutput(
@@ -268,6 +331,7 @@ class PublicPortBenchmarkExecutor:
                 executed_generation_id=verified.id,
                 executed_generation_sha256=verified.generation_sha256,
                 response_summary_sha256=response_sha256,
+                cache_state_receipt=cache_receipt,
                 execution_output=output,
             )
         except ProviderUnavailable as exc:
@@ -281,6 +345,7 @@ class PublicPortBenchmarkExecutor:
                 steps=steps,
                 strategy_latency_ms=strategy_latency_ms,
                 elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                cache_state_receipt=cache_receipt,
             ) from None
         except KnowledgeWeaverError as exc:
             raise ProviderExecutionError(
@@ -293,6 +358,7 @@ class PublicPortBenchmarkExecutor:
                 steps=steps,
                 strategy_latency_ms=strategy_latency_ms,
                 elapsed_ms=max(0, int((time.perf_counter() - started) * 1000)),
+                cache_state_receipt=cache_receipt,
             ) from None
         except ValidationError:
             raise

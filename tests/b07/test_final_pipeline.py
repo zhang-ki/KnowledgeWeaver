@@ -59,8 +59,30 @@ from knowledge_weaver.evaluation.training import (
     write_policy_artifact,
 )
 from knowledge_weaver.models.contracts import Action, ActionTool, Generation
+from knowledge_weaver.retrieval.cache_state import CacheStateOperation, CacheStateReceipt
 
 NOW = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
+
+
+def _cache_receipt(cache_state: Literal["cold", "warm"]) -> CacheStateReceipt:
+    return CacheStateReceipt(
+        route_id="retriever.test",
+        requested_state=cache_state,
+        applied_state=cache_state,
+        implementation_sha256="a" * 64,
+        config_sha256="b" * 64,
+        controlled_components=("test.cache",),
+        warmup_sequence=("test.cache",),
+        operations=(
+            CacheStateOperation(
+                sequence=1,
+                component_id="test.cache",
+                operation="reset" if cache_state == "cold" else "warm",
+                verified=True,
+            ),
+        ),
+        complete=True,
+    )
 
 
 def _uuid(index: int) -> str:
@@ -277,6 +299,7 @@ class _DisplayOnlyRealExecutor:
             count_kind="exact",
             elapsed_ms=1,
             cache_state=cache_state,
+            cache_state_receipt=_cache_receipt(cache_state),
             executed_generation_id=generation.id,
             executed_generation_sha256=generation_sha256,
             measurements=QueryMeasurements(
@@ -921,6 +944,7 @@ class _SyntheticExecutor:
             elapsed_ms=15,
             strategy_latency_ms=4,
             cache_state=cache_state,
+            cache_state_receipt=_cache_receipt(cache_state),
             executed_generation_id=generation.id if generation is not None else None,
             executed_generation_sha256=generation_sha256,
             measurements=QueryMeasurements(evidence_recall=0.9),

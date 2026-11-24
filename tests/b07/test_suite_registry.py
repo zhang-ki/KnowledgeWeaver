@@ -82,10 +82,10 @@ def test_registry_freezes_all_111_suites_and_unique_config_identities() -> None:
         for item in registry.plan_for("system/fixed_agent/standard/seed-17").blockers
     )
     assert _registered_suite_blocker(schedule, protocol, SimpleNamespace(registry=registry)) == (
-        "BLOCKED_CACHE_CONTROL_PORT: public Retriever cannot enforce cold/warm cache state"
+        "BLOCKED_CACHE_CONTROL_PORT: suite registry has no frozen B04 cache-control profile"
     )
     assert _registered_suite_blocker(schedule, protocol, SimpleNamespace(registry=registry)) == (
-        "BLOCKED_CACHE_CONTROL_PORT: public Retriever cannot enforce cold/warm cache state"
+        "BLOCKED_CACHE_CONTROL_PORT: suite registry has no frozen B04 cache-control profile"
     )
 
 

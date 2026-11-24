@@ -36,6 +36,7 @@ from knowledge_weaver.models.contracts import (
     RetrievalHit,
     Usage,
 )
+from knowledge_weaver.retrieval.cache_state import CacheStateReceipt
 
 NonEmpty = StringConstraints(strip_whitespace=True, min_length=1)
 CountKind = Literal["exact", "estimated", "unavailable"]
@@ -162,6 +163,7 @@ class AttemptOutcome(RunModel):
     elapsed_ms: int = Field(default=0, ge=0)
     strategy_latency_ms: int = Field(default=0, ge=0)
     cache_state: Literal["cold", "warm"] = "cold"
+    cache_state_receipt: CacheStateReceipt | None = None
     executed_generation_id: str | None = None
     executed_generation_sha256: str | None = None
     response_summary_sha256: str | None = None
@@ -182,6 +184,13 @@ class AttemptOutcome(RunModel):
             raise ValueError("a failed attempt requires a failure code")
         if self.status == "complete" and self.retryable:
             raise ValueError("a complete attempt cannot be marked retryable")
+        if self.status == "complete" and (
+            self.cache_state_receipt is None
+            or not self.cache_state_receipt.complete
+            or self.cache_state_receipt.requested_state != self.cache_state
+            or self.cache_state_receipt.applied_state != self.cache_state
+        ):
+            raise ValueError("a complete attempt requires a verified cache-state receipt")
         return self
 
 
@@ -307,6 +316,7 @@ class ProviderExecutionError(RuntimeError):
         currency_cost_usd: Decimal | None = None,
         currency_cost_cny: Decimal | None = None,
         elapsed_ms: int = 0,
+        cache_state_receipt: CacheStateReceipt | None = None,
     ) -> None:
         self.code = redact_text(code)
         self.retryable = retryable
@@ -322,6 +332,7 @@ class ProviderExecutionError(RuntimeError):
         self.currency_cost_usd = currency_cost_usd
         self.currency_cost_cny = currency_cost_cny
         self.elapsed_ms = elapsed_ms
+        self.cache_state_receipt = cache_state_receipt
         super().__init__(self.code)
 
 
@@ -447,6 +458,7 @@ async def run_query_with_retries(
                 elapsed_ms=exc.elapsed_ms,
                 strategy_latency_ms=exc.strategy_latency_ms,
                 cache_state=cache_state,
+                cache_state_receipt=exc.cache_state_receipt,
             )
         except Exception as exc:  # noqa: BLE001 - preserve unexpected failures in the run artifact.
             # Programming/configuration failures are retained and never retried implicitly.

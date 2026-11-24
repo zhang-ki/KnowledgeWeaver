@@ -326,6 +326,14 @@ async def run_dense_dev_slice(
             raise AssertionError("a Dev-only result cannot become formal-quality eligible")
         records.append(record)
     complete = all(item.status == "complete" for item in records)
+    cache_state_enforced = bool(records) and all(
+        attempt.cache_state_receipt is not None
+        and attempt.cache_state_receipt.complete
+        and attempt.cache_state_receipt.requested_state == record.cache_state
+        and attempt.cache_state_receipt.applied_state == record.cache_state
+        for record in records
+        for attempt in record.attempts
+    )
     return DenseDevSliceReport(
         suite_id=suite_id,
         registry_sha256=registry.sha256,
@@ -335,6 +343,7 @@ async def run_dense_dev_slice(
         query_records=tuple(records),
         status="DEV_ONLY_COMPLETE" if complete else "DEV_ONLY_PARTIAL",
         synthetic_fixture=executor.provider_kind != "real",
+        cache_state_enforced=cache_state_enforced,
     )
 
 

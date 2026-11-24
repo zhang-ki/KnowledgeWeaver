@@ -225,7 +225,7 @@ def build_suite_registry(
         )
         blockers: list[str] = []
         blockers.append(
-            "BLOCKED_CACHE_CONTROL_PORT: public Retriever cannot enforce cold/warm cache state"
+            "BLOCKED_CACHE_CONTROL_PORT: suite registry has no frozen B04 cache-control profile"
         )
         if route_id.startswith("agent."):
             blockers.append("BLOCKED_B06_TRACE_PORT: AgentService does not expose ordered retrieval trace")

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from test_final_mapping import _fixture
 from test_generation_binding import _make_generation
 
@@ -11,13 +12,22 @@ from knowledge_weaver.evaluation.dataset import (
     LoadedDataset,
     load_dataset,
 )
-from knowledge_weaver.evaluation.executors import PublicPortBenchmarkExecutor
+from knowledge_weaver.evaluation.executors import (
+    PublicPortBenchmarkExecutor,
+    _citation_resolutions,
+)
 from knowledge_weaver.evaluation.generation_binding import verify_generation_manifest
 from knowledge_weaver.evaluation.gold_mapping import map_gold_to_generation
 from knowledge_weaver.evaluation.protocol import load_protocol
 from knowledge_weaver.evaluation.runner import run_dense_dev_slice
+from knowledge_weaver.evaluation.runs import (
+    AttemptOutcome,
+    run_query_with_retries,
+)
 from knowledge_weaver.evaluation.scheduling import (
     REQUIRED_DEPENDENCIES,
+    ExperimentSuite,
+    SuiteStatus,
     build_formal_matrix,
 )
 from knowledge_weaver.evaluation.suite_registry import RouteBinding, build_suite_registry
@@ -32,6 +42,10 @@ from knowledge_weaver.models.contracts import (
     Usage,
 )
 from knowledge_weaver.providers.fake import FakeGenerationProvider
+from knowledge_weaver.retrieval.cache_state import (
+    CacheStateOperation,
+    CacheStateReceipt,
+)
 from knowledge_weaver.retrieval.indexed import DenseRetriever
 
 
@@ -91,6 +105,39 @@ class _RetryOnceGenerationProvider(FakeGenerationProvider):
         )
 
 
+class _MissingReceiptController:
+    def config_sha256_for(self, route_id):
+        return "c" * 64
+
+    async def prepare(self, route_id, context, requested_state):
+        return None
+
+
+class _WrongHashReceiptController:
+    def config_sha256_for(self, route_id):
+        return "c" * 64
+
+    async def prepare(self, route_id, context, requested_state):
+        return CacheStateReceipt(
+            route_id=route_id,
+            requested_state=requested_state,
+            applied_state=requested_state,
+            implementation_sha256="d" * 64,
+            config_sha256="e" * 64,
+            controlled_components=("test.cache",),
+            warmup_sequence=("test.cache",),
+            operations=(
+                CacheStateOperation(
+                    sequence=1,
+                    component_id="test.cache",
+                    operation="reset" if requested_state == "cold" else "warm",
+                    verified=True,
+                ),
+            ),
+            complete=True,
+        )
+
+
 class _SpyExecutor(PublicPortBenchmarkExecutor):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -107,6 +154,21 @@ def _drive_immediate(coroutine):
     except StopIteration as completed:
         return completed.value
     raise AssertionError("test coroutine unexpectedly yielded to an event loop")
+
+
+def _dev_suite() -> ExperimentSuite:
+    return ExperimentSuite(
+        suite_id="dev/dense/standard/seed-17",
+        kind="dev",
+        system_id="dense",
+        budget_id="standard",
+        seed=17,
+        ablation_id=None,
+        status=SuiteStatus.planned,
+        blockers=(),
+        cache_states=("cold",),
+        expected_query_runs=1,
+    )
 
 
 def _dev_inputs():
@@ -231,7 +293,7 @@ def _dev_inputs():
     )
 
 
-def test_dense_dev_slice_runs_blind_retrieval_and_runner_side_gold_scoring() -> None:
+def test_dense_dev_slice_fails_closed_on_uncontrolled_cache_scope() -> None:
     (
         protocol,
         dataset,
@@ -260,65 +322,95 @@ def test_dense_dev_slice_runs_blind_retrieval_and_runner_side_gold_scoring() -> 
 
     record = report.query_records[0]
     outcome = record.attempts[-1]
-    assert report.status == "DEV_ONLY_COMPLETE"
+    assert report.status == "DEV_ONLY_PARTIAL"
     assert report.formal is False and report.synthetic_fixture is True
     assert report.cache_state_enforced is False
-    assert len(record.attempts) == 2
-    assert executor.blind_queries[0] == executor.blind_queries[1]
+    assert outcome.status == "failed"
+    assert outcome.failure_code == "CACHE_SCOPE_INCOMPLETE"
+    assert outcome.cache_state_receipt is not None
+    assert outcome.cache_state_receipt.complete is False
+    assert any(
+        "embedding-provider" in item
+        for item in outcome.cache_state_receipt.uncontrolled_components
+    )
+    assert any(
+        "answer-provider" in item
+        for item in outcome.cache_state_receipt.uncontrolled_components
+    )
+    assert len(executor.blind_queries) == 1
     assert set(executor.blind_queries[0].model_fields_set) == {"query_id", "question", "language"}
-    assert retriever.calls == 2 and store.chunk_reads == 2 and provider.calls == 2
-    assert retriever.contexts[0].source_ids is None
-    assert outcome.execution_output is not None
-    assert outcome.execution_output.retrieval_hits[0].chunk_id == mapping.span_mappings[0].chunk_ids[0]
-    assert outcome.measurements is not None
-    assert outcome.measurements.evidence_recall == 1.0
-    assert outcome.measurements.citation_precision is None
-    assert outcome.measurements.citation_validity == 1.0
-    assert outcome.measurements.answer_correctness is None
+    assert retriever.calls == 0 and store.chunk_reads == 0 and provider.calls == 0
     assert record.formal_quality_eligible is False
-    assert record.input_tokens == 7 and record.output_tokens == 4
-    assert record.llm_calls == 2
-    assert not hasattr(outcome.execution_output, "gold")
+    assert outcome.execution_output is None
+    assert outcome.measurements is None
 
 
-def test_formal_dense_suite_stays_blocked_without_cache_control_and_bad_config() -> None:
+@pytest.mark.parametrize(
+    ("controller", "expected_code"),
+    [
+        (_MissingReceiptController(), "CACHE_RECEIPT_MISSING"),
+        (_WrongHashReceiptController(), "CACHE_RECEIPT_CONFIG_MISMATCH"),
+    ],
+)
+def test_missing_or_wrong_cache_receipt_is_preserved_as_runner_failure(
+    controller, expected_code
+) -> None:
     (
-        _protocol,
+        protocol,
         _dataset,
         _mapping,
         generation_binding,
-        executor,
-        _registry,
+        _executor,
+        registry,
         retriever,
-        _store,
-        _provider,
-        schedule,
+        store,
+        provider,
+        _schedule,
         prepared,
     ) = _dev_inputs()
-    formal_suite = next(
-        item for item in schedule.suites if item.suite_id == "system/dense/standard/seed-17"
+    suite = _dev_suite()
+    invalid_executor = PublicPortBenchmarkExecutor(
+        protocol,
+        registry,
+        store,
+        provider,
+        provider_kind="mock",
+        provider_profile="in-memory-fixture",
+        generation_config_sha256="d" * 64,
     )
-    query = executor.blind_queries[0] if executor.blind_queries else None
-    if query is None:
-        from knowledge_weaver.evaluation.runs import BlindBenchmarkInput
+    invalid_executor.cache_state_controller.prepare = controller.prepare
 
-        query = BlindBenchmarkInput(
-            query_id=prepared.case.id,
-            question=prepared.case.question,
-            language=prepared.case.language,
+    record = _drive_immediate(
+        run_query_with_retries(
+            invalid_executor,
+            prepared,
+            suite,
+            formal_dataset=False,
+            cache_state="cold",
+            generation_binding=generation_binding,
+            retry_delay_seconds=0,
         )
-    with pytest.raises(ValueError, match="CACHE_CONTROL_PORT"):
-        _drive_immediate(
-            executor.execute_query(
-                query,
-                formal_suite,
-                attempt=1,
-                cache_state="cold",
-                generation=generation_binding.generation,
-                generation_sha256=generation_binding.generation_sha256,
-            )
-        )
+    )
+
+    assert record.status == "failed"
+    assert record.attempts[0].failure_code == expected_code
+    if expected_code == "CACHE_RECEIPT_MISSING":
+        assert record.attempts[0].cache_state_receipt is None
+    else:
+        assert record.attempts[0].cache_state_receipt is not None
+        assert record.attempts[0].cache_state_receipt.complete is True
     assert retriever.calls == 0
+
+
+def test_complete_attempt_cannot_omit_cache_state_receipt() -> None:
+    with pytest.raises(ValidationError, match="verified cache-state receipt"):
+        AttemptOutcome(
+            attempt=1,
+            status="complete",
+            provider_kind="mock",
+            provider_profile="fixture",
+            model_revision="fixture-v1",
+        )
 
 
 def test_dense_executor_rejects_generator_sha_mismatch_before_any_query() -> None:
@@ -396,38 +488,8 @@ def test_dense_implementation_cannot_be_registered_as_bm25() -> None:
         )
 
 
-def test_invalid_model_citation_is_retained_as_unresolvable_without_gold_access() -> None:
-    (
-        protocol,
-        dataset,
-        mapping,
-        generation_binding,
-        executor,
-        registry,
-        _retriever,
-        store,
-        provider,
-        _schedule,
-        _prepared,
-    ) = _dev_inputs()
-    provider.response["claims"][0]["evidence_ids"] = ["not-a-uuid"]
+def test_invalid_citation_resolution_is_unresolvable_without_gold_access() -> None:
+    citation_status = _citation_resolutions(("not-a-uuid",), set())
 
-    report = _drive_immediate(
-        run_dense_dev_slice(
-            protocol,
-            dataset,
-            mapping,
-            executor,
-            registry,
-            generation_binding=generation_binding,
-            retry_delay_seconds=0,
-        )
-    )
-
-    output = report.query_records[0].attempts[-1].execution_output
-    assert output is not None
-    assert output.answer.claims[0].evidence_ids == ("not-a-uuid",)
-    assert output.citations[0].resolves_to_original is False
-    assert store.citation_validation_calls == []
-    assert report.query_records[0].measurements is not None
-    assert report.query_records[0].measurements.citation_validity == 0.0
+    assert citation_status[0].evidence_id == "not-a-uuid"
+    assert citation_status[0].resolves_to_original is False

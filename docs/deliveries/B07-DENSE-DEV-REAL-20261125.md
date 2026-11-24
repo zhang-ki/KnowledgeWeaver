@@ -139,6 +139,27 @@ This run replaces the earlier in-memory hydration attempt as evidence for one is
 - Code commit: `1fe20196a89625aae1e012713960ff386bab086b` (parent `c9f4bfa43a2748c2dfe55a01223e91d642e17f00`). Rollback ref `refs/codex/rollback/b07-pg-dense-citation-schema-20261125-001` points to that parent. The required baseline `1052ddcc75c09acf1199889df152bceaffab1915` remains an ancestor.
 - No formal gate or threshold was relaxed. The remaining formal blockers are the frozen dataset, B03 empty-member hash consistency for text-only sources, B04 cache-state control, and B06 ordered Agent trace.
 
+## Continuation: scoped B04 cache-state control — 2026-11-25
+
+### Scope and real cache inventory
+
+- Continued from `0abb45029f0a8241dcfebbfc82a5751e9e5d94a4` on `task/b07-blind-formal-executor`; the required baseline remains an ancestor.
+- The only current B04 process-local retrieval result cache is `GraphRetriever._snapshot_cache`, an LRU-like bounded `OrderedDict` keyed by corpus, Generation, source filter, and `include_inferred`. B04 now exposes an idempotent clear operation, a warm operation that loads the graph view for the current `QueryContext`, and a check that the same key is present afterward.
+- Dense has no controllable B04 result cache; its query path uses shared Embedding Provider state and Qdrant server state, then hydrates from the KnowledgeStore. BM25/Symbol/Entity read their index files each search but cannot clear the OS page cache; they also use the KnowledgeStore backend. Hybrid unions all channel scopes and adds an optional reranker shared-provider cache. The evaluator also lists the shared answer GenerationProvider cache as uncontrolled because end-to-end latency includes generation. These external/shared caches are reported as uncontrolled.
+- The frozen warm-up order is ascending component ID. Graph currently has one controlled step, `retriever.graph/graph-snapshot-cache`; its receipt explicitly lists graph-store, entity-index, and KnowledgeStore cache scope that remains unverified.
+
+### Evaluator behavior and fail-closed gate
+
+- `CacheStateController` applies and verifies each declared operation, computes an implementation SHA and per-route config SHA, and returns an immutable receipt with requested/applied state, controlled/uncontrolled components, fixed warm-up order, and operation results.
+- `PublicPortBenchmarkExecutor` derives cache controls from the route-bound retriever inventory; callers cannot inject an unrelated all-clear controller. It validates route, requested state, and config SHA before retrieval. Incomplete scope fails with `CACHE_SCOPE_INCOMPLETE` before the measured `Retriever.retrieve` call. Missing receipts and mismatched hashes fail at the same boundary. `AttemptOutcome` cannot be complete without a complete matching receipt; failed attempts retain any partial receipt. Dense Dev `cache_state_enforced` is derived from every attempt rather than a default label.
+- No current Dense/BM25/Symbol/Entity/Hybrid route can claim complete cold/warm control through the repository's existing adapters. The formal suite registry blocker remains in force. This change does not lower the formal gate or change any quality threshold.
+- No database, Qdrant, provider, Test split, or paid inference was used for these changes. The tests use isolated memory fixtures; the real Graph controller is exercised against a memory GraphStore.
+
+### Focused verification and Git
+
+- Exact tracked scope: `src/knowledge_weaver/retrieval/cache_state.py`, `src/knowledge_weaver/retrieval/__init__.py`, `src/knowledge_weaver/graph/retriever.py`, `src/knowledge_weaver/evaluation/executors.py`, `src/knowledge_weaver/evaluation/runs.py`, `src/knowledge_weaver/evaluation/runner.py`, `src/knowledge_weaver/evaluation/suite_registry.py`, `tests/b04/test_cache_state.py`, `tests/b07/test_dense_dev_executor.py`, `tests/b07/test_generation_binding.py`, `tests/b07/test_final_pipeline.py`, `tests/b07/test_suite_registry.py`, this delivery record, and `docs/changes/CR-B07-B04-CACHE-STATE-PORT-v1-20261125.md`.
+- Targeted regressions cover cold reset repeatability, fixed warm-up order, actual Graph snapshot cache reset/prewarm, incomplete scope, missing receipts, wrong config hash, retry receipt retention, complete-attempt receipt requirement, and preservation of the formal suite registry blocker. Final run: 66 passed in 3.80 s; Ruff and `git diff --check` passed. Shared-venv pytest used the per-process Windows Selector event-loop policy; no dependency was synchronized.
+
 ## Continuation: B03 empty Entity/Relation member hashes — 2026-11-25
 
 ### Contract and minimal change

@@ -24,6 +24,28 @@ from knowledge_weaver.evaluation.scheduling import (
     valid_generation_binding,
 )
 from knowledge_weaver.models.contracts import Generation, GenerationState
+from knowledge_weaver.retrieval.cache_state import CacheStateOperation, CacheStateReceipt
+
+
+def _cache_receipt(cache_state: Literal["cold", "warm"]) -> CacheStateReceipt:
+    return CacheStateReceipt(
+        route_id="retriever.test",
+        requested_state=cache_state,
+        applied_state=cache_state,
+        implementation_sha256="a" * 64,
+        config_sha256="b" * 64,
+        controlled_components=("test.cache",),
+        warmup_sequence=("test.cache",),
+        operations=(
+            CacheStateOperation(
+                sequence=1,
+                component_id="test.cache",
+                operation="reset" if cache_state == "cold" else "warm",
+                verified=True,
+            ),
+        ),
+        complete=True,
+    )
 
 
 def _make_generation() -> tuple[Generation, str]:
@@ -269,6 +291,7 @@ class _IdentityExecutor:
             model_revision="fixture-v1",
             count_kind="unavailable",
             cache_state=cache_state,
+            cache_state_receipt=_cache_receipt(cache_state),
             measurements=QueryMeasurements(),
             execution_generation_id=generation.id,
             execution_generation_sha256=generation_sha256,

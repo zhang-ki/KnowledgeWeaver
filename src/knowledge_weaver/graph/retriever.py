@@ -200,6 +200,22 @@ class GraphRetriever:
             partial=partial,
             usage=self._usage(started),
         )
+    @property
+    def snapshot_cache_size(self) -> int:
+        return len(self._snapshot_cache)
+
+    def reset_snapshot_cache(self) -> None:
+        """Clear this process's graph-snapshot cache and leave it empty."""
+        self._snapshot_cache.clear()
+
+    def has_snapshot_cache(self, context: QueryContext) -> bool:
+        return _cache_key(context) in self._snapshot_cache
+
+    async def prewarm_snapshot_cache(self, context: QueryContext) -> bool:
+        """Load and verify the graph view used by the next matching retrieval."""
+        await self._get_graph_view(context)
+        return self.has_snapshot_cache(context)
+
     async def _get_graph_view(self, context: QueryContext) -> _GraphView:
         key = _cache_key(context)
         cached = self._snapshot_cache.get(key)
