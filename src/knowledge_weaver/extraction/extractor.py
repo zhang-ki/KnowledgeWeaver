@@ -11,7 +11,15 @@ from knowledge_weaver.ports import GenerationProvider
 from .ast_extractor import extract_static_python
 from .text_extractor import StructuredTextExtractor
 
-EXTRACTION_OBSERVATION_PREFIX = "EXTRACTION_OBSERVATION_V1:"
+EXTRACTION_OBSERVATION_PREFIX = "EXTRACTION_OBSERVATION_V2:"
+
+_PROVIDER_FAILURE_CODES = {
+    "PROVIDER_TIMEOUT",
+    "PROVIDER_ERROR",
+    "SCHEMA_REPAIR_TIMEOUT",
+    "SCHEMA_REPAIR_FAILED",
+}
+_STRUCTURE_REJECTION_CODES = {"LLM_SCHEMA_INVALID", "AST_PARSE_FAILED"}
 
 
 def _is_python_source(
@@ -45,18 +53,32 @@ def _observation(
     accepted_entities = len(result.entities)
     accepted_mentions = len(result.mentions)
     accepted_relations = len(result.relations)
+    accepted_item_count = accepted_entities + accepted_mentions + accepted_relations
+    rejection_codes = {item.code for item in result.rejected_items}
     if corpus_id is None:
         outcome = "NOT_ATTEMPTED_MISSING_CORPUS_SCOPE"
     elif provider_required and not provider_configured:
         outcome = "PROVIDER_NOT_CONFIGURED"
     elif valid_leaf_chunks == 0:
         outcome = "NOT_ATTEMPTED_NO_LEAF_CHUNKS"
-    elif accepted_entities + accepted_mentions + accepted_relations:
-        outcome = "EXECUTED_WITH_CANDIDATES"
+    elif rejection_codes & _PROVIDER_FAILURE_CODES:
+        outcome = (
+            "PARTIAL_PROVIDER_FAILURE" if accepted_item_count else "PROVIDER_FAILED"
+        )
+    elif rejection_codes & _STRUCTURE_REJECTION_CODES:
+        outcome = (
+            "PARTIAL_STRUCTURE_REJECTION"
+            if accepted_item_count
+            else "STRUCTURE_REJECTED"
+        )
+    elif accepted_relations:
+        outcome = "EXECUTED_WITH_RELATIONS"
+    elif result.rejected_items:
+        outcome = "EXECUTED_NO_RELATIONS_WITH_REJECTIONS"
     else:
-        outcome = "EXECUTED_NO_CANDIDATES"
+        outcome = "EXECUTED_NO_RELATIONS"
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_id": request.document.source_id,
         "document_id": request.document.id,
         "source_kind": source_kind.value if source_kind is not None else "UNKNOWN",
@@ -68,7 +90,7 @@ def _observation(
         "accepted_mention_count": accepted_mentions,
         "accepted_relation_count": accepted_relations,
         "rejected_item_count": len(result.rejected_items),
-        "rejection_codes": sorted({item.code for item in result.rejected_items}),
+        "rejection_codes": sorted(rejection_codes),
     }
     return EXTRACTION_OBSERVATION_PREFIX + json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")

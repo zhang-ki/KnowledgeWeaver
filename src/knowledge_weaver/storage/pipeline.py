@@ -81,7 +81,7 @@ if TYPE_CHECKING:
     from .database import Database
 
 
-_EXTRACTION_ROUTING_PROFILE_VERSION = "kw-extraction-routing-v1"
+_EXTRACTION_ROUTING_PROFILE_VERSION = "kw-extraction-routing-v2"
 
 
 def _source_extraction_profile_sha256(

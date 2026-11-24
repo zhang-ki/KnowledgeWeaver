@@ -125,7 +125,7 @@ def test_source_extraction_profile_and_report_observations_are_bound() -> None:
         {structured_profile, normative_profile, configured_profile, code_profile}
     ) == 4
 
-    observation = EXTRACTION_OBSERVATION_PREFIX + '{"schema_version":1,"lane":"NORMATIVE_TEXT","outcome":"PROVIDER_NOT_CONFIGURED"}'
+    observation = EXTRACTION_OBSERVATION_PREFIX + '{"schema_version":2,"lane":"NORMATIVE_TEXT","outcome":"PROVIDER_NOT_CONFIGURED"}'
     result = ExtractionResult(
         document_id=str(uuid4()),
         chunk_ids=[],

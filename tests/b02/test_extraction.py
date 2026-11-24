@@ -110,7 +110,7 @@ def extraction_observation(result) -> dict[str, Any]:
     warnings = [
         item
         for item in result.warnings
-        if item.startswith("EXTRACTION_OBSERVATION_V1:")
+        if item.startswith("EXTRACTION_OBSERVATION_V2:")
     ]
     assert len(warnings) == 1
     return json.loads(warnings[0].split(":", 1)[1])
@@ -503,7 +503,8 @@ async def test_normative_specification_uses_separate_provenance_and_exact_modali
     assert all(item.quote == text for item in result.evidence)
     observation = extraction_observation(result)
     assert observation["lane"] == "NORMATIVE_TEXT"
-    assert observation["outcome"] == "EXECUTED_WITH_CANDIDATES"
+    assert observation["schema_version"] == 2
+    assert observation["outcome"] == "EXECUTED_WITH_RELATIONS"
     assert observation["provider_configured"] is True
 
 
@@ -624,7 +625,82 @@ async def test_source_type_and_normative_metadata_drive_text_routing_and_outcome
     empty_observation = extraction_observation(executed_empty)
     assert len(empty_provider.calls) == 1
     assert empty_observation["lane"] == "STRUCTURED_TEXT"
-    assert empty_observation["outcome"] == "EXECUTED_NO_CANDIDATES"
+    assert empty_observation["schema_version"] == 2
+    assert empty_observation["outcome"] == "EXECUTED_NO_RELATIONS"
+    assert empty_observation["accepted_entity_count"] == 0
+    assert empty_observation["accepted_mention_count"] == 0
+    assert empty_observation["accepted_relation_count"] == 0
+    assert empty_observation["rejected_item_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_entity_only_output_is_successful_without_a_relation() -> None:
+    request, _chunk = make_request("Alpha is a concept.\n")
+    provider = QueueProvider(
+        [
+            {
+                "entities": [
+                    {
+                        "local_id": "alpha",
+                        "name": "Alpha",
+                        "kind": "concept",
+                        "mentions": [{"surface_form": "Alpha", "quote": "Alpha"}],
+                        "aliases": [],
+                    }
+                ],
+                "relations": [],
+            }
+        ]
+    )
+    result = await KnowledgeExtractor(provider, corpus_id=CORPUS_ID).extract(request)
+
+    observation = extraction_observation(result)
+    assert observation["outcome"] == "EXECUTED_NO_RELATIONS"
+    assert observation["accepted_entity_count"] == 1
+    assert observation["accepted_mention_count"] == 1
+    assert observation["accepted_relation_count"] == 0
+    assert observation["rejected_item_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_outputs_and_provider_failures_have_distinct_outcomes() -> None:
+    request, chunk = make_request("Alpha is a concept.\n")
+    entity_only = {
+        "entities": [
+            {
+                "local_id": "alpha",
+                "name": "Alpha",
+                "kind": "concept",
+                "mentions": [{"surface_form": "Alpha", "quote": "Alpha"}],
+                "aliases": [],
+            }
+        ],
+        "relations": [],
+    }
+    timeout_result = await KnowledgeExtractor(
+        QueueProvider([ProviderUnavailable("timed out", category="timeout")]),
+        corpus_id=CORPUS_ID,
+    ).extract(request)
+    timeout_observation = extraction_observation(timeout_result)
+    assert timeout_observation["outcome"] == "PROVIDER_FAILED"
+    assert "PROVIDER_TIMEOUT" in timeout_observation["rejection_codes"]
+
+    second_chunk = chunk.model_copy(
+        update={"id": "00000000-0000-4000-8000-000000000202"}
+    )
+    partial_request = request.model_copy(update={"chunks": [chunk, second_chunk]})
+    partial_result = await KnowledgeExtractor(
+        QueueProvider(
+            [entity_only, ProviderUnavailable("timed out", category="timeout")]
+        ),
+        corpus_id=CORPUS_ID,
+    ).extract(partial_request)
+    partial_observation = extraction_observation(partial_result)
+    assert partial_observation["outcome"] == "PARTIAL_PROVIDER_FAILURE"
+    assert partial_observation["accepted_entity_count"] == 1
+    assert partial_observation["accepted_mention_count"] >= 1
+    assert partial_observation["accepted_relation_count"] == 0
+    assert "PROVIDER_TIMEOUT" in partial_observation["rejection_codes"]
 
 
 @pytest.mark.asyncio
@@ -636,7 +712,7 @@ async def test_python_source_kind_overrides_file_suffix_for_lane_selection() -> 
     ).extract(request)
     observation = extraction_observation(result)
     assert observation["lane"] == "PYTHON_AST"
-    assert observation["outcome"] == "EXECUTED_NO_CANDIDATES"
+    assert observation["outcome"] == "STRUCTURE_REJECTED"
     assert "AST_PARSE_FAILED" in observation["rejection_codes"]
 
 
@@ -843,6 +919,7 @@ async def test_schema_repair_is_limited_to_one_attempt_and_provider_timeout_is_a
     ).extract(request)
     assert len(repair_provider.calls) == 2
     assert any(item.code == "LLM_SCHEMA_INVALID" for item in repaired.rejected_items)
+    assert extraction_observation(repaired)["outcome"] == "STRUCTURE_REJECTED"
 
     missing_json_provider = QueueProvider([None, valid_empty])
     missing_json_result = await KnowledgeExtractor(
@@ -867,12 +944,23 @@ async def test_schema_repair_is_limited_to_one_attempt_and_provider_timeout_is_a
         repair_timeout_provider, corpus_id=CORPUS_ID, max_schema_repairs=1
     ).extract(request)
     assert any(item.code == "SCHEMA_REPAIR_TIMEOUT" for item in repair_timeout.rejected_items)
+    assert extraction_observation(repair_timeout)["outcome"] == "PROVIDER_FAILED"
 
     timeout_provider = QueueProvider([valid_empty], delay=0.05)
     timed_out = await KnowledgeExtractor(
         timeout_provider, corpus_id=CORPUS_ID, timeout_seconds=0.001
     ).extract(request)
     assert any(item.code == "PROVIDER_TIMEOUT" for item in timed_out.rejected_items)
+    assert extraction_observation(timed_out)["outcome"] == "PROVIDER_FAILED"
+
+    error_provider = QueueProvider(
+        [ProviderUnavailable("offline", category="unavailable")]
+    )
+    provider_error = await KnowledgeExtractor(
+        error_provider, corpus_id=CORPUS_ID
+    ).extract(request)
+    assert extraction_observation(provider_error)["outcome"] == "PROVIDER_FAILED"
+    assert "PROVIDER_ERROR" in extraction_observation(provider_error)["rejection_codes"]
 
 
 @pytest.mark.asyncio
