@@ -277,6 +277,17 @@ def build_report(
     matrix_manifest: Mapping[str, Any], records: Sequence[QueryRunRecord]
 ) -> dict[str, Any]:
     schedule = matrix_manifest.get("schedule", matrix_manifest)
+    schedule_mode = schedule.get("gold_mapping_mode")
+    display_only = schedule_mode == "LEGACY_COMPATIBILITY"
+    execution_mode = "LEGACY_DISPLAY_ONLY" if display_only else "FORMAL_G3"
+    manifest_mode = matrix_manifest.get("execution_mode")
+    if manifest_mode is not None and manifest_mode != execution_mode:
+        raise ValueError("matrix execution mode differs from the scheduled Gold mapping mode")
+    manifest_display_only = matrix_manifest.get("display_only")
+    if manifest_display_only is not None and manifest_display_only is not display_only:
+        raise ValueError("matrix display-only flag differs from the scheduled Gold mapping mode")
+    if display_only and matrix_manifest.get("formal_quality_eligible") is True:
+        raise ValueError("legacy compatibility reports cannot claim formal quality eligibility")
     manifest_generation_id = matrix_manifest.get("generation_id")
     manifest_generation_sha256 = matrix_manifest.get("generation_sha256")
     schedule_generation_id = schedule.get("generation_id")
@@ -332,10 +343,23 @@ def build_report(
     failed_count = sum(item.get("status") == "FAILED" for item in suite_statuses)
     complete_count = sum(item.get("status") == "COMPLETE" for item in suite_statuses)
     status = matrix_manifest.get("status", schedule.get("status", "BLOCKED"))
-    summary = summarize_query_runs(records)
+    report_records = (
+        [record.model_copy(update={"formal_quality_eligible": False}) for record in records]
+        if display_only
+        else records
+    )
+    summary = summarize_query_runs(report_records)
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": status,
+        "execution_mode": execution_mode,
+        "display_only": display_only,
+        "formal_quality_eligible": (
+            not display_only
+            and bool(records)
+            and all(record.formal_quality_eligible for record in records)
+            and status == "COMPLETE"
+        ),
         "generation_id": generation_id,
         "generation_sha256": generation_sha256,
         **{
@@ -352,32 +376,45 @@ def build_report(
         "failed_suite_count": failed_count,
         "complete_suite_count": complete_count,
         "expected_query_runs": matrix_manifest.get("expected_query_runs", schedule.get("expected_query_runs")),
-        "expected_quality_query_runs": matrix_manifest.get(
-            "expected_quality_query_runs", schedule.get("expected_quality_query_runs")
+        "expected_quality_query_runs": (
+            0
+            if display_only
+            else matrix_manifest.get(
+                "expected_quality_query_runs", schedule.get("expected_quality_query_runs")
+            )
         ),
         "query_record_count": len(records),
         "blockers": matrix_manifest.get("blockers", schedule.get("blockers", [])),
         "missing_runs": matrix_manifest.get("missing_runs", schedule.get("missing_runs", [])),
         **summary,
-        "standard_paired_comparisons": paired_system_comparisons(records),
-        "standard_quality_cost_pareto": system_pareto_frontier(records),
+        "standard_paired_comparisons": (
+            [] if display_only else paired_system_comparisons(report_records)
+        ),
+        "standard_quality_cost_pareto": (
+            [] if display_only else system_pareto_frontier(report_records)
+        ),
         "policy_training_summary": matrix_manifest.get("policy_training_summary"),
     }
     return report
 
 
 def render_markdown_report(report: Mapping[str, Any]) -> str:
+    display_only = report.get("display_only") is True or report.get(
+        "execution_mode"
+    ) == "LEGACY_DISPLAY_ONLY"
     lines = [
-        "# B07.final experiment report",
+        "# B07.final compatibility display" if display_only else "# B07.final experiment report",
         "",
+        f"- Mode: **{'DISPLAY_ONLY' if display_only else 'FORMAL_G3'}**",
         f"- Status: **{report.get('status', 'UNKNOWN')}**",
         (
-            f"- Formal suites: {report.get('complete_suite_count', 0)}/"
+            f"- {'Execution' if display_only else 'Formal'} suites: {report.get('complete_suite_count', 0)}/"
             f"{report.get('formal_suite_count', 111)} complete; "
             f"{report.get('blocked_suite_count', 0)} blocked; {report.get('failed_suite_count', 0)} failed"
         ),
         (
-            f"- Quality cases: {report.get('expected_quality_query_runs', 'unknown')}; "
+            f"- {'Formal quality cases' if display_only else 'Quality cases'}: "
+            f"{report.get('expected_quality_query_runs', 'unknown')}; "
             f"query executions across cache states: {report.get('query_record_count', 0)} "
             f"(expected {report.get('expected_query_runs', 'unknown')})"
         ),
@@ -413,32 +450,56 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         )
     summaries = report.get("suite_summaries", [])
     if summaries:
-        lines.extend(
-            [
-                "## Suite metrics and usage",
-                "",
-                "| Suite and cache | Queries | Failures | Evidence recall | Answer correctness (0–2) | Tokens | USD | CNY | Latency p50/p95 ms |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
-            ]
-        )
-        for item in summaries:
-            lines.append(
-                "| {suite} ({cache}) | {count} | {failed} | {recall} | {correct} | {tokens} | {usd} | {cny} | {p50}/{p95} |".format(
-                    suite=item["suite_id"],
-                    cache=item["cache_state"],
-                    count=item["query_count"],
-                    failed=item["failed_query_count"],
-                    recall=item["mean_evidence_recall"],
-                    correct=item["answer_correctness_mean_0_to_2"],
-                    tokens=item["total_tokens"],
-                    usd=item["currency_cost_usd"],
-                    cny=item["currency_cost_cny"],
-                    p50=item["end_to_end_latency_p50_ms"],
-                    p95=item["end_to_end_latency_p95_ms"],
-                )
+        if display_only:
+            lines.extend(
+                [
+                    "## Suite usage (display only)",
+                    "",
+                    "| Suite and cache | Queries | Failures | Tokens | USD | CNY | Latency p50/p95 ms |",
+                    "|---|---:|---:|---:|---:|---:|---:|",
+                ]
             )
+            for item in summaries:
+                lines.append(
+                    "| {suite} ({cache}) | {count} | {failed} | {tokens} | {usd} | {cny} | {p50}/{p95} |".format(
+                        suite=item["suite_id"],
+                        cache=item["cache_state"],
+                        count=item["query_count"],
+                        failed=item["failed_query_count"],
+                        tokens=item["total_tokens"],
+                        usd=item["currency_cost_usd"],
+                        cny=item["currency_cost_cny"],
+                        p50=item["end_to_end_latency_p50_ms"],
+                        p95=item["end_to_end_latency_p95_ms"],
+                    )
+                )
+        else:
+            lines.extend(
+                [
+                    "## Suite metrics and usage",
+                    "",
+                    "| Suite and cache | Queries | Failures | Evidence recall | Answer correctness (0–2) | Tokens | USD | CNY | Latency p50/p95 ms |",
+                    "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for item in summaries:
+                lines.append(
+                    "| {suite} ({cache}) | {count} | {failed} | {recall} | {correct} | {tokens} | {usd} | {cny} | {p50}/{p95} |".format(
+                        suite=item["suite_id"],
+                        cache=item["cache_state"],
+                        count=item["query_count"],
+                        failed=item["failed_query_count"],
+                        recall=item["mean_evidence_recall"],
+                        correct=item["answer_correctness_mean_0_to_2"],
+                        tokens=item["total_tokens"],
+                        usd=item["currency_cost_usd"],
+                        cny=item["currency_cost_cny"],
+                        p50=item["end_to_end_latency_p50_ms"],
+                        p95=item["end_to_end_latency_p95_ms"],
+                    )
+                )
         lines.append("")
-    comparisons = report.get("standard_paired_comparisons", [])
+    comparisons = [] if display_only else report.get("standard_paired_comparisons", [])
     if comparisons:
         lines.extend(["## Paired source-family comparisons", ""])
         for item in comparisons:
@@ -450,7 +511,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
                 f"confirmatory={item['confirmatory_family_count']}"
             )
         lines.append("")
-    frontier = report.get("standard_quality_cost_pareto", [])
+    frontier = [] if display_only else report.get("standard_quality_cost_pareto", [])
     if frontier:
         lines.extend(["## Standard-budget quality/cost Pareto frontier", ""])
         for item in frontier:

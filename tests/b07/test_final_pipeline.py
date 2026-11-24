@@ -18,7 +18,11 @@ from knowledge_weaver.evaluation.generation_binding import verify_generation_man
 from knowledge_weaver.evaluation.gold_mapping import GoldMappingReport
 from knowledge_weaver.evaluation.protocol import load_protocol
 from knowledge_weaver.evaluation.redaction import canonical_json_line
-from knowledge_weaver.evaluation.reporting import build_report, summarize_query_runs
+from knowledge_weaver.evaluation.reporting import (
+    build_report,
+    render_markdown_report,
+    summarize_query_runs,
+)
 from knowledge_weaver.evaluation.runner import (
     MatrixExecutionReport,
     _seeded_case_order,
@@ -242,6 +246,47 @@ class _UnexpectedRealExecutor:
         raise AssertionError("generation mismatch must block before provider execution")
 
 
+class _DisplayOnlyRealExecutor:
+    provider_kind = "real"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute_query(
+        self,
+        case,
+        suite,
+        *,
+        attempt: int,
+        cache_state: Literal["cold", "warm"] = "cold",
+        generation: Generation | None = None,
+        generation_sha256: str | None = None,
+    ) -> AttemptOutcome:
+        self.calls += 1
+        assert generation is not None and generation_sha256 is not None
+        return AttemptOutcome(
+            attempt=attempt,
+            status="complete",
+            provider_kind="real",
+            provider_profile="in-memory-regression-stub",
+            model_revision="in-memory-regression-stub-v1",
+            input_tokens=1,
+            output_tokens=1,
+            count_kind="exact",
+            elapsed_ms=1,
+            cache_state=cache_state,
+            executed_generation_id=generation.id,
+            executed_generation_sha256=generation_sha256,
+            measurements=QueryMeasurements(
+                evidence_recall=0.9,
+                citation_precision=1.0,
+                answer_correctness=2,
+                human_reviewer_id="fixture-reviewer",
+                human_reviewed_at=NOW,
+            ),
+        )
+
+
 def _ready_formal_schedule(root: Path):
     protocol = load_protocol(root / "benchmarks/configs/b07_protocol_v1.json")
     dataset = _ready_dataset_for_generation_gate(root)
@@ -381,7 +426,109 @@ def test_legacy_compatibility_entry_remains_explicit_and_labeled() -> None:
 
     assert report.status is SuiteStatus.blocked
     assert report.to_dict()["gold_mapping_mode"] == "LEGACY_COMPATIBILITY"
+    assert report.to_dict()["execution_mode"] == "LEGACY_DISPLAY_ONLY"
+    assert report.to_dict()["display_only"]
+    assert not report.to_dict()["formal_quality_eligible"]
     assert any(item.startswith("BLOCKED_PROVIDER:") for item in report.blockers)
+
+
+def test_legacy_executor_branch_is_display_only_even_with_real_quality_shaped_output() -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, blocked_dataset, _schedule, generation = _ready_formal_schedule(root)
+    template = _fixture()[0]
+    cases = tuple(
+        template.model_copy(
+            update={
+                "case": template.case.model_copy(update={"id": _uuid(500 + index)})
+            }
+        )
+        for index in range(protocol.test_case_minimum)
+    )
+    dataset = LoadedDataset(
+        manifest=blocked_dataset.manifest,
+        cases=cases,
+        summary=DatasetSummary(
+            case_count=100,
+            category_counts={},
+            language_counts={},
+            split_counts={"train": 30, "dev": 30, "test": protocol.test_case_minimum},
+            split_family_counts={"train": 5, "dev": 5, "test": 5},
+            unanswerable_count=10,
+        ),
+    )
+    schedule = build_formal_matrix(
+        protocol,
+        dataset,
+        dependency_commits=REQUIRED_DEPENDENCIES,
+        dependencies_integrated=True,
+        provider_profiles=("deepseek", "qwen-embedding"),
+        provider_ready=True,
+        budget_approved=True,
+        policy_artifact_ready=True,
+        policy_artifact_sha256="b" * 64,
+        generation_id=generation.id,
+        generation_sha256=verify_generation_manifest(generation).generation_sha256,
+    )
+    single_suite = replace(
+        schedule.suites[0],
+        expected_query_runs=protocol.test_case_minimum * 2,
+    )
+    schedule = replace(
+        schedule,
+        suites=(single_suite,),
+        expected_query_runs=protocol.test_case_minimum * 2,
+        expected_quality_query_runs=protocol.test_case_minimum,
+    )
+    generation_sha256 = verify_generation_manifest(generation).generation_sha256
+    mapping = GoldMappingReport(
+        generation_id=generation.id,
+        generation_sha256=generation_sha256,
+        dataset_sha256=schedule.dataset_sha256,
+        span_mappings=(),
+        path_mappings=(),
+        blockers=(),
+    )
+    executor = _DisplayOnlyRealExecutor()
+
+    report = _drive_immediate(
+        run_legacy_matrix_compatibility(
+            schedule,
+            protocol,
+            dataset,
+            mapping,
+            executor,
+            generation_resolver=_GenerationStore(generation),
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.complete
+    assert executor.calls == protocol.test_case_minimum * 2
+    assert report.query_records
+    assert all(not record.formal_quality_eligible for record in report.query_records)
+    manifest = report.to_dict()
+    assert manifest["execution_mode"] == "LEGACY_DISPLAY_ONLY"
+    assert manifest["expected_quality_query_runs"] == 0
+    assert not manifest["formal_quality_eligible"]
+
+    # Legacy artifacts from before this guard may contain quality-shaped records.
+    unsafe_rows = [record.model_copy(update={"formal_quality_eligible": True}) for record in report.query_records]
+    rebuilt = build_report(manifest, unsafe_rows)
+    assert rebuilt["execution_mode"] == "LEGACY_DISPLAY_ONLY"
+    assert rebuilt["expected_quality_query_runs"] == 0
+    assert not rebuilt["formal_quality_eligible"]
+    assert rebuilt["suite_summaries"][0]["formal_quality_query_count"] == 0
+    assert rebuilt["suite_summaries"][0]["mean_evidence_recall"] is None
+    assert rebuilt["standard_paired_comparisons"] == []
+    assert rebuilt["standard_quality_cost_pareto"] == []
+    markdown = render_markdown_report(rebuilt)
+    assert "B07.final compatibility display" in markdown
+    assert "DISPLAY_ONLY" in markdown
+    assert "Suite usage (display only)" in markdown
+    assert "Evidence recall" not in markdown
+    with pytest.raises(ValueError, match="cannot claim formal quality eligibility"):
+        build_report({**manifest, "formal_quality_eligible": True}, unsafe_rows)
 
 
 @pytest.mark.parametrize("mismatch", ["missing_id", "digest"])

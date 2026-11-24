@@ -249,6 +249,39 @@ async def test_ast_distinguishes_explicit_returns_raises_guards_and_fallthrough(
 
 
 @pytest.mark.asyncio
+async def test_ast_relations_retain_enclosing_function_source_evidence() -> None:
+    text = "def target():\n    return None\n\ndef caller():\n    target()\n"
+    request, _chunk = make_request(text, path="src/function_evidence.py")
+
+    result = await KnowledgeExtractor(corpus_id=CORPUS_ID).extract(request)
+
+    evidence_by_id = {item.id: item for item in result.evidence}
+    entities_by_id = {item.id: item for item in result.entities}
+    caller = next(item for item in result.entities if item.canonical_name == "src.function_evidence.caller")
+    target = next(item for item in result.entities if item.canonical_name == "src.function_evidence.target")
+    call = next(
+        item
+        for item in result.relations
+        if item.subject_id == caller.id and item.predicate is RelationPredicate.CALLS
+    )
+    target_return = next(
+        item
+        for item in result.relations
+        if item.subject_id == target.id and item.predicate is RelationPredicate.RETURNS
+    )
+
+    assert entities_by_id[call.object_id].canonical_name == target.canonical_name
+    assert any(
+        evidence_by_id[evidence_id].quote == "def caller():\n    target()"
+        for evidence_id in call.evidence_ids
+    )
+    assert any(
+        evidence_by_id[evidence_id].quote == "def target():\n    return None"
+        for evidence_id in target_return.evidence_ids
+    )
+
+
+@pytest.mark.asyncio
 async def test_ast_retains_guards_on_static_calls() -> None:
     text = (
         "def target():\n"

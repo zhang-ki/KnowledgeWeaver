@@ -607,6 +607,7 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
         self.analyzer = analyzer
         self.frames = analyzer.frames
         self.guards: list[tuple[dict[str, str], ast.expr]] = []
+        self.function_nodes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
 
     @property
     def frame(self) -> _Frame:
@@ -629,9 +630,29 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
             return
         class_entity = self.frame.class_entity
         self.frames.append(_Frame(entity.canonical_name, entity, class_entity))
+        self.function_nodes.append(node)
         for statement in node.body:
             self.visit(statement)
+        self.function_nodes.pop()
         self.frames.pop()
+
+    def _with_enclosing_function_evidence(self, evidence_items: list[Any]) -> list[Any]:
+        if not self.function_nodes:
+            return evidence_items
+        function_node = self.function_nodes[-1]
+        function_range = _node_range(
+            function_node, self.analyzer.text, self.analyzer.line_offsets
+        )
+        if function_range is None:
+            return evidence_items
+        function_evidence = self.analyzer.builder.evidence_at_doc_range(
+            *function_range, self.analyzer.provenance
+        )
+        if function_evidence is None or any(
+            item.id == function_evidence.id for item in evidence_items
+        ):
+            return evidence_items
+        return [*evidence_items, function_evidence]
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         class_entity = self.analyzer.symbols_by_scope.get(self.frame.qualname, {}).get(node.name)
@@ -754,7 +775,7 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
                 else None
             ),
         )
-        relation_evidence = [evidence]
+        relation_evidence = self._with_enclosing_function_evidence([evidence])
         for _guard, guard_expression in self.guards:
             guard_evidence = self.analyzer._expression_evidence(guard_expression)
             if guard_evidence is not None:
@@ -860,7 +881,7 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
             "operation": operation,
             "written_value": self.analyzer._source_text(value).strip(),
         }
-        relation_evidence = [evidence]
+        relation_evidence = self._with_enclosing_function_evidence([evidence])
         if self.guards:
             qualifiers["guard"] = [item for item, _expression in self.guards]
             for _guard, guard_expression in self.guards:
@@ -953,6 +974,9 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
                     guard_evidence = self.analyzer._expression_evidence(guard_expression)
                     if guard_evidence is not None:
                         relation_evidence.append(guard_evidence)
+            relation_evidence = self._with_enclosing_function_evidence(
+                relation_evidence
+            )
             self.analyzer.builder.add_relation(
                 self.frame.entity,
                 RelationPredicate.CALLS,

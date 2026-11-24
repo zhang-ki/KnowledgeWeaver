@@ -79,6 +79,27 @@ class MatrixExecutionReport:
             raise ValueError("matrix and per-query generation identities must match")
 
     @property
+    def execution_mode(self) -> str:
+        return (
+            "LEGACY_DISPLAY_ONLY"
+            if self.schedule.gold_mapping_mode == "LEGACY_COMPATIBILITY"
+            else "FORMAL_G3"
+        )
+
+    @property
+    def display_only(self) -> bool:
+        return self.execution_mode == "LEGACY_DISPLAY_ONLY"
+
+    @property
+    def formal_quality_eligible(self) -> bool:
+        return (
+            not self.display_only
+            and self.status is SuiteStatus.complete
+            and bool(self.query_records)
+            and all(record.formal_quality_eligible for record in self.query_records)
+        )
+
+    @property
     def missing_runs(self) -> tuple[str, ...]:
         return tuple(
             suite.suite_id
@@ -88,8 +109,11 @@ class MatrixExecutionReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "status": self.status.value,
+            "execution_mode": self.execution_mode,
+            "display_only": self.display_only,
+            "formal_quality_eligible": self.formal_quality_eligible,
             "generation_id": self.schedule.generation_id,
             "generation_sha256": self.schedule.generation_sha256,
             "dataset_id": self.schedule.dataset_id,
@@ -103,6 +127,9 @@ class MatrixExecutionReport:
             "gold_mapping_mode": self.schedule.gold_mapping_mode,
             "formal_suite_count": len(self.schedule.suites),
             "expected_query_runs": self.schedule.expected_query_runs,
+            "expected_quality_query_runs": (
+                0 if self.display_only else self.schedule.expected_quality_query_runs
+            ),
             "completed_query_records": len(self.query_records),
             "missing_runs": list(self.missing_runs),
             "blockers": list(self.blockers),
@@ -384,7 +411,7 @@ async def _run_matrix(
                     executor,
                     case,
                     suite,
-                    formal_dataset=True,
+                    formal_dataset=not compatibility_mode,
                     cache_state=cache_state,
                     generation_binding=verified_generation,
                     retry_delay_seconds=retry_delay_seconds,
@@ -408,7 +435,7 @@ async def _run_matrix(
         incomplete_quality_cases = tuple(
             f"{item.case_id}@{item.cache_state}"
             for item in suite_records
-            if not item.formal_quality_eligible
+            if not compatibility_mode and not item.formal_quality_eligible
         )
         suite_statuses.append(
             SuiteExecutionStatus(
