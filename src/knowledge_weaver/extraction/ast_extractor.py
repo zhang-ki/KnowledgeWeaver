@@ -606,6 +606,7 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
     def __init__(self, analyzer: _StaticExtractor) -> None:
         self.analyzer = analyzer
         self.frames = analyzer.frames
+        self.guards: list[tuple[dict[str, str], ast.expr]] = []
 
     @property
     def frame(self) -> _Frame:
@@ -681,6 +682,252 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
                 [evidence],
             )
 
+    def _outcome_entity(
+        self,
+        expression: ast.expr | None,
+        *,
+        label: str,
+        kind: EntityKind,
+        evidence: Any,
+        mention_surface: str | None = None,
+    ) -> Entity:
+        if expression is not None:
+            surface = self.analyzer._source_text(expression)
+        elif label == "return-value":
+            surface = "None"
+        else:
+            surface = label
+        canonical_name = surface.strip() or label
+        identity = _identity_key(
+            self.analyzer.document.source_id,
+            self.analyzer.document.relative_path,
+            f"{self.frame.qualname}::{label}:{canonical_name}",
+            kind,
+        )
+        entity = self.analyzer.builder.add_entity(
+            kind,
+            canonical_name,
+            _namespace(self.analyzer.document.source_id),
+            identity,
+        )
+        self.analyzer.builder.add_mention(
+            entity,
+            evidence,
+            mention_surface or surface or "return",
+        )
+        return entity
+
+    def _outcome_evidence(self, node: ast.Return | ast.Raise) -> Any | None:
+        source_range = _node_range(node, self.analyzer.text, self.analyzer.line_offsets)
+        if source_range is None:
+            return None
+        return self.analyzer.builder.evidence_at_doc_range(
+            *source_range, self.analyzer.provenance
+        )
+
+    def _add_outcome(
+        self,
+        node: ast.Return | ast.Raise,
+        *,
+        predicate: RelationPredicate,
+        expression: ast.expr | None,
+        object_kind: EntityKind,
+        label: str,
+        outcome_kind: str,
+        result_role: str,
+    ) -> None:
+        evidence = self._outcome_evidence(node)
+        if evidence is None:
+            self.analyzer.builder.reject(
+                "OUTCOME_SOURCE_SPAN_UNAVAILABLE",
+                f"No source-backed span covers a {predicate.value} outcome at line {node.lineno}.",
+            )
+            return
+        target = self._outcome_entity(
+            expression,
+            label=label,
+            kind=object_kind,
+            evidence=evidence,
+            mention_surface=(
+                "return"
+                if expression is None and predicate is RelationPredicate.RETURNS
+                else None
+            ),
+        )
+        relation_evidence = [evidence]
+        for _guard, guard_expression in self.guards:
+            guard_evidence = self.analyzer._expression_evidence(guard_expression)
+            if guard_evidence is not None:
+                relation_evidence.append(guard_evidence)
+        qualifiers: dict[str, Any] = {}
+        if self.guards:
+            qualifiers["guard"] = [item for item, _expression in self.guards]
+        qualifiers["outcome_kind"] = outcome_kind
+        qualifiers["result_role"] = result_role
+        self.analyzer.builder.add_relation(
+            self.frame.entity,
+            predicate,
+            target,
+            Polarity.positive,
+            qualifiers,
+            self.analyzer.provenance,
+            relation_evidence,
+        )
+
+    def visit_If(self, node: ast.If) -> None:
+        condition = self.analyzer._source_text(node.test).strip()
+        self.visit(node.test)
+        self.guards.append(({"condition": condition, "branch": "true"}, node.test))
+        for statement in node.body:
+            self.visit(statement)
+        self.guards.pop()
+        if node.orelse:
+            self.guards.append(({"condition": condition, "branch": "false"}, node.test))
+            for statement in node.orelse:
+                self.visit(statement)
+            self.guards.pop()
+
+    def visit_Return(self, node: ast.Return) -> None:
+        expression = node.value
+        self._add_outcome(
+            node,
+            predicate=RelationPredicate.RETURNS,
+            expression=expression,
+            object_kind=EntityKind.concept,
+            label="return-value",
+            outcome_kind="RETURN_VALUE",
+            result_role="return_value",
+        )
+        if expression is not None:
+            self.visit(expression)
+
+    def visit_Raise(self, node: ast.Raise) -> None:
+        expression = node.exc
+        if expression is None:
+            self.analyzer.builder.reject(
+                "RERAISE_TARGET_UNRESOLVED",
+                f"Bare re-raise target is context-dependent at line {node.lineno}; no RAISES edge was emitted.",
+            )
+            return
+        raised_type = expression.func if isinstance(expression, ast.Call) else expression
+        self._add_outcome(
+            node,
+            predicate=RelationPredicate.RAISES,
+            expression=raised_type,
+            object_kind=EntityKind.class_ if isinstance(expression, ast.Call) else EntityKind.concept,
+            label="raised-exception",
+            outcome_kind="EXCEPTION",
+            result_role="exception",
+        )
+        self.visit(expression)
+
+    def _assignment_evidence(self, node: ast.AST) -> Any | None:
+        source_range = _node_range(node, self.analyzer.text, self.analyzer.line_offsets)
+        if source_range is None:
+            return None
+        return self.analyzer.builder.evidence_at_doc_range(
+            *source_range, self.analyzer.provenance
+        )
+
+    def _emit_state_update(self, node: ast.AST, target: ast.expr, value: ast.expr) -> None:
+        if self.frame.entity.kind is not EntityKind.function:
+            return
+        if self.frame.qualname.rsplit(".", 1)[-1] == "__init__":
+            return
+        if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name):
+            return
+        if target.value.id not in {"self", "cls"}:
+            return
+        evidence = self._assignment_evidence(node)
+        if evidence is None:
+            self.analyzer.builder.reject(
+                "STATE_UPDATE_SOURCE_SPAN_UNAVAILABLE",
+                f"No source-backed span covers a state assignment at line {getattr(node, 'lineno', 1)}.",
+            )
+            return
+        state = self._outcome_entity(
+            target,
+            label="state-target",
+            kind=EntityKind.concept,
+            evidence=evidence,
+        )
+        operation = (
+            f"AUGMENTED_{type(node.op).__name__.upper()}"
+            if isinstance(node, ast.AugAssign)
+            else "ASSIGN"
+        )
+        qualifiers: dict[str, Any] = {
+            "operation": operation,
+            "written_value": self.analyzer._source_text(value).strip(),
+        }
+        relation_evidence = [evidence]
+        if self.guards:
+            qualifiers["guard"] = [item for item, _expression in self.guards]
+            for _guard, guard_expression in self.guards:
+                guard_evidence = self.analyzer._expression_evidence(guard_expression)
+                if guard_evidence is not None:
+                    relation_evidence.append(guard_evidence)
+        self.analyzer.builder.add_relation(
+            self.frame.entity,
+            RelationPredicate.UPDATES,
+            state,
+            Polarity.positive,
+            qualifiers,
+            self.analyzer.provenance,
+            relation_evidence,
+        )
+
+    def _emit_literal_mapping(self, node: ast.AST, target: ast.expr, value: ast.expr) -> None:
+        if not isinstance(target, ast.Name) or not isinstance(value, ast.Dict):
+            return
+        evidence = self._assignment_evidence(node)
+        if evidence is None:
+            return
+        mapping_entity = self._outcome_entity(
+            target,
+            label="mapping-table",
+            kind=EntityKind.concept,
+            evidence=evidence,
+        )
+        for key_node, value_node in zip(value.keys, value.values, strict=True):
+            if key_node is None or not isinstance(key_node, ast.Constant):
+                continue
+            if not isinstance(key_node.value, (str, int, bool)):
+                continue
+            if not isinstance(value_node, (ast.Constant, ast.Name, ast.Attribute)):
+                continue
+            target_entity = self._outcome_entity(
+                value_node,
+                label="mapping-value",
+                kind=EntityKind.concept,
+                evidence=evidence,
+            )
+            self.analyzer.builder.add_relation(
+                mapping_entity,
+                RelationPredicate.MAPS_TO,
+                target_entity,
+                Polarity.positive,
+                {"key": key_node.value},
+                self.analyzer.provenance,
+                [evidence],
+            )
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            self._emit_state_update(node, target, node.value)
+            self._emit_literal_mapping(node, target, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self._emit_state_update(node, node.target, node.value)
+            self._emit_literal_mapping(node, node.target, node.value)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._emit_state_update(node, node.target, node.value)
+        self.generic_visit(node)
+
     def visit_Call(self, node: ast.Call) -> None:
         evidence = self.analyzer._expression_evidence(node)
         target: Entity | None = None
@@ -698,14 +945,22 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
         else:
             surface = ast.get_source_segment(self.analyzer.text, node.func) or target.canonical_name
             self.analyzer.builder.add_mention(target, evidence, surface)
+            relation_evidence = [evidence]
+            qualifiers: dict[str, Any] = {"resolution": "static_symbol"}
+            if self.guards:
+                qualifiers["guard"] = [item for item, _expression in self.guards]
+                for _guard, guard_expression in self.guards:
+                    guard_evidence = self.analyzer._expression_evidence(guard_expression)
+                    if guard_evidence is not None:
+                        relation_evidence.append(guard_evidence)
             self.analyzer.builder.add_relation(
                 self.frame.entity,
                 RelationPredicate.CALLS,
                 target,
                 Polarity.positive,
-                {"resolution": "static_symbol"},
+                qualifiers,
                 self.analyzer.provenance,
-                [evidence],
+                relation_evidence,
             )
         self.generic_visit(node)
 

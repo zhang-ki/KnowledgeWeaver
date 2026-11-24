@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections import Counter, defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -14,6 +14,8 @@ from pydantic import ValidationError
 from knowledge_weaver.evaluation.contracts import (
     DatasetManifest,
     DatasetStatus,
+    GoldRelationExpectation,
+    GoldRelationExpectationManifest,
     PreparedBenchmarkCase,
     SourceAsset,
     canonical_json_hash,
@@ -40,6 +42,7 @@ class LoadedDataset:
     manifest: DatasetManifest
     cases: tuple[PreparedBenchmarkCase, ...]
     summary: DatasetSummary | None
+    relation_expectations: dict[str, GoldRelationExpectation] = field(default_factory=dict)
 
     @property
     def ready(self) -> bool:
@@ -212,6 +215,42 @@ def load_dataset(
             raise DatasetValidationError("cases JSONL count does not match the manifest")
         _verify_source_hashes(root, manifest.sources)
         summary = validate_dataset(manifest, cases)
+        relation_expectations: dict[str, GoldRelationExpectation] = {}
+        if manifest.relation_expectations_file is not None:
+            expectations_file = _resolve_inside(root, manifest.relation_expectations_file)
+            expectations_bytes = expectations_file.read_bytes()
+            if hashlib.sha256(expectations_bytes).hexdigest() != manifest.relation_expectations_sha256:
+                raise DatasetValidationError(
+                    "relation expectation hash does not match the dataset manifest"
+                )
+            expectation_manifest = GoldRelationExpectationManifest.model_validate_json(
+                expectations_bytes
+            )
+            if (
+                expectation_manifest.dataset_id != manifest.dataset_id
+                or expectation_manifest.dataset_version != manifest.dataset_version
+            ):
+                raise DatasetValidationError(
+                    "relation expectation manifest does not match the frozen dataset version"
+                )
+            referenced_relation_ids = {
+                edge.relation_id
+                for prepared in cases
+                for path in prepared.gold_paths
+                for edge in path.edges
+            }
+            relation_expectations = {
+                item.relation_id: item for item in expectation_manifest.expectations
+            }
+            if not set(relation_expectations).issubset(referenced_relation_ids):
+                raise DatasetValidationError(
+                    "relation expectations must reference relations used by reviewed Gold paths"
+                )
     except (OSError, ValidationError, RuntimeError) as exc:
         raise DatasetValidationError(f"dataset content is invalid: {exc}") from exc
-    return LoadedDataset(manifest=manifest, cases=cases, summary=summary)
+    return LoadedDataset(
+        manifest=manifest,
+        cases=cases,
+        summary=summary,
+        relation_expectations=relation_expectations,
+    )

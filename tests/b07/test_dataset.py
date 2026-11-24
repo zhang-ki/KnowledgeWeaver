@@ -11,7 +11,13 @@ from pydantic import ValidationError
 from knowledge_weaver.evaluation.contracts import (
     DatasetManifest,
     DatasetStatus,
+    GoldEndpointExpectation,
+    GoldEvidenceBasis,
+    GoldOutcomeKind,
     GoldPathEdge,
+    GoldQualifierReviewState,
+    GoldRelationExpectation,
+    GoldRelationExpectationManifest,
     HumanReview,
     PermissionScope,
     PreparedBenchmarkCase,
@@ -31,7 +37,10 @@ from knowledge_weaver.models.contracts import (
     BenchmarkCase,
     BenchmarkCategory,
     BenchmarkGold,
+    EntityKind,
     Language,
+    Polarity,
+    RelationPredicate,
     Split,
 )
 
@@ -368,6 +377,134 @@ def test_frozen_loader_checks_case_and_original_source_hashes(tmp_path: Path) ->
     first_source = manifest.sources[0]
     (tmp_path / Path(*first_source.material_path.split("/"))).write_bytes(b"tampered")
     with pytest.raises(DatasetValidationError, match="source hash mismatch"):
+        load_dataset(tmp_path)
+
+
+def test_frozen_loader_reads_versioned_relation_expectation_sidecar(tmp_path: Path) -> None:
+    manifest, cases = _valid_frozen_dataset()
+    prepared = cases[1]
+    relation_id = _uuid(9200)
+    reviewed_path = ReviewedGoldPath(
+        edges=[
+            GoldPathEdge(
+                relation_id=relation_id,
+                traversed_reverse=False,
+                evidence_quote_sha256=[prepared.gold_quote_sha256[0]],
+            )
+        ]
+    )
+    case = prepared.case.model_copy(update={"gold_paths": [[relation_id]]})
+    review_hash = human_review_digest(
+        case,
+        prepared.source_ids,
+        prepared.gold_quote_sha256,
+        prepared.human_review.reviewer_id,
+        prepared.human_review.reviewed_at,
+        prepared.human_review.checklist,
+        [reviewed_path],
+        prepared.source_record_sha256,
+    )
+    cases[1] = PreparedBenchmarkCase(
+        case=case,
+        source_ids=prepared.source_ids,
+        source_record_sha256=prepared.source_record_sha256,
+        gold_quote_sha256=prepared.gold_quote_sha256,
+        gold_paths=[reviewed_path],
+        human_review=prepared.human_review.model_copy(
+            update={"reviewed_record_sha256": review_hash}
+        ),
+    )
+    source = next(item for item in manifest.sources if item.id == prepared.source_ids[0])
+    source_version_id = _uuid(9201)
+    expectation = GoldRelationExpectation(
+        relation_id=relation_id,
+        predicate=RelationPredicate.RETURNS,
+        polarity=Polarity.positive,
+        subject=GoldEndpointExpectation(
+            source_uri="fixture://family-0",
+            source_version_id=source_version_id,
+            raw_file_sha256=source.raw_sha256,
+            relative_path=source.source_path,
+            qualified_symbol="package.factory",
+            entity_kind=EntityKind.function,
+        ),
+        object=GoldEndpointExpectation(
+            source_uri="fixture://family-0",
+            source_version_id=source_version_id,
+            raw_file_sha256=source.raw_sha256,
+            relative_path=source.source_path,
+            qualified_symbol="result value",
+            entity_kind=EntityKind.concept,
+        ),
+        qualifier_review_state=GoldQualifierReviewState.reviewed_empty,
+        qualifier_values={},
+        result_role="return_value",
+        outcome_kind=GoldOutcomeKind.return_value,
+        evidence_basis=GoldEvidenceBasis.source_code,
+    )
+    expectation_manifest = GoldRelationExpectationManifest(
+        dataset_id=manifest.dataset_id,
+        dataset_version=manifest.dataset_version,
+        expectations=[expectation],
+    )
+    expectation_bytes = expectation_manifest.model_dump_json().encode("utf-8")
+    cases_bytes = ("\n".join(case.model_dump_json() for case in cases) + "\n").encode(
+        "utf-8"
+    )
+    assert manifest.cases_file is not None
+    assert manifest.relation_expectations_file is None
+    for source_asset in manifest.sources:
+        material = tmp_path / Path(*source_asset.material_path.split("/"))
+        material.parent.mkdir(parents=True, exist_ok=True)
+        material.write_bytes(TEST_SOURCE)
+    cases_file = tmp_path / Path(*manifest.cases_file.split("/"))
+    cases_file.parent.mkdir(parents=True, exist_ok=True)
+    cases_file.write_bytes(cases_bytes)
+    expectation_path = "benchmarks/manifests/relation-expectations-v1.json"
+    expectation_file = tmp_path / Path(*expectation_path.split("/"))
+    expectation_file.parent.mkdir(parents=True, exist_ok=True)
+    expectation_file.write_bytes(expectation_bytes)
+    frozen_manifest = manifest.model_copy(
+        update={
+            "cases_sha256": hashlib.sha256(cases_bytes).hexdigest(),
+            "relation_expectations_file": expectation_path,
+            "relation_expectations_sha256": hashlib.sha256(expectation_bytes).hexdigest(),
+        }
+    )
+    manifest_file = tmp_path / "benchmarks" / "manifests" / "dataset.json"
+    manifest_file.write_text(
+        json.dumps(frozen_manifest.model_dump(mode="json"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    loaded = load_dataset(tmp_path)
+
+    assert loaded.ready
+    assert loaded.relation_expectations == {relation_id: expectation}
+
+    normative_obligation = expectation.model_copy(
+        update={
+            "predicate": RelationPredicate.INVALIDATES,
+            "qualifier_review_state": GoldQualifierReviewState.reviewed_values,
+            "qualifier_values": {"normative_modality": "SHALL"},
+            "result_role": "invalidated_target",
+            "outcome_kind": GoldOutcomeKind.normative_obligation,
+            "evidence_basis": GoldEvidenceBasis.normative_specification,
+        }
+    )
+    assert GoldRelationExpectation.model_validate(
+        normative_obligation.model_dump(mode="json")
+    ) == normative_obligation
+    invalid_runtime_event = normative_obligation.model_copy(
+        update={"outcome_kind": GoldOutcomeKind.state_change}
+    )
+    with pytest.raises(ValidationError, match="NORMATIVE_OBLIGATION"):
+        GoldRelationExpectation.model_validate(
+            invalid_runtime_event.model_dump(mode="json")
+        )
+
+    expectation_file.write_bytes(expectation_bytes + b" ")
+    with pytest.raises(DatasetValidationError, match="relation expectation hash"):
         load_dataset(tmp_path)
 
 

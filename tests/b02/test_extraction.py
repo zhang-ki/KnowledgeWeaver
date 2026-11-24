@@ -183,6 +183,143 @@ async def test_ast_emits_located_static_relations_and_rejects_dynamic_calls() ->
 
 
 @pytest.mark.asyncio
+async def test_ast_distinguishes_explicit_returns_raises_guards_and_fallthrough() -> None:
+    text = (
+        "def lookup(ready):\n"
+        "    if ready:\n"
+        "        return 'ok'\n"
+        "    raise ValueError('unavailable')\n\n"
+        "def implicit_none():\n"
+        "    pass\n"
+        "\ndef bare_none():\n"
+        "    return\n"
+    )
+    request, _chunk = make_request(text, path="src/flow.py")
+
+    result = await KnowledgeExtractor(corpus_id=CORPUS_ID).extract(request)
+
+    entities = {item.id: item for item in result.entities}
+    lookup = next(item for item in result.entities if item.canonical_name == "src.flow.lookup")
+    implicit_none = next(
+        item for item in result.entities if item.canonical_name == "src.flow.implicit_none"
+    )
+    bare_none = next(item for item in result.entities if item.canonical_name == "src.flow.bare_none")
+    returns = [
+        item
+        for item in result.relations
+        if item.subject_id == lookup.id and item.predicate is RelationPredicate.RETURNS
+    ]
+    raises = [
+        item
+        for item in result.relations
+        if item.subject_id == lookup.id and item.predicate is RelationPredicate.RAISES
+    ]
+
+    assert len(returns) == 1
+    assert returns[0].qualifiers == {
+        "guard": [{"condition": "ready", "branch": "true"}],
+        "outcome_kind": "RETURN_VALUE",
+        "result_role": "return_value",
+    }
+    assert any(
+        evidence.id in returns[0].evidence_ids and evidence.quote == "return 'ok'"
+        for evidence in result.evidence
+    )
+    assert len(raises) == 1
+    assert entities[raises[0].object_id].canonical_name == "ValueError"
+    assert raises[0].qualifiers == {
+        "outcome_kind": "EXCEPTION",
+        "result_role": "exception",
+    }
+    assert not any(
+        item.subject_id == implicit_none.id
+        and item.predicate in {RelationPredicate.RETURNS, RelationPredicate.RAISES}
+        for item in result.relations
+    )
+    bare_none_return = next(
+        item
+        for item in result.relations
+        if item.subject_id == bare_none.id and item.predicate is RelationPredicate.RETURNS
+    )
+    assert entities[bare_none_return.object_id].canonical_name == "None"
+    assert any(
+        item.id in bare_none_return.evidence_ids and item.quote == "return"
+        for item in result.evidence
+    )
+
+
+@pytest.mark.asyncio
+async def test_ast_retains_guards_on_static_calls() -> None:
+    text = (
+        "def target():\n"
+        "    return None\n\n"
+        "def run(enabled):\n"
+        "    if enabled:\n"
+        "        target()\n"
+    )
+    request, _chunk = make_request(text, path="src/guarded.py")
+
+    result = await KnowledgeExtractor(corpus_id=CORPUS_ID).extract(request)
+
+    entities = {item.id: item for item in result.entities}
+    run = next(item for item in result.entities if item.canonical_name == "src.guarded.run")
+    call = next(
+        item
+        for item in result.relations
+        if item.subject_id == run.id and item.predicate is RelationPredicate.CALLS
+    )
+    assert entities[call.object_id].canonical_name == "src.guarded.target"
+    assert call.qualifiers == {
+        "resolution": "static_symbol",
+        "guard": [{"condition": "enabled", "branch": "true"}],
+    }
+    assert any(
+        item.id in call.evidence_ids and item.quote == "enabled"
+        for item in result.evidence
+    )
+
+
+@pytest.mark.asyncio
+async def test_ast_extracts_literal_mapping_and_instance_state_writes() -> None:
+    text = (
+        "LOOP_FACTORIES = {'none': None}\n\n"
+        "class AsyncResult:\n"
+        "    def on_result(self, result):\n"
+        "        self.result = result\n"
+        "        self.counter += 1\n"
+    )
+    request, _chunk = make_request(text, path="src/mapping.py")
+
+    result = await KnowledgeExtractor(corpus_id=CORPUS_ID).extract(request)
+
+    mapping = next(item for item in result.relations if item.predicate is RelationPredicate.MAPS_TO)
+    mapping_entities = {item.id: item for item in result.entities}
+    assert mapping_entities[mapping.subject_id].canonical_name == "LOOP_FACTORIES"
+    assert mapping_entities[mapping.object_id].canonical_name == "None"
+    assert mapping.qualifiers == {"key": "none"}
+
+    update = next(
+        item
+        for item in result.relations
+        if item.predicate is RelationPredicate.UPDATES
+        and mapping_entities[item.object_id].canonical_name == "self.result"
+    )
+    assert mapping_entities[update.subject_id].canonical_name == "src.mapping.AsyncResult.on_result"
+    assert mapping_entities[update.object_id].canonical_name == "self.result"
+    assert update.qualifiers == {"operation": "ASSIGN", "written_value": "result"}
+    increment = next(
+        item
+        for item in result.relations
+        if item.predicate is RelationPredicate.UPDATES
+        and mapping_entities[item.object_id].canonical_name == "self.counter"
+    )
+    assert increment.qualifiers == {
+        "operation": "AUGMENTED_ADD",
+        "written_value": "1",
+    }
+
+
+@pytest.mark.asyncio
 async def test_text_extraction_preserves_polarity_confidence_and_idempotent_ids() -> None:
     text, payload = load_relation_fixture()
     request, chunk = make_request(text)
@@ -203,6 +340,211 @@ async def test_text_extraction_preserves_polarity_confidence_and_idempotent_ids(
     assert all(item.evidence_ids for item in first.relations)
     for evidence in first.evidence:
         evidence.assert_matches_chunk(chunk)
+
+
+@pytest.mark.parametrize(
+    ("qualifiers", "accepted"),
+    [({}, False), ({"key": "none"}, True)],
+)
+@pytest.mark.asyncio
+async def test_text_maps_to_requires_an_exact_source_backed_mapping_key(
+    qualifiers: dict[str, object], accepted: bool
+) -> None:
+    text = "The loop factory map uses key none for None."
+    payload = {
+        "entities": [
+            {
+                "local_id": "map",
+                "name": "loop factory map",
+                "kind": "concept",
+                "mentions": [{"surface_form": "loop factory map", "quote": text}],
+                "aliases": [],
+            },
+            {
+                "local_id": "none",
+                "name": "None",
+                "kind": "concept",
+                "mentions": [{"surface_form": "None", "quote": text}],
+                "aliases": [],
+            },
+        ],
+        "relations": [
+            {
+                "subject_local_id": "map",
+                "predicate": "MAPS_TO",
+                "object_local_id": "none",
+                "polarity": "positive",
+                "qualifiers": qualifiers,
+                "evidence": [{"surface_form": "key none", "quote": text}],
+            }
+        ],
+    }
+    request, _chunk = make_request(text)
+
+    result = await KnowledgeExtractor(
+        QueueProvider([payload]), corpus_id=CORPUS_ID
+    ).extract(request)
+
+    assert bool(result.relations) is accepted
+    if accepted:
+        assert result.relations[0].qualifiers == {"key": "none"}
+    else:
+        assert any(item.code == "MAPPING_KEY_UNVERIFIED" for item in result.rejected_items)
+
+
+@pytest.mark.asyncio
+async def test_normative_specification_uses_separate_provenance_and_exact_modality() -> None:
+    text = "The CSP SHALL invalidate the saved recovery code after each use."
+    payload = {
+        "entities": [
+            {
+                "local_id": "csp",
+                "name": "CSP",
+                "kind": "concept",
+                "mentions": [{"surface_form": "CSP", "quote": text}],
+                "aliases": [],
+            },
+            {
+                "local_id": "code",
+                "name": "saved recovery code",
+                "kind": "concept",
+                "mentions": [{"surface_form": "saved recovery code", "quote": text}],
+                "aliases": [],
+            },
+        ],
+        "relations": [
+            {
+                "subject_local_id": "csp",
+                "predicate": "INVALIDATES",
+                "object_local_id": "code",
+                "polarity": "positive",
+                "qualifiers": {
+                    "normative_modality": "SHALL",
+                    "condition": "after each use",
+                    "guard": [{"condition": "after each use", "branch": "true"}],
+                },
+                "evidence": [{"surface_form": "SHALL", "quote": text}],
+            }
+        ],
+    }
+    request, _chunk = make_request(
+        text,
+        path="sources/specifications/nist/recovery.html",
+    )
+    provider = QueueProvider([payload])
+
+    result = await KnowledgeExtractor(provider, corpus_id=CORPUS_ID).extract(request)
+
+    assert len(result.relations) == 1
+    assert result.relations[0].predicate is RelationPredicate.INVALIDATES
+    assert result.relations[0].qualifiers["normative_modality"] == "SHALL"
+    assert result.relations[0].qualifiers["guard"] == [
+        {"condition": "after each use", "branch": "true"}
+    ]
+    assert {item.method for item in result.provenance} == {
+        ProvenanceMethod.NORMATIVE_SPECIFICATION
+    }
+    call = provider.calls[0]
+    assert "normative specification" in call.system_instruction.casefold()
+    assert "gold" not in call.untrusted_context.casefold()
+    assert all(item.quote == text for item in result.evidence)
+
+
+@pytest.mark.asyncio
+async def test_normative_specification_rejects_modality_not_present_in_quote() -> None:
+    text = "The CSP SHALL invalidate the saved recovery code."
+    payload = {
+        "entities": [
+            {
+                "local_id": "csp",
+                "name": "CSP",
+                "kind": "concept",
+                "mentions": [{"surface_form": "CSP", "quote": text}],
+                "aliases": [],
+            },
+            {
+                "local_id": "code",
+                "name": "saved recovery code",
+                "kind": "concept",
+                "mentions": [{"surface_form": "saved recovery code", "quote": text}],
+                "aliases": [],
+            },
+        ],
+        "relations": [
+            {
+                "subject_local_id": "csp",
+                "predicate": "INVALIDATES",
+                "object_local_id": "code",
+                "polarity": "positive",
+                "qualifiers": {"normative_modality": "MUST"},
+                "evidence": [{"surface_form": "SHALL", "quote": text}],
+            }
+        ],
+    }
+    request, _chunk = make_request(
+        text,
+        path="sources/specifications/nist/recovery.html",
+    )
+
+    result = await KnowledgeExtractor(
+        QueueProvider([payload]), corpus_id=CORPUS_ID
+    ).extract(request)
+
+    assert result.relations == []
+    assert any(
+        item.code == "NORMATIVE_MODALITY_OR_GUARD_UNVERIFIED"
+        for item in result.rejected_items
+    )
+
+
+@pytest.mark.asyncio
+async def test_normative_specification_rejects_guard_not_present_in_quote() -> None:
+    text = "The CSP SHALL invalidate the saved recovery code after each use."
+    payload = {
+        "entities": [
+            {
+                "local_id": "csp",
+                "name": "CSP",
+                "kind": "concept",
+                "mentions": [{"surface_form": "CSP", "quote": text}],
+                "aliases": [],
+            },
+            {
+                "local_id": "code",
+                "name": "saved recovery code",
+                "kind": "concept",
+                "mentions": [{"surface_form": "saved recovery code", "quote": text}],
+                "aliases": [],
+            },
+        ],
+        "relations": [
+            {
+                "subject_local_id": "csp",
+                "predicate": "INVALIDATES",
+                "object_local_id": "code",
+                "polarity": "positive",
+                "qualifiers": {
+                    "normative_modality": "SHALL",
+                    "guard": [{"condition": "before each use", "branch": "true"}],
+                },
+                "evidence": [{"surface_form": "SHALL", "quote": text}],
+            }
+        ],
+    }
+    request, _chunk = make_request(
+        text,
+        path="sources/specifications/nist/recovery.html",
+    )
+
+    result = await KnowledgeExtractor(
+        QueueProvider([payload]), corpus_id=CORPUS_ID
+    ).extract(request)
+
+    assert result.relations == []
+    assert any(
+        item.code == "NORMATIVE_MODALITY_OR_GUARD_UNVERIFIED"
+        for item in result.rejected_items
+    )
 
 
 @pytest.mark.asyncio

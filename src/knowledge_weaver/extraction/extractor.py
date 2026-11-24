@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import PurePosixPath
 
 from knowledge_weaver.models import ExtractionRequest, ExtractionResult
 from knowledge_weaver.ports import Extractor as ExtractorPort
@@ -10,8 +11,13 @@ from .ast_extractor import extract_static_python
 from .text_extractor import StructuredTextExtractor
 
 
+def _is_normative_specification(path_text: str) -> bool:
+    path = PurePosixPath(path_text.replace("\\", "/"))
+    return "specifications" in path.parts and path.suffix.casefold() in {".html", ".txt"}
+
+
 class KnowledgeExtractor(ExtractorPort):
-    """Route Python files to static analysis and other documents to structured LLM extraction.
+    """Route code, normative specifications, and other text through separate lanes.
 
     ExtractionRequest intentionally omits corpus_id in the frozen public contract.
     Configure either one corpus_id for a single-corpus service or a source-to-corpus
@@ -48,5 +54,8 @@ class KnowledgeExtractor(ExtractorPort):
             corpus_id=corpus_id,
             timeout_seconds=self.timeout_seconds,
             max_schema_repairs=self.max_schema_repairs,
+            normative_specification=_is_normative_specification(
+                request.document.relative_path
+            ),
         )
         return await extractor.extract(request)

@@ -3,11 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
+from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
 from knowledge_weaver.evaluation.contracts import (
+    GoldEndpointExpectation,
+    GoldEvidenceBasis,
+    GoldOutcomeKind,
     GoldPathEdge,
+    GoldQualifierReviewState,
     HumanReview,
     PermissionScope,
     PreparedBenchmarkCase,
@@ -37,16 +43,22 @@ from knowledge_weaver.models.contracts import (
     Entity,
     EntityKind,
     Evidence,
+    FileManifestEntry,
     Generation,
     GenerationState,
     Language,
     MarkdownLocator,
+    Mention,
     Path,
     PathStep,
     Polarity,
+    Provenance,
+    ProvenanceMethod,
     Relation,
     RelationPredicate,
+    Source,
     SourceKind,
+    SourceVersion,
     Split,
     StructureType,
 )
@@ -64,15 +76,19 @@ RELATION_ID = "00000000-0000-4000-8000-000000000009"
 SUBJECT_ID = "00000000-0000-4000-8000-000000000010"
 OBJECT_ID = "00000000-0000-4000-8000-000000000011"
 PROVENANCE_ID = "00000000-0000-4000-8000-000000000012"
+RULE_PROVENANCE_ID = "00000000-0000-4000-8000-000000000015"
 RUNTIME_RELATION_TWO_ID = "00000000-0000-4000-8000-000000000016"
 RUNTIME_RELATION_THREE_ID = "00000000-0000-4000-8000-000000000017"
 OTHER_SUBJECT_ID = "00000000-0000-4000-8000-000000000018"
 GENERATION_CORPUS_ID = "00000000-0000-4000-8000-000000000001"
 DATA_RELATION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+SOURCE_VERSION_ID = "00000000-0000-4000-8000-000000000013"
+SOURCE_URI = "fixture://knowledge-weaver/docs/guide.md"
+FIXTURE_TEXT = "Config.get_loop_factory returns None loop factory; prefix: accepted evidence. suffix"
 
 
 def _fixture(
-    text: str = "prefix: accepted evidence. suffix",
+    text: str = FIXTURE_TEXT,
     *,
     overlap: bool = True,
     include_evidence: bool = True,
@@ -239,17 +255,24 @@ def _generation_for(
     chunks: list[Chunk],
     evidence: list[Evidence],
     relations: list[Relation],
+    *,
+    mentions: list[Mention] | None = None,
+    provenance: list[Provenance] | None = None,
 ) -> Generation:
     members = {
         "source_version": ["00000000-0000-4000-8000-000000000013"],
         "document": [document.id],
         "chunk": [item.id for item in chunks],
         "evidence": [item.id for item in evidence],
-        "provenance": sorted({item.provenance_id for item in evidence}),
+        "provenance": sorted(
+            {item.id for item in provenance}
+            if provenance is not None
+            else {item.provenance_id for item in evidence}
+        ),
         "entity": sorted(
             {entity_id for item in relations for entity_id in (item.subject_id, item.object_id)}
         ),
-        "mention": [],
+        "mention": sorted(item.id for item in mentions or []),
         "relation": [item.id for item in relations],
     }
     member_hashes = {
@@ -361,6 +384,21 @@ def _map_with_expectation(
     entities: list[Entity],
     expectation: GoldRelationExpectation,
 ):
+    semantic_rows = _semantic_kwargs(
+        source,
+        document,
+        evidence,
+        entities,
+        expectation.evidence_basis,
+    )
+    generation = _generation_for(
+        document,
+        chunks,
+        evidence,
+        relations,
+        mentions=semantic_rows["mentions"],
+        provenance=semantic_rows["provenance"],
+    )
     return map_gold_to_generation(
         [prepared],
         [source],
@@ -369,8 +407,9 @@ def _map_with_expectation(
         evidence,
         relations,
         entities=entities,
+        **semantic_rows,
         relation_expectations={expectation.relation_id: expectation},
-        generation=_generation_for(document, chunks, evidence, relations),
+        generation=generation,
         dataset_sha256="a" * 64,
     )
 
@@ -381,7 +420,7 @@ def _expected_relation_entities() -> list[Entity]:
             id=SUBJECT_ID,
             corpus_id=GENERATION_CORPUS_ID,
             kind=EntityKind.concept,
-            canonical_name="get_loop_factory",
+            canonical_name="Config.get_loop_factory",
             aliases=["Config.get_loop_factory"],
             namespace="uvicorn",
             identity_key="uvicorn:get_loop_factory",
@@ -399,13 +438,128 @@ def _expected_relation_entities() -> list[Entity]:
 
 
 def _expected_data_relation() -> GoldRelationExpectation:
+    raw_hash = hashlib.sha256(FIXTURE_TEXT.encode("utf-8")).hexdigest()
     return GoldRelationExpectation(
         relation_id=DATA_RELATION_ID,
         predicate=RelationPredicate.USES,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
         polarity=Polarity.positive,
+        subject=GoldEndpointExpectation(
+            source_uri=SOURCE_URI,
+            source_version_id=SOURCE_VERSION_ID,
+            raw_file_sha256=raw_hash,
+            relative_path="docs/guide.md",
+            qualified_symbol="Config.get_loop_factory",
+            entity_kind=EntityKind.concept,
+        ),
+        object=GoldEndpointExpectation(
+            source_uri=SOURCE_URI,
+            source_version_id=SOURCE_VERSION_ID,
+            raw_file_sha256=raw_hash,
+            relative_path="docs/guide.md",
+            qualified_symbol="None loop factory",
+            entity_kind=EntityKind.concept,
+        ),
+        qualifier_review_state=GoldQualifierReviewState.reviewed_empty,
+        qualifier_values={},
+        result_role="relation_object",
+        outcome_kind=GoldOutcomeKind.fact,
+        evidence_basis=GoldEvidenceBasis.source_code,
     )
+
+
+def _semantic_expectation(
+    relation_id: str = DATA_RELATION_ID,
+    *,
+    predicate: RelationPredicate = RelationPredicate.USES,
+    subject_symbol: str = "Config.get_loop_factory",
+    object_symbol: str = "None loop factory",
+    qualifier_review_state: GoldQualifierReviewState = GoldQualifierReviewState.reviewed_empty,
+    qualifier_values: dict[str, object] | None = None,
+) -> GoldRelationExpectation:
+    template = _expected_data_relation()
+    return template.model_copy(
+        update={
+            "relation_id": relation_id,
+            "predicate": predicate,
+            "subject": template.subject.model_copy(update={"qualified_symbol": subject_symbol}),
+            "object": template.object.model_copy(update={"qualified_symbol": object_symbol}),
+            "qualifier_review_state": qualifier_review_state,
+            "qualifier_values": qualifier_values or {},
+        }
+    )
+
+
+def _semantic_kwargs(
+    source_asset: SourceAsset,
+    document: Document,
+    evidence: list[Evidence],
+    entities: list[Entity],
+    evidence_basis: GoldEvidenceBasis,
+) -> dict[str, Any]:
+    source = Source(
+        id=source_asset.id,
+        corpus_id=GENERATION_CORPUS_ID,
+        kind=source_asset.kind,
+        logical_uri=SOURCE_URI,
+        display_name="B07 semantic fixture",
+        license="fixture",
+        created_at=NOW,
+    )
+    source_version = SourceVersion(
+        id=SOURCE_VERSION_ID,
+        source_id=source.id,
+        manifest_hash=document.raw_hash,
+        revision="fixture-v1",
+        dirty=False,
+        files=[
+            FileManifestEntry(
+                relative_path=document.relative_path,
+                raw_hash=document.raw_hash,
+                document_id=document.id,
+            )
+        ],
+    )
+    method = (
+        ProvenanceMethod.STATIC_ANALYSIS
+        if evidence_basis is GoldEvidenceBasis.source_code
+        else ProvenanceMethod.NORMATIVE_SPECIFICATION
+    )
+    provenance = Provenance(
+        id=PROVENANCE_ID,
+        method=method,
+        producer_fingerprint="b07-semantic-fixture-v1",
+        source_id=document.source_id,
+        document_id=document.id,
+    )
+    mentions: list[Mention] = []
+    for entity in entities:
+        symbol = entity.canonical_name
+        short_symbol = symbol.rsplit(".", 1)[-1]
+        matching_evidence = next(
+            (
+                item
+                for item in evidence
+                if symbol in item.quote or short_symbol in item.quote
+            ),
+            None,
+        )
+        if matching_evidence is None:
+            continue
+        surface = symbol if symbol in matching_evidence.quote else short_symbol
+        mentions.append(
+            Mention(
+                id=str(uuid5(NAMESPACE_URL, f"{entity.id}:{matching_evidence.id}:{surface}")),
+                entity_id=entity.id,
+                evidence_id=matching_evidence.id,
+                surface_form=surface,
+            )
+        )
+    return {
+        "mentions": mentions,
+        "sources": [source],
+        "source_versions": [source_version],
+        "provenance": [provenance],
+    }
 
 
 def _with_gold_groups(
@@ -743,7 +897,7 @@ def test_txt_quote_must_be_inside_declared_source_lines_even_in_a_broad_leaf() -
 
 
 def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_mismatches() -> None:
-    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+    from knowledge_weaver.models.contracts import RelationPredicate
 
     prepared, source, document, chunks, evidence, relations = _fixture(
         overlap=False, include_path=True
@@ -756,7 +910,7 @@ def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_m
         id=runtime_rel.subject_id,
         corpus_id=corpus_id,
         kind=EntityKind.concept,
-        canonical_name="get_loop_factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
         namespace="uvicorn",
         identity_key="uvicorn:get_loop_factory",
@@ -770,13 +924,15 @@ def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_m
         namespace="uvicorn",
         identity_key="uvicorn:none_loop_factory",
     )
-    gen = _generation_for(document, chunks, evidence, [runtime_rel])
-    expectation = GoldRelationExpectation(
-        relation_id=data_rel_id,
-        predicate=RelationPredicate.USES,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
-        polarity=Polarity.positive,
+    expectation = _semantic_expectation(data_rel_id)
+    semantic_rows = _semantic_kwargs(source, document, evidence, [subj, obj], expectation.evidence_basis)
+    gen = _generation_for(
+        document,
+        chunks,
+        evidence,
+        [runtime_rel],
+        mentions=semantic_rows["mentions"],
+        provenance=semantic_rows["provenance"],
     )
     ok_report = map_gold_to_generation(
         [updated_prepared],
@@ -786,6 +942,7 @@ def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_m
         evidence,
         [runtime_rel],
         entities=[subj, obj],
+        **semantic_rows,
         relation_expectations={data_rel_id: expectation},
         generation=gen,
         dataset_sha256="a" * 64,
@@ -793,12 +950,7 @@ def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_m
     assert ok_report.ready
     assert ok_report.path_mappings[0].relation_ids == (runtime_rel.id,)
 
-    wrong_pred = GoldRelationExpectation(
-        relation_id=data_rel_id,
-        predicate=RelationPredicate.CALLS,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
-    )
+    wrong_pred = _semantic_expectation(data_rel_id, predicate=RelationPredicate.CALLS)
     bad_report = map_gold_to_generation(
         [updated_prepared],
         [source],
@@ -807,6 +959,7 @@ def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_m
         evidence,
         [runtime_rel],
         entities=[subj, obj],
+        **semantic_rows,
         relation_expectations={data_rel_id: wrong_pred},
         generation=gen,
         dataset_sha256="a" * 64,
@@ -881,7 +1034,21 @@ def test_direct_gold_relation_id_rejects_generation_bound_wrong_entity_identity(
         }
     )
     expectation = _expected_data_relation()
-    generation = _generation_for(document, chunks, evidence, [runtime_relation])
+    semantic_rows = _semantic_kwargs(
+        source,
+        document,
+        evidence,
+        [wrong_subject, wrong_obj],
+        expectation.evidence_basis,
+    )
+    generation = _generation_for(
+        document,
+        chunks,
+        evidence,
+        [runtime_relation],
+        mentions=semantic_rows["mentions"],
+        provenance=semantic_rows["provenance"],
+    )
 
     assert {SUBJECT_ID, OBJECT_ID}.issubset(generation.entity_ids)
     report = map_gold_to_generation(
@@ -892,6 +1059,7 @@ def test_direct_gold_relation_id_rejects_generation_bound_wrong_entity_identity(
         evidence,
         [runtime_relation],
         entities=[wrong_subject, wrong_obj],
+        **semantic_rows,
         relation_expectations={DATA_RELATION_ID: expectation},
         generation=generation,
         dataset_sha256="a" * 64,
@@ -899,9 +1067,123 @@ def test_direct_gold_relation_id_rejects_generation_bound_wrong_entity_identity(
 
     assert not report.ready
     assert report.path_mappings[0].status is GoldMappingStatus.unmapped
-    assert "no candidate matching its exact endpoints" in (
+    assert "no candidate matching exact source-bound endpoints" in (
         report.path_mappings[0].reason or ""
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_uri", "fixture://another-source"),
+        ("source_version_id", "00000000-0000-4000-8000-000000000999"),
+        ("raw_file_sha256", "b" * 64),
+        ("relative_path", "docs/other.md"),
+        ("entity_kind", EntityKind.function),
+    ],
+)
+def test_semantic_fallback_requires_exact_source_version_and_endpoint_binding(
+    field: str, value: object
+) -> None:
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    runtime_relation = relations[0].model_copy(update={"predicate": RelationPredicate.USES})
+    expectation = _expected_data_relation()
+    wrong_subject = expectation.subject.model_copy(update={field: value})
+    wrong_expectation = expectation.model_copy(update={"subject": wrong_subject})
+
+    report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [runtime_relation],
+        _expected_relation_entities(),
+        wrong_expectation,
+    )
+
+    assert report.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert "no candidate matching exact source-bound endpoints" in (
+        report.path_mappings[0].reason or ""
+    )
+
+
+@pytest.mark.parametrize("premise_evidence_id", [EVIDENCE_ONE_ID, EVIDENCE_TWO_ID])
+def test_rule_inferred_semantic_fallback_requires_source_bound_generation_premises(
+    premise_evidence_id: str,
+) -> None:
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    subject, obj = _expected_relation_entities()
+    candidate = relations[0].model_copy(
+        update={
+            "predicate": RelationPredicate.USES,
+            "provenance_id": RULE_PROVENANCE_ID,
+            "evidence_ids": [EVIDENCE_ONE_ID],
+        }
+    )
+    premise = Relation(
+        id=RUNTIME_RELATION_TWO_ID,
+        subject_id=SUBJECT_ID,
+        predicate=RelationPredicate.CALLS,
+        object_id=OBJECT_ID,
+        polarity=Polarity.positive,
+        provenance_id=PROVENANCE_ID,
+        evidence_ids=[premise_evidence_id],
+    )
+    expectation = _expected_data_relation()
+    semantic_rows = _semantic_kwargs(
+        source,
+        document,
+        evidence,
+        [subject, obj],
+        expectation.evidence_basis,
+    )
+    rule_provenance = Provenance(
+        id=RULE_PROVENANCE_ID,
+        method=ProvenanceMethod.RULE_INFERRED,
+        producer_fingerprint="b07-rule-fixture-v1",
+        source_id=document.source_id,
+        document_id=document.id,
+        premise_relation_ids=[premise.id],
+        rule_id="fixture-rule-v1",
+    )
+    semantic_rows["provenance"].append(rule_provenance)
+    generation = _generation_for(
+        document,
+        chunks,
+        evidence,
+        [candidate, premise],
+        mentions=semantic_rows["mentions"],
+        provenance=semantic_rows["provenance"],
+    )
+
+    report = map_gold_to_generation(
+        [prepared],
+        [source],
+        [document],
+        chunks,
+        evidence,
+        [candidate, premise],
+        entities=[subject, obj],
+        **semantic_rows,
+        relation_expectations={DATA_RELATION_ID: expectation},
+        generation=generation,
+        dataset_sha256="a" * 64,
+    )
+
+    if premise_evidence_id == EVIDENCE_ONE_ID:
+        assert report.path_mappings[0].status is GoldMappingStatus.mapped
+    else:
+        assert report.path_mappings[0].status is GoldMappingStatus.unmapped
+        assert "expected Generation Provenance chain" in (
+            report.path_mappings[0].reason or ""
+        )
 
 
 @pytest.mark.parametrize(
@@ -910,7 +1192,7 @@ def test_direct_gold_relation_id_rejects_generation_bound_wrong_entity_identity(
         ("predicate", "expected predicate"),
         ("polarity", "expected polarity"),
         ("ordered_endpoints", "endpoint direction mismatch"),
-        ("qualifiers", "candidate qualifiers are not represented"),
+        ("qualifiers", "exact reviewed qualifier set"),
         ("evidence", "does not close over Evidence for every reviewed Gold quote"),
     ],
 )
@@ -996,6 +1278,49 @@ def test_direct_gold_relation_expectation_requires_generation_entity_binding() -
         )
 
 
+@pytest.mark.parametrize("row_type", ["mentions", "provenance"])
+def test_semantic_expectation_requires_mention_and_provenance_generation_membership(
+    row_type: str,
+) -> None:
+    from knowledge_weaver.models.contracts import RelationPredicate
+
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        overlap=False, include_path=True
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    runtime_relation = relations[0].model_copy(update={"predicate": RelationPredicate.USES})
+    entities = _expected_relation_entities()
+    expectation = _expected_data_relation()
+    semantic_rows = _semantic_kwargs(
+        source, document, evidence, entities, expectation.evidence_basis
+    )
+    generation = _generation_for(
+        document,
+        chunks,
+        evidence,
+        [runtime_relation],
+        mentions=semantic_rows["mentions"],
+        provenance=semantic_rows["provenance"],
+    )
+    incomplete_rows = dict(semantic_rows)
+    incomplete_rows[row_type] = []
+
+    with pytest.raises(GenerationBindingError, match="membership"):
+        map_gold_to_generation(
+            [prepared],
+            [source],
+            [document],
+            chunks,
+            evidence,
+            [runtime_relation],
+            entities=entities,
+            **incomplete_rows,
+            relation_expectations={DATA_RELATION_ID: expectation},
+            generation=generation,
+            dataset_sha256="a" * 64,
+        )
+
+
 def test_gold_path_fallback_does_not_close_on_adjacent_chunk_evidence_or_pick_first_id() -> None:
     from knowledge_weaver.models.contracts import Polarity, RelationPredicate
 
@@ -1021,7 +1346,7 @@ def test_gold_path_fallback_does_not_close_on_adjacent_chunk_evidence_or_pick_fi
         id=SUBJECT_ID,
         corpus_id="00000000-0000-4000-8000-000000000001",
         kind=EntityKind.concept,
-        canonical_name="get_loop_factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
         namespace="uvicorn",
         identity_key="uvicorn:get_loop_factory",
@@ -1035,13 +1360,7 @@ def test_gold_path_fallback_does_not_close_on_adjacent_chunk_evidence_or_pick_fi
         namespace="uvicorn",
         identity_key="uvicorn:none_loop_factory",
     )
-    expectation = GoldRelationExpectation(
-        relation_id=DATA_RELATION_ID,
-        predicate=RelationPredicate.USES,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
-        polarity=Polarity.positive,
-    )
+    expectation = _semantic_expectation()
 
     report = _map_with_expectation(
         prepared,
@@ -1057,13 +1376,13 @@ def test_gold_path_fallback_does_not_close_on_adjacent_chunk_evidence_or_pick_fi
     assert not report.ready
     assert report.span_mappings[0].evidence_ids == (EVIDENCE_ONE_ID,)
     assert report.path_mappings[0].status is GoldMappingStatus.unmapped
-    assert "no candidate matching its exact endpoints and Evidence for every Gold quote" in (
+    assert "does not close over Evidence for every reviewed Gold quote" in (
         report.path_mappings[0].reason or ""
     )
 
 
 def test_gold_path_fallback_rejects_multiple_semantic_candidates() -> None:
-    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+    from knowledge_weaver.models.contracts import RelationPredicate
 
     prepared, source, document, chunks, evidence, relations = _fixture(
         overlap=False, include_path=True
@@ -1077,7 +1396,7 @@ def test_gold_path_fallback_rejects_multiple_semantic_candidates() -> None:
         id=SUBJECT_ID,
         corpus_id="00000000-0000-4000-8000-000000000001",
         kind=EntityKind.concept,
-        canonical_name="get_loop_factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
         namespace="uvicorn",
         identity_key="uvicorn:get_loop_factory",
@@ -1091,13 +1410,7 @@ def test_gold_path_fallback_rejects_multiple_semantic_candidates() -> None:
         namespace="uvicorn",
         identity_key="uvicorn:none_loop_factory",
     )
-    expectation = GoldRelationExpectation(
-        relation_id=DATA_RELATION_ID,
-        predicate=RelationPredicate.USES,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
-        polarity=Polarity.positive,
-    )
+    expectation = _semantic_expectation()
 
     report = _map_with_expectation(
         prepared,
@@ -1124,7 +1437,7 @@ def test_gold_path_fallback_rejects_multiple_semantic_candidates() -> None:
 def test_gold_path_fallback_rejects_prefix_and_synonym_endpoint_matches(
     expected_subject: str, runtime_subject: str
 ) -> None:
-    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+    from knowledge_weaver.models.contracts import RelationPredicate
 
     prepared, source, document, chunks, evidence, relations = _fixture(
         overlap=False, include_path=True
@@ -1149,13 +1462,7 @@ def test_gold_path_fallback_rejects_prefix_and_synonym_endpoint_matches(
         namespace="uvicorn",
         identity_key="uvicorn:none_loop_factory",
     )
-    expectation = GoldRelationExpectation(
-        relation_id=DATA_RELATION_ID,
-        predicate=RelationPredicate.USES,
-        subject_names=(expected_subject,),
-        object_names=("None loop factory",),
-        polarity=Polarity.positive,
-    )
+    expectation = _semantic_expectation(subject_symbol=expected_subject)
 
     report = _map_with_expectation(
         prepared,
@@ -1169,11 +1476,11 @@ def test_gold_path_fallback_rejects_prefix_and_synonym_endpoint_matches(
     )
 
     assert report.path_mappings[0].status is GoldMappingStatus.unmapped
-    assert "no candidate matching its exact endpoints" in (report.path_mappings[0].reason or "")
+    assert "no candidate matching exact source-bound endpoints" in (report.path_mappings[0].reason or "")
 
 
 def test_gold_path_fallback_requires_unique_registered_endpoint_identity() -> None:
-    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+    from knowledge_weaver.models.contracts import RelationPredicate
 
     prepared, source, document, chunks, evidence, relations = _fixture(
         overlap=False, include_path=True
@@ -1191,7 +1498,7 @@ def test_gold_path_fallback_requires_unique_registered_endpoint_identity() -> No
         id=SUBJECT_ID,
         corpus_id="00000000-0000-4000-8000-000000000001",
         kind=EntityKind.concept,
-        canonical_name="get_loop_factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
         namespace="uvicorn",
         identity_key="uvicorn:get_loop_factory",
@@ -1200,10 +1507,10 @@ def test_gold_path_fallback_requires_unique_registered_endpoint_identity() -> No
         id=OTHER_SUBJECT_ID,
         corpus_id="00000000-0000-4000-8000-000000000001",
         kind=EntityKind.concept,
-        canonical_name="other factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
-        namespace="other-source",
-        identity_key="other-source:other_factory",
+        namespace="uvicorn",
+        identity_key="uvicorn:get_loop_factory",
     )
     obj = Entity(
         id=OBJECT_ID,
@@ -1214,13 +1521,7 @@ def test_gold_path_fallback_requires_unique_registered_endpoint_identity() -> No
         namespace="uvicorn",
         identity_key="uvicorn:none_loop_factory",
     )
-    expectation = GoldRelationExpectation(
-        relation_id=DATA_RELATION_ID,
-        predicate=RelationPredicate.USES,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
-        polarity=Polarity.positive,
-    )
+    expectation = _semantic_expectation()
 
     report = _map_with_expectation(
         prepared,
@@ -1234,43 +1535,39 @@ def test_gold_path_fallback_requires_unique_registered_endpoint_identity() -> No
     )
 
     assert report.path_mappings[0].status is GoldMappingStatus.unmapped
-    assert "no candidate matching its exact endpoints" in (report.path_mappings[0].reason or "")
+    assert "no candidate matching exact source-bound endpoints" in (report.path_mappings[0].reason or "")
 
 
 @pytest.mark.parametrize(
-    ("qualifiers", "reverse_endpoints", "subject_names", "object_names", "reason"),
+    ("qualifiers", "reverse_endpoints", "review_state", "reason"),
     [
         (
             {"modality": "RECOMMENDED"},
             False,
-            ("Config.get_loop_factory",),
-            ("None loop factory",),
-            "candidate qualifiers are not represented",
+            GoldQualifierReviewState.reviewed_empty,
+            "exact reviewed qualifier set",
         ),
         (
             {},
             True,
-            ("Config.get_loop_factory",),
-            ("None loop factory",),
+            GoldQualifierReviewState.reviewed_empty,
             "endpoint direction mismatch",
         ),
         (
             {},
             False,
-            (),
-            ("None loop factory",),
-            "explicit subject and object names are missing",
+            GoldQualifierReviewState.unreviewed,
+            "UNREVIEWED",
         ),
     ],
 )
 def test_gold_path_fallback_blocks_unresolved_qualifier_or_direction(
     qualifiers: dict[str, str],
     reverse_endpoints: bool,
-    subject_names: tuple[str, ...],
-    object_names: tuple[str, ...],
+    review_state: GoldQualifierReviewState,
     reason: str,
 ) -> None:
-    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+    from knowledge_weaver.models.contracts import RelationPredicate
 
     prepared, source, document, chunks, evidence, relations = _fixture(
         overlap=False, include_path=True
@@ -1288,7 +1585,7 @@ def test_gold_path_fallback_blocks_unresolved_qualifier_or_direction(
         id=SUBJECT_ID,
         corpus_id="00000000-0000-4000-8000-000000000001",
         kind=EntityKind.concept,
-        canonical_name="get_loop_factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
         namespace="uvicorn",
         identity_key="uvicorn:get_loop_factory",
@@ -1302,13 +1599,7 @@ def test_gold_path_fallback_blocks_unresolved_qualifier_or_direction(
         namespace="uvicorn",
         identity_key="uvicorn:none_loop_factory",
     )
-    expectation = GoldRelationExpectation(
-        relation_id=DATA_RELATION_ID,
-        predicate=RelationPredicate.USES,
-        subject_names=subject_names,
-        object_names=object_names,
-        polarity=Polarity.positive,
-    )
+    expectation = _semantic_expectation(qualifier_review_state=review_state)
 
     report = _map_with_expectation(
         prepared,
@@ -1398,7 +1689,7 @@ def test_each_gold_edge_quote_needs_relation_evidence_closure() -> None:
 
 
 def test_semantic_fallback_requires_exact_generation_entity_rows() -> None:
-    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+    from knowledge_weaver.models.contracts import RelationPredicate
 
     prepared, source, document, chunks, evidence, relations = _fixture(
         overlap=False, include_path=True
@@ -1409,7 +1700,7 @@ def test_semantic_fallback_requires_exact_generation_entity_rows() -> None:
         id=SUBJECT_ID,
         corpus_id=GENERATION_CORPUS_ID,
         kind=EntityKind.concept,
-        canonical_name="get_loop_factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
         namespace="uvicorn",
         identity_key="uvicorn:get_loop_factory",
@@ -1432,13 +1723,7 @@ def test_semantic_fallback_requires_exact_generation_entity_rows() -> None:
         namespace="uvicorn",
         identity_key="uvicorn:unrelated_entity",
     )
-    expectation = GoldRelationExpectation(
-        relation_id=DATA_RELATION_ID,
-        predicate=RelationPredicate.USES,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
-        polarity=Polarity.positive,
-    )
+    expectation = _semantic_expectation()
 
     for entity_rows in ([subject], [subject, obj, rogue]):
         with pytest.raises(GenerationBindingError, match="membership"):
@@ -1470,7 +1755,7 @@ def test_semantic_fallback_requires_exact_generation_entity_rows() -> None:
 
 
 def test_semantic_fallback_rejects_duplicate_entity_identity_keys() -> None:
-    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+    from knowledge_weaver.models.contracts import RelationPredicate
 
     prepared, source, document, chunks, evidence, relations = _fixture(
         overlap=False, include_path=True
@@ -1481,7 +1766,7 @@ def test_semantic_fallback_rejects_duplicate_entity_identity_keys() -> None:
         id=SUBJECT_ID,
         corpus_id=GENERATION_CORPUS_ID,
         kind=EntityKind.concept,
-        canonical_name="get_loop_factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
         namespace="uvicorn",
         identity_key="uvicorn:get_loop_factory",
@@ -1511,13 +1796,7 @@ def test_semantic_fallback_rejects_duplicate_entity_identity_keys() -> None:
             "predicate": RelationPredicate.CALLS,
         }
     )
-    expectation = GoldRelationExpectation(
-        relation_id=DATA_RELATION_ID,
-        predicate=RelationPredicate.USES,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
-        polarity=Polarity.positive,
-    )
+    expectation = _semantic_expectation()
 
     report = _map_with_expectation(
         prepared,
@@ -1531,13 +1810,13 @@ def test_semantic_fallback_rejects_duplicate_entity_identity_keys() -> None:
     )
 
     assert report.path_mappings[0].status is GoldMappingStatus.unmapped
-    assert "no candidate matching its exact endpoints" in (
+    assert "no candidate matching exact source-bound endpoints" in (
         report.path_mappings[0].reason or ""
     )
 
 
 def test_semantic_fallback_rejects_persisted_non_endpoint_entity_drift() -> None:
-    from knowledge_weaver.models.contracts import Polarity, RelationPredicate
+    from knowledge_weaver.models.contracts import RelationPredicate
 
     prepared, source, document, chunks, evidence, relations = _fixture(
         overlap=False, include_path=True
@@ -1555,7 +1834,7 @@ def test_semantic_fallback_rejects_persisted_non_endpoint_entity_drift() -> None
         id=SUBJECT_ID,
         corpus_id=GENERATION_CORPUS_ID,
         kind=EntityKind.concept,
-        canonical_name="get_loop_factory",
+        canonical_name="Config.get_loop_factory",
         aliases=["Config.get_loop_factory"],
         namespace="uvicorn",
         identity_key="uvicorn:get_loop_factory",
@@ -1579,15 +1858,17 @@ def test_semantic_fallback_rejects_persisted_non_endpoint_entity_drift() -> None
         identity_key="uvicorn:unrelated_endpoint",
     )
     entities = [subject, obj, other_entity]
-    expectation = GoldRelationExpectation(
-        relation_id=DATA_RELATION_ID,
-        predicate=RelationPredicate.USES,
-        subject_names=("Config.get_loop_factory",),
-        object_names=("None loop factory",),
-        polarity=Polarity.positive,
+    expectation = _semantic_expectation()
+    semantic_rows = _semantic_kwargs(
+        source, document, evidence, entities, expectation.evidence_basis
     )
     generation = _generation_for(
-        document, chunks, evidence, [candidate, other_relation]
+        document,
+        chunks,
+        evidence,
+        [candidate, other_relation],
+        mentions=semantic_rows["mentions"],
+        provenance=semantic_rows["provenance"],
     )
     assert sorted(generation.entity_ids) == sorted(entity.id for entity in entities)
     persisted_ids = [
@@ -1607,6 +1888,7 @@ def test_semantic_fallback_rejects_persisted_non_endpoint_entity_drift() -> None
             evidence,
             [candidate, other_relation],
             entities=entities,
+            **semantic_rows,
             relation_expectations={DATA_RELATION_ID: expectation},
             generation=malformed_generation,
             dataset_sha256="a" * 64,
