@@ -16,8 +16,14 @@ from knowledge_weaver.evaluation.generation_binding import (
     PersistedGenerationLookup,
     resolve_generation,
     valid_generation_binding,
+    verify_generation_manifest,
 )
-from knowledge_weaver.evaluation.gold_mapping import GoldMappingReport
+from knowledge_weaver.evaluation.gold_mapping import GoldMappingReport, map_gold_to_generation
+from knowledge_weaver.evaluation.persisted_projection import (
+    GoldProjectionLookup,
+    PersistedGoldProjection,
+    PostgresGoldProjectionLookup,
+)
 from knowledge_weaver.evaluation.protocol import BudgetSpec, EvaluationProtocol
 from knowledge_weaver.evaluation.redaction import canonical_json_line
 from knowledge_weaver.evaluation.runs import (
@@ -150,6 +156,7 @@ async def run_formal_matrix(
     executor: BenchmarkExecutor,
     *,
     generation_resolver: PersistedGenerationLookup | None = None,
+    gold_projection_lookup: GoldProjectionLookup | None = None,
     policy_training_summary: Mapping[str, Any] | None = None,
     retry_delay_seconds: float = 0.25,
 ) -> MatrixExecutionReport:
@@ -182,6 +189,40 @@ async def run_formal_matrix(
         )
     generation_id = verified_generation.id
     generation_sha256 = verified_generation.generation_sha256
+    if dataset.manifest.relation_expectations_file is not None:
+        sidecar_hash = dataset.manifest.relation_expectations_sha256
+        expectation_ids = set(dataset.relation_expectations)
+        if (
+            not sidecar_hash
+            or not expectation_ids
+            or expectation_ids
+            != {item.relation_id for item in dataset.relation_expectations.values()}
+        ):
+            return _blocked_report(
+                schedule,
+                "BLOCKED_GOLD_MAPPING: semantic expectation sidecar is not hash-bound or complete",
+            )
+        lookup = gold_projection_lookup
+        if lookup is None:
+            if getattr(generation_resolver, "database", None) is None:
+                return _blocked_report(
+                    schedule,
+                    "BLOCKED_GOLD_MAPPING: persisted semantic projection lookup is unavailable",
+                )
+            lookup = PostgresGoldProjectionLookup(generation_resolver)
+        try:
+            projection = await lookup.load_gold_projection(generation_id)
+            gold_mapping = _map_loaded_semantic_projection(
+                dataset,
+                projection,
+                expected_generation_id=generation_id,
+                expected_generation_sha256=generation_sha256,
+            )
+        except Exception:  # noqa: BLE001 - semantic projection failures must fail closed.
+            return _blocked_report(
+                schedule,
+                "BLOCKED_GOLD_MAPPING: persisted semantic projection is missing, inconsistent, or unmappable",
+            )
     if gold_mapping is None or not gold_mapping.ready:
         details = "Gold span/path mapping is unavailable"
         if gold_mapping is not None and gold_mapping.blockers:
@@ -287,6 +328,38 @@ async def run_formal_matrix(
         query_records=tuple(records),
         blockers=(),
         policy_training_summary=policy_training_summary,
+    )
+
+
+def _map_loaded_semantic_projection(
+    dataset: LoadedDataset,
+    projection: PersistedGoldProjection,
+    *,
+    expected_generation_id: str,
+    expected_generation_sha256: str,
+) -> GoldMappingReport:
+    verified = verify_generation_manifest(projection.generation)
+    if (
+        projection.generation.id != expected_generation_id
+        or verified.generation_sha256 != expected_generation_sha256
+        or dataset.manifest.cases_sha256 is None
+    ):
+        raise GenerationBindingError("persisted semantic projection binding differs from the run")
+    return map_gold_to_generation(
+        dataset.cases,
+        dataset.manifest.sources,
+        projection.documents,
+        projection.chunks,
+        projection.evidence,
+        projection.relations,
+        entities=projection.entities,
+        mentions=projection.mentions,
+        sources=projection.sources,
+        source_versions=projection.source_versions,
+        provenance=projection.provenance,
+        relation_expectations=dataset.relation_expectations,
+        generation=projection.generation,
+        dataset_sha256=dataset.manifest.cases_sha256,
     )
 
 
