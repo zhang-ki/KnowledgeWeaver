@@ -240,6 +240,19 @@ def test_builder_constructs_budget_bound_ports_without_invoking_providers(tmp_pa
     retrievers = assembly.retriever_factory(ledger)
 
     assert assembly.route_adapter.service is assembly.agent_service
+    assert assembly.agent_service.cache_state_manifest is not None
+    assert set(assembly.agent_service.cache_state_manifest.components) == {
+        "bm25",
+        "dense",
+        "symbol",
+        "entity",
+        "graph",
+    }
+    assert assembly.agent_service.cache_state_manifest.components["graph"] is graph
+    assert (
+        assembly.agent_service.cache_state_manifest.manifest_sha256
+        == assembly.component_config_sha256
+    )
     assert retrievers["graph"] is graph
     assert isinstance(retrievers["hybrid"], HybridRetriever)
     assert retrievers["hybrid"].reranker is None
