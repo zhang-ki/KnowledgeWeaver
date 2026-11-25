@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from typing import Any, ClassVar, Protocol
 
 from knowledge_weaver.core.errors import ErrorCode, KnowledgeWeaverError
@@ -42,7 +42,7 @@ _LLM_ROUTER_SCHEMA: dict[str, Any] = {
 
 
 class Generate(Protocol):
-    async def __call__(self, request: LLMRequest) -> LLMResult: ...
+    def __call__(self, request: LLMRequest) -> Awaitable[LLMResult]: ...
 
 
 def _fingerprint(name: str, config: Mapping[str, Any] | None = None) -> str:
@@ -204,6 +204,64 @@ class FixedPolicy(_StatePolicy):
             for item in sorted(candidates, key=stable_action_key)
         ]
         return Decision(action=chosen, candidate_scores=scores, policy_fingerprint=self.policy_fingerprint)
+
+    def observe(self, state: InvestigationState, observation: Observation) -> InvestigationState:
+        return self._observe(state, observation, update_ema=False)
+
+
+class FixedAgentPolicy(_StatePolicy):
+    """Choose the next action in the frozen hybrid/graph/expand/rerank sequence."""
+
+    _PHASE: ClassVar[dict[ActionTool, int]] = {
+        ActionTool.hybrid: 0,
+        ActionTool.graph: 1,
+        ActionTool.rerank: 3,
+    }
+
+    def __init__(self) -> None:
+        super().__init__(
+            "fixed_agent",
+            {
+                "action_sequence": "hybrid>graph>expanded_hybrid>rerank",
+                "hybrid_fusion": "rrf_without_rerank",
+                "top_k": 10,
+                "graph_hops": 2,
+                "expansion_terms_max": 3,
+                "soft_stopping": False,
+            },
+        )
+        self.profile = "fixed_agent"
+
+    def choose(self, state: InvestigationState, candidates: list[Action]) -> Decision:
+        if not candidates:
+            return _stop_decision(StopReason.actions_exhausted, self.policy_fingerprint)
+
+        facets = {item.id: item for item in state.subquestions}
+
+        def phase(action: Action) -> tuple[int, tuple[str | int | bool, ...]]:
+            if action.tool is ActionTool.hybrid:
+                facet = facets.get(action.facet_id or "")
+                expanded = facet is not None and action.query != facet.text
+                return (2 if expanded else 0, stable_action_key(action))
+            return (self._PHASE.get(action.tool, 99), stable_action_key(action))
+
+        ordered = sorted(candidates, key=phase)
+        chosen = ordered[0]
+        scores = [
+            CandidateScore(
+                action_id=item.id,
+                predicted_gain=1.0 if item.id == chosen.id else 0.0,
+                estimated_cost=max(0.0, item.estimated_tokens + item.estimated_ms / 1000.0),
+                utility=1.0 if item.id == chosen.id else 0.0,
+                reason="fixed_agent_protocol_step",
+            )
+            for item in sorted(candidates, key=stable_action_key)
+        ]
+        return Decision(
+            action=chosen,
+            candidate_scores=scores,
+            policy_fingerprint=self.policy_fingerprint,
+        )
 
     def observe(self, state: InvestigationState, observation: Observation) -> InvestigationState:
         return self._observe(state, observation, update_ema=False)

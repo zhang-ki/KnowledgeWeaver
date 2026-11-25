@@ -20,6 +20,7 @@ SCHEMA_VERSION = 1
 UUIDText = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")]
 SHA256Text = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyText = Annotated[str, StringConstraints(min_length=1, strip_whitespace=True)]
+ExactQuoteText = Annotated[str, StringConstraints(min_length=1)]
 Fingerprint = Annotated[str, StringConstraints(min_length=1, max_length=256)]
 EmbeddingMode = Literal["query", "document"]
 
@@ -54,6 +55,7 @@ class StructureType(str, Enum):
 
 class ProvenanceMethod(str, Enum):
     STATIC_ANALYSIS = "STATIC_ANALYSIS"
+    NORMATIVE_SPECIFICATION = "NORMATIVE_SPECIFICATION"
     LLM_EXTRACTED = "LLM_EXTRACTED"
     RULE_INFERRED = "RULE_INFERRED"
     PARSER_EXCERPT = "PARSER_EXCERPT"
@@ -129,6 +131,7 @@ class GraphDirection(str, Enum):
 class ActionTool(str, Enum):
     bm25 = "bm25"
     dense = "dense"
+    hybrid = "hybrid"
     symbol = "symbol"
     entity = "entity"
     graph = "graph"
@@ -182,11 +185,26 @@ class RelationPredicate(str, Enum):
     DEFINES = "DEFINES"
     IMPORTS = "IMPORTS"
     CALLS = "CALLS"
+    CHECKS = "CHECKS"
     INHERITS = "INHERITS"
     DESCRIBES = "DESCRIBES"
     IMPLEMENTS = "IMPLEMENTS"
     USES = "USES"
     DEPENDS_ON = "DEPENDS_ON"
+    MAPS_TO = "MAPS_TO"
+    RETURNS = "RETURNS"
+    RAISES = "RAISES"
+    UPDATES = "UPDATES"
+    VALIDATES = "VALIDATES"
+    SCHEDULES = "SCHEDULES"
+    REQUIRES = "REQUIRES"
+    INVALIDATES = "INVALIDATES"
+    REPLACES = "REPLACES"
+    DISABLES = "DISABLES"
+    OFFERS = "OFFERS"
+    COMPARES_AGAINST = "COMPARES_AGAINST"
+    PRODUCES = "PRODUCES"
+    REPORTS = "REPORTS"
     RELATED_TO = "RELATED_TO"
     CONTRADICTS = "CONTRADICTS"
 
@@ -772,6 +790,7 @@ class InvestigationRequest(SchemaModel):
     context: QueryContext
     budget: Budget
     policy: PolicyKind
+    language: Language | None = None
     features: dict[str, Any] = Field(default_factory=dict)
     policy_artifact: str | None = None
 
@@ -790,6 +809,135 @@ class Answer(SchemaModel):
     claims: list[Claim]
     unanswered: list[str] = Field(default_factory=list)
     usage: Usage
+
+
+class AgentExecutionProfile(SchemaModel):
+    """Frozen B07 identity supplied to the additive B06 trace port."""
+
+    suite_id: NonEmptyText
+    system_id: Literal["fixed_agent", "rule", "llm_router", "segr"]
+    ablation_id: Literal[
+        "A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08", "A09", "A10"
+    ] | None = None
+    route_id: NonEmptyText
+    config_sha256: SHA256Text
+    execution_config_sha256: SHA256Text
+    generation_config_sha256: SHA256Text
+    weights_sha256: SHA256Text | None = None
+    generation_id: UUIDText
+    generation_sha256: SHA256Text
+
+    @model_validator(mode="after")
+    def frozen_route_shape(self) -> Self:
+        expected_route = (
+            f"agent.segr.ablation.{self.ablation_id}"
+            if self.ablation_id is not None
+            else {
+                "fixed_agent": "agent.fixed",
+                "rule": "agent.rule",
+                "llm_router": "agent.llm_router",
+                "segr": "agent.segr",
+            }[self.system_id]
+        )
+        if self.route_id != expected_route:
+            raise ValueError("Agent profile route differs from its frozen system/ablation identity")
+        if (self.system_id == "segr" or self.ablation_id is not None) != (
+            self.weights_sha256 is not None
+        ):
+            raise ValueError("SEGR and ablation profiles require the frozen weights SHA")
+        if self.ablation_id is not None and self.system_id != "segr":
+            raise ValueError("B07 ablations must be bound to the SEGR system")
+        return self
+
+
+class AgentExecutionTraceStep(SchemaModel):
+    """One live tool selection and its returned retrieval data, or its failure."""
+
+    sequence: int = Field(ge=1)
+    step: int = Field(ge=1)
+    action_id: UUIDText
+    source: ActionTool
+    facet_id: UUIDText | None = None
+    query_sha256: SHA256Text
+    context: QueryContext
+    status: Literal["complete", "failed"]
+    hits: tuple[RetrievalHit, ...] = ()
+    paths: tuple[Path, ...] = ()
+    warnings: tuple[str, ...] = ()
+    partial: bool = False
+    usage: Usage
+    error_code: NonEmptyText | None = None
+
+    @model_validator(mode="after")
+    def trace_step_shape(self) -> Self:
+        if self.status == "complete" and self.error_code is not None:
+            raise ValueError("a completed Agent trace step cannot carry a failure code")
+        if self.status == "failed" and self.error_code is None:
+            raise ValueError("a failed Agent trace step requires its observed failure code")
+        if [hit.rank for hit in self.hits] != list(range(1, len(self.hits) + 1)):
+            raise ValueError("each Agent trace step must retain its actual contiguous hit order")
+        return self
+
+
+class AgentProviderCallUsage(SchemaModel):
+    """Usage returned by one actual Agent generation-provider call."""
+
+    sequence: int = Field(ge=1)
+    purpose: Literal["router", "verifier", "answer", "agent"]
+    status: Literal["complete", "failed"]
+    model: NonEmptyText | None = None
+    revision: NonEmptyText | None = None
+    usage: ModelTokenUsage | None = None
+    error_code: NonEmptyText | None = None
+
+    @model_validator(mode="after")
+    def provider_call_shape(self) -> Self:
+        if self.status == "complete":
+            if self.model is None or self.revision is None or self.usage is None or self.error_code is not None:
+                raise ValueError("completed provider calls require model, revision, and usage only")
+        elif self.error_code is None:
+            raise ValueError("failed provider calls require an observed failure code")
+        return self
+
+
+class AgentExecutionResult(SchemaModel):
+    """Public, immutable result of one traced B06 investigation."""
+
+    answer: Answer
+    profile: AgentExecutionProfile
+    generation_id: UUIDText
+    generation_sha256: SHA256Text
+    provider_calls: tuple[AgentProviderCallUsage, ...] = ()
+    retrieval_steps: tuple[AgentExecutionTraceStep, ...] = ()
+    aggregate_usage: Usage
+    validated_citation_ids: tuple[UUIDText, ...] = ()
+
+    @model_validator(mode="after")
+    def result_matches_execution(self) -> Self:
+        if (
+            self.generation_id != self.profile.generation_id
+            or self.generation_sha256 != self.profile.generation_sha256
+            or self.answer.context.generation_id != self.generation_id
+        ):
+            raise ValueError("Agent result Generation identity differs from its verified profile")
+        if self.aggregate_usage != self.answer.usage:
+            raise ValueError("Agent aggregate usage must match the returned Answer usage")
+        if [item.sequence for item in self.retrieval_steps] != list(
+            range(1, len(self.retrieval_steps) + 1)
+        ):
+            raise ValueError("Agent retrieval trace steps must preserve contiguous execution order")
+        if any(item.context.generation_id != self.generation_id for item in self.retrieval_steps):
+            raise ValueError("Agent retrieval trace contains a result from another Generation")
+        if [item.sequence for item in self.provider_calls] != list(
+            range(1, len(self.provider_calls) + 1)
+        ):
+            raise ValueError("Agent provider calls must preserve contiguous execution order")
+        cited_ids = {
+            evidence_id for claim in self.answer.claims for evidence_id in claim.evidence_ids
+        }
+        if not cited_ids.issubset(set(self.validated_citation_ids)):
+            raise ValueError("Agent Answer contains citations outside its validated citation set")
+        return self
 
 
 class Investigation(SchemaModel):
@@ -931,9 +1079,16 @@ class BenchmarkGold(SchemaModel):
     source_path: NonEmptyText
     raw_hash: SHA256Text
     locator: Locator
-    quote: NonEmptyText
+    quote: ExactQuoteText
     grade: int = Field(ge=1, le=3)
     claim_group: NonEmptyText
+
+    @field_validator("quote")
+    @classmethod
+    def quote_must_contain_non_whitespace(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Gold quote must contain non-whitespace text")
+        return value
 
 
 class BenchmarkCase(SchemaModel):
@@ -962,6 +1117,10 @@ class ModelTokenUsage(SchemaModel):
     output_tokens: int = Field(default=0, ge=0)
     count_kind: CountKind = CountKind.unavailable
     raw_fields: dict[str, int] = Field(default_factory=dict)
+
+
+AgentProviderCallUsage.model_rebuild()
+AgentExecutionResult.model_rebuild()
 
 
 class LLMRequest(SchemaModel):
@@ -1023,6 +1182,10 @@ __all__ = [
     "SCHEMA_VERSION",
     "Action",
     "ActionTool",
+    "AgentExecutionProfile",
+    "AgentExecutionResult",
+    "AgentExecutionTraceStep",
+    "AgentProviderCallUsage",
     "Answer",
     "AnswerStatus",
     "BenchmarkCase",

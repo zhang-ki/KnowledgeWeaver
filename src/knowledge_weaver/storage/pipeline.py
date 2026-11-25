@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -18,6 +18,11 @@ from knowledge_weaver.core.ids import (
     sha256_text,
 )
 from knowledge_weaver.extraction import KnowledgeExtractor
+from knowledge_weaver.extraction.ast_extractor import (
+    _build_python_source_index,
+    _PythonSourceIndex,
+)
+from knowledge_weaver.extraction.extractor import EXTRACTION_OBSERVATION_PREFIX
 from knowledge_weaver.indexing.bm25 import TOKENIZER_VERSION, Bm25Index
 from knowledge_weaver.indexing.dense import QdrantDenseIndex
 from knowledge_weaver.indexing.graph_store import PostgresGraphStore
@@ -41,6 +46,7 @@ from knowledge_weaver.models import (
     Provenance,
     ProvenanceMethod,
     Source,
+    SourceKind,
     SourceVersion,
 )
 from knowledge_weaver.ports import EmbeddingProvider, Extractor
@@ -79,6 +85,97 @@ if TYPE_CHECKING:
     from .database import Database
 
 
+_EXTRACTION_ROUTING_PROFILE_VERSION = "kw-extraction-routing-v2"
+_NORMATIVE_PROMPT_VERSION = "kw-normative-response-schema-v3"
+_PYTHON_SOURCE_INDEX_VERSION = "kw-python-source-index-v2"
+_PYTHON_AST_EXTRACTION_VERSION = "kw-python-ast-extraction-v3"
+
+
+def _source_extraction_profile_sha256(
+    source: Source,
+    *,
+    normative_source: bool,
+    provider_configured: bool | None,
+) -> str:
+    payload = {
+        "profile_version": _EXTRACTION_ROUTING_PROFILE_VERSION,
+        "source_kind": source.kind.value,
+        "normative_source": normative_source,
+        "normative_prompt_version": (
+            _NORMATIVE_PROMPT_VERSION if normative_source else None
+        ),
+        "provider_configured": (
+            None if source.kind is SourceKind.python_repo else provider_configured
+        ),
+        "python_source_index_version": (
+            _PYTHON_SOURCE_INDEX_VERSION
+            if source.kind is SourceKind.python_repo
+            else None
+        ),
+        "python_ast_extraction_version": (
+            _PYTHON_AST_EXTRACTION_VERSION
+            if source.kind is SourceKind.python_repo
+            else None
+        ),
+    }
+    return sha256_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _generation_member_hashes(members: Mapping[str, set[str]]) -> dict[str, str]:
+    """Hash persisted members, explicitly recording empty visible Entity/Relation sets."""
+    hash_members = dict(members)
+    hash_members.setdefault("entity", set())
+    hash_members.setdefault("relation", set())
+    return {
+        kind: sha256_text("\n".join(sorted(ids)))
+        for kind, ids in sorted(hash_members.items())
+    }
+
+
+def _extraction_observations(result: ExtractionResult) -> list[str]:
+    return [
+        warning
+        for warning in result.warnings
+        if warning.startswith(EXTRACTION_OBSERVATION_PREFIX)
+    ]
+
+
+def _python_source_index_for_version(
+    source: Source,
+    source_version: SourceVersion,
+    *,
+    documents_by_id: Mapping[str, Document],
+    corpus_id: str,
+) -> _PythonSourceIndex | None:
+    if source.kind is not SourceKind.python_repo or source_version.source_id != source.id:
+        return None
+    documents: list[Document] = []
+    incomplete_code_set = False
+    for entry in source_version.files:
+        is_python_file = entry.relative_path.casefold().endswith((".py", ".pyi"))
+        document = documents_by_id.get(entry.document_id)
+        if (
+            document is None
+            or document.source_id != source.id
+            or document.relative_path.replace("\\", "/").casefold()
+            != entry.relative_path.replace("\\", "/").casefold()
+            or document.raw_hash != entry.raw_hash
+        ):
+            incomplete_code_set = incomplete_code_set or is_python_file
+            continue
+        documents.append(document)
+    if incomplete_code_set:
+        documents = []
+    return _build_python_source_index(
+        source_id=source.id,
+        source_version_id=source_version.id,
+        corpus_id=corpus_id,
+        documents=documents,
+    )
+
+
 class PipelineService:
     """Build, validate and CAS publish an immutable corpus generation."""
 
@@ -94,6 +191,7 @@ class PipelineService:
         parser: StructuralParser | None = None,
         chunker: StructuralChunker | None = None,
         extractor: Extractor | None = None,
+        normative_source_ids: set[str] | frozenset[str] | None = None,
         chunk_config: ChunkConfig | None = None,
         limits: ParseLimits | None = None,
         failure_injector: Callable[[str], None | Awaitable[None]] | None = None,
@@ -104,6 +202,7 @@ class PipelineService:
         self.parser = parser or StructuralParser()
         self.chunker = chunker or StructuralChunker()
         self.extractor = extractor
+        self.normative_source_ids = frozenset(normative_source_ids or ())
         self.chunk_config = chunk_config or ChunkConfig(fingerprint="kw-chunker-v1")
         self.limits = limits or ParseLimits()
         self.failure_injector = failure_injector
@@ -136,7 +235,26 @@ class PipelineService:
         if not any(resolved_root == allowed or allowed in resolved_root.parents for allowed in self.allowed_roots):
             raise KnowledgeWeaverError(ErrorCode.PATH_DENIED, "Source root is outside the configured ingest allowlist.")
         root = resolved_root
+        normative_source = source.id in self.normative_source_ids
+        if normative_source and source.kind is SourceKind.python_repo:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "A Python repository source cannot use the normative text profile.",
+            )
+        provider_configured = (
+            self.extractor.generation_provider is not None
+            if isinstance(self.extractor, KnowledgeExtractor)
+            else False
+            if self.extractor is None
+            else None
+        )
+        extraction_profile_sha256 = _source_extraction_profile_sha256(
+            source,
+            normative_source=normative_source,
+            provider_configured=provider_configured,
+        )
         req_payload = request.model_dump(mode="json")
+        req_payload["extraction_profile_sha256"] = extraction_profile_sha256
         request_hash = sha256_text(json.dumps(req_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         job_id = deterministic_id("job", {"corpus_id": request.corpus_id, "idempotency_key": request.idempotency_key})
         async with self.database.session() as session:
@@ -170,7 +288,18 @@ class PipelineService:
             if manifest.source_version is None:
                 raise KnowledgeWeaverError(ErrorCode.PATH_DENIED, "Source manifest could not be safely built.")
             version = manifest.source_version
-            if previous is not None and previous.manifest_hash == version.manifest_hash:
+            active_profiles = (
+                active.index_manifest.get("extraction_profiles_by_source", {})
+                if active is not None
+                else {}
+            )
+            if not isinstance(active_profiles, dict):
+                active_profiles = {}
+            if (
+                previous is not None
+                and previous.manifest_hash == version.manifest_hash
+                and active_profiles.get(source.id) == extraction_profile_sha256
+            ):
                 report = IndexReport(job_id=job_id, generation_id=active_id, state=PipelineServiceStatus.succeeded, counts={"sources": 1}, warnings=list(manifest.warnings), previous_generation_id=active_id, no_change=True)
                 await self._record_job(session, job_id, request, request_hash, report)
                 await session.commit()
@@ -205,6 +334,46 @@ class PipelineService:
                 chunks_by_doc = {doc_id: await self._load_doc_chunks(session, doc_id) for doc_id in reused}
                 for parsed_document in parsed.parsed_source.documents:
                     chunks_by_doc[parsed_document.id] = self.chunker.split(parsed_document, self.chunk_config)
+                python_source_index = _python_source_index_for_version(
+                    source,
+                    version,
+                    documents_by_id=all_docs,
+                    corpus_id=request.corpus_id,
+                )
+                extractor = self.extractor
+                if extractor is None or isinstance(extractor, KnowledgeExtractor):
+                    inherited_source_kinds = (
+                        extractor.source_kinds_by_id if extractor is not None else {}
+                    )
+                    inherited_normative_sources = (
+                        extractor.normative_source_ids if extractor is not None else frozenset()
+                    )
+                    extractor = KnowledgeExtractor(
+                        extractor.generation_provider if extractor is not None else None,
+                        corpus_id=request.corpus_id,
+                        corpus_ids_by_source=(
+                            extractor.corpus_ids_by_source if extractor is not None else None
+                        ),
+                        source_kinds_by_id={
+                            **inherited_source_kinds,
+                            source.id: source.kind,
+                        },
+                        normative_source_ids=(
+                            set(inherited_normative_sources)
+                            | (set(self.normative_source_ids) & {source.id})
+                        ),
+                        timeout_seconds=(
+                            extractor.timeout_seconds if extractor is not None else 30.0
+                        ),
+                        max_schema_repairs=(
+                            extractor.max_schema_repairs if extractor is not None else 1
+                        ),
+                        _python_source_index=python_source_index,
+                        _python_source_version_id=(
+                            version.id if python_source_index is not None else None
+                        ),
+                    )
+                extraction_observations: list[str] = []
                 for entry in version.files:
                     document_item = all_docs.get(entry.document_id)
                     if document_item is None:
@@ -220,8 +389,16 @@ class PipelineService:
                     members.setdefault("document", set()).add(document.id)
                     members.setdefault("chunk", set()).update(chunk.id for chunk in chunks)
                     leaf_chunks = [chunk for chunk in chunks if chunk.is_leaf]
-                    extractor = self.extractor or KnowledgeExtractor(corpus_id=request.corpus_id)
-                    extracted = await extractor.extract(ExtractionRequest(document=document, chunks=leaf_chunks, producer_fingerprint="kw-extractor-v1"))
+                    extracted = await extractor.extract(
+                        ExtractionRequest(
+                            document=document,
+                            chunks=leaf_chunks,
+                            producer_fingerprint=(
+                                f"kw-extractor-v2:{extraction_profile_sha256}"
+                            ),
+                        )
+                    )
+                    extraction_observations.extend(_extraction_observations(extracted))
                     provenance = {item.id: item for item in extracted.provenance}
                     evidence = {item.id: item for item in extracted.evidence}
                     for chunk in leaf_chunks:
@@ -243,9 +420,14 @@ class PipelineService:
                 await session.flush()
                 await self._inject("after_facts")
                 index_manifest, embed_fingerprint = await self._build_indexes(session, request.corpus_id, generation_id, members)
+                next_extraction_profiles = dict(active_profiles)
+                next_extraction_profiles[source.id] = extraction_profile_sha256
+                index_manifest["extraction_profiles_by_source"] = dict(
+                    sorted(next_extraction_profiles.items())
+                )
                 await self._inject("after_indexes")
                 await self._validate_generation(session, members)
-                member_hashes = {kind: sha256_text("\n".join(sorted(ids))) for kind, ids in sorted(members.items())}
+                member_hashes = _generation_member_hashes(members)
                 index_manifest["member_hashes"] = member_hashes
                 generation.generation_hash = sha256_text(json.dumps({"source_version_ids": generation.source_version_ids, "member_hashes": member_hashes, "index_manifest": index_manifest}, sort_keys=True, separators=(",", ":")))
                 index_manifest["generation_hash"] = generation.generation_hash
@@ -279,7 +461,7 @@ class PipelineService:
                 if active is not None:
                     active.state = GenerationState.RETIRED.value
                 report = IndexReport(job_id=job_id, generation_id=generation_id, state=PipelineServiceStatus.succeeded,
-                    counts={"documents": len(documents), "chunks": len(members.get("chunk", set())), "evidence": len(members.get("evidence", set())), "entities": len(members.get("entity", set())), "relations": len(members.get("relation", set()))}, warnings=list(manifest.warnings) + list(parsed.parsed_source.warnings), previous_generation_id=previous_generation)
+                    counts={"documents": len(documents), "chunks": len(members.get("chunk", set())), "evidence": len(members.get("evidence", set())), "entities": len(members.get("entity", set())), "relations": len(members.get("relation", set()))}, warnings=list(manifest.warnings) + list(parsed.parsed_source.warnings) + extraction_observations, previous_generation_id=previous_generation)
                 await self._record_job(session, job_id, request, request_hash, report)
                 await session.commit()
                 return report
@@ -362,7 +544,7 @@ class PipelineService:
             index_manifest, embed_fingerprint = await self._build_indexes(session, request.corpus_id, new_generation_id, members)
             await self._inject("after_facts")
             await self._inject("after_indexes")
-            member_hashes = {kind: sha256_text("\n".join(sorted(ids))) for kind, ids in sorted(members.items())}
+            member_hashes = _generation_member_hashes(members)
             index_manifest["member_hashes"] = member_hashes
             row.generation_hash = sha256_text(json.dumps({"source_version_ids": versions, "member_hashes": member_hashes, "index_manifest": index_manifest}, sort_keys=True, separators=(",", ":")))
             index_manifest["generation_hash"] = row.generation_hash

@@ -14,6 +14,7 @@ from knowledge_weaver.evaluation.generation_binding import (
 )
 from knowledge_weaver.evaluation.runs import (
     AttemptOutcome,
+    BlindBenchmarkInput,
     QueryMeasurements,
     run_query_with_retries,
 )
@@ -23,6 +24,28 @@ from knowledge_weaver.evaluation.scheduling import (
     valid_generation_binding,
 )
 from knowledge_weaver.models.contracts import Generation, GenerationState
+from knowledge_weaver.retrieval.cache_state import CacheStateOperation, CacheStateReceipt
+
+
+def _cache_receipt(cache_state: Literal["cold", "warm"]) -> CacheStateReceipt:
+    return CacheStateReceipt(
+        route_id="retriever.test",
+        requested_state=cache_state,
+        applied_state=cache_state,
+        implementation_sha256="a" * 64,
+        config_sha256="b" * 64,
+        controlled_components=("test.cache",),
+        warmup_sequence=("test.cache",),
+        operations=(
+            CacheStateOperation(
+                sequence=1,
+                component_id="test.cache",
+                operation="reset" if cache_state == "cold" else "warm",
+                verified=True,
+            ),
+        ),
+        complete=True,
+    )
 
 
 def _make_generation() -> tuple[Generation, str]:
@@ -115,6 +138,36 @@ def _with_source_version_membership(
     )
 
 
+def _rebind_generation_manifest(
+    generation: Generation, manifest: dict[str, object]
+) -> Generation:
+    manifest = dict(manifest)
+    manifest.pop("generation_hash", None)
+    member_hashes = manifest["member_hashes"]
+    payload = {
+        "source_version_ids": generation.source_version_ids,
+        "member_hashes": member_hashes,
+        "index_manifest": manifest,
+    }
+    manifest["generation_hash"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return generation.model_copy(update={"index_manifest": manifest})
+
+
+def _with_empty_entity_relation_members(generation: Generation) -> Generation:
+    manifest = dict(generation.index_manifest)
+    member_hashes = dict(manifest["member_hashes"])
+    empty_hash = hashlib.sha256(b"").hexdigest()
+    member_hashes["entity"] = empty_hash
+    member_hashes["relation"] = empty_hash
+    manifest["member_hashes"] = member_hashes
+    empty_generation = generation.model_copy(
+        update={"entity_ids": [], "relation_ids": []}
+    )
+    return _rebind_generation_manifest(empty_generation, manifest)
+
+
 def test_source_version_membership_verifies_with_publisher_sorting() -> None:
     generation, _ = _make_generation()
 
@@ -122,6 +175,26 @@ def test_source_version_membership_verifies_with_publisher_sorting() -> None:
 
     assert verified.generation_sha256 == generation.index_manifest["generation_hash"]
     assert generation.source_version_ids != sorted(generation.source_version_ids)
+
+
+def test_empty_entity_relation_members_require_explicit_canonical_hashes() -> None:
+    generation = _with_empty_entity_relation_members(_make_generation()[0])
+    empty_hash = hashlib.sha256(b"").hexdigest()
+
+    verified = verify_generation_manifest(generation)
+
+    assert generation.index_manifest["member_hashes"]["entity"] == empty_hash
+    assert generation.index_manifest["member_hashes"]["relation"] == empty_hash
+    assert verified.generation_sha256 == generation.index_manifest["generation_hash"]
+
+    for kind in ("entity", "relation"):
+        manifest = dict(generation.index_manifest)
+        member_hashes = dict(manifest["member_hashes"])
+        member_hashes.pop(kind)
+        manifest["member_hashes"] = member_hashes
+        malformed = _rebind_generation_manifest(generation, manifest)
+        with pytest.raises(GenerationBindingError, match="membership"):
+            verify_generation_manifest(malformed)
 
 
 def test_source_version_membership_requires_hash() -> None:
@@ -191,12 +264,13 @@ class _IdentityExecutor:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.query: BlindBenchmarkInput | None = None
         self.generation: Generation | None = None
         self.generation_sha256: str | None = None
 
     async def execute_query(
         self,
-        case,
+        query: BlindBenchmarkInput,
         suite,
         *,
         attempt: int,
@@ -205,6 +279,7 @@ class _IdentityExecutor:
         generation_sha256: str,
     ) -> AttemptOutcome:
         self.calls += 1
+        self.query = query
         self.generation = generation
         self.generation_sha256 = generation_sha256
         return AttemptOutcome(
@@ -216,6 +291,7 @@ class _IdentityExecutor:
             model_revision="fixture-v1",
             count_kind="unavailable",
             cache_state=cache_state,
+            cache_state_receipt=_cache_receipt(cache_state),
             measurements=QueryMeasurements(),
             execution_generation_id=generation.id,
             execution_generation_sha256=generation_sha256,
@@ -271,6 +347,15 @@ def test_executor_receives_resolved_generation_and_content_digest() -> None:
     assert executor.calls == 1
     assert executor.generation is generation
     assert executor.generation_sha256 == generation_sha256
+    assert executor.query is not None
+    assert executor.query.model_dump() == {
+        "query_id": case.case.id,
+        "question": case.case.question,
+        "language": case.case.language,
+    }
+    assert set(executor.query.model_dump()) == {"query_id", "question", "language"}
+    with pytest.raises(ValueError):
+        executor.query.question = "mutated"  # type: ignore[misc]
     assert record.generation_id == generation.id
     assert record.generation_sha256 == generation_sha256
 

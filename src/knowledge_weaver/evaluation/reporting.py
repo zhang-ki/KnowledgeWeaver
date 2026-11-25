@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import statistics
 from collections import defaultdict
@@ -273,10 +274,148 @@ def system_pareto_frontier(
     return [point.__dict__ for point in frontier]
 
 
+def _validate_query_coverage(
+    matrix_manifest: Mapping[str, Any],
+    schedule: Mapping[str, Any],
+    records: Sequence[QueryRunRecord],
+    *,
+    status: str,
+) -> None:
+    raw_suites = schedule.get("suites", [])
+    if not isinstance(raw_suites, list):
+        raise TypeError("matrix schedule suites must be a list")
+    suites: dict[str, Mapping[str, Any]] = {}
+    for suite in raw_suites:
+        if not isinstance(suite, Mapping) or not isinstance(suite.get("suite_id"), str):
+            raise TypeError("matrix schedule contains an invalid suite identity")
+        suite_id = suite["suite_id"]
+        if suite_id in suites:
+            raise ValueError("matrix schedule contains duplicate suite identities")
+        suites[suite_id] = suite
+
+    raw_expected = matrix_manifest.get("expected_query_keys")
+    expected_keys: set[tuple[str, str, str]] = set()
+    expected_counts: dict[str, int] = defaultdict(int)
+    if raw_expected is not None:
+        if not isinstance(raw_expected, list):
+            raise TypeError("expected query keys must be a list")
+        for item in raw_expected:
+            if not isinstance(item, Mapping):
+                raise TypeError("expected query key is malformed")
+            suite_id, case_id, cache_state = (
+                item.get("suite_id"),
+                item.get("case_id"),
+                item.get("cache_state"),
+            )
+            if (
+                not isinstance(suite_id, str)
+                or not isinstance(case_id, str)
+                or not isinstance(cache_state, str)
+                or cache_state not in {"cold", "warm"}
+            ):
+                raise TypeError("expected query key is malformed")
+            key = (suite_id, case_id, cache_state)
+            if key in expected_keys:
+                raise ValueError("expected query keys contain a duplicate")
+            if suite_id not in suites:
+                raise ValueError("expected query key references an unknown suite")
+            expected_keys.add(key)
+            expected_counts[suite_id] += 1
+        if expected_keys:
+            for suite_id, suite in suites.items():
+                expected_count = suite.get("expected_query_runs")
+                if expected_count is not None and expected_counts[suite_id] != expected_count:
+                    raise ValueError("expected query keys do not match a suite's scheduled query count")
+
+    actual_keys: set[tuple[str, str, str]] = set()
+    actual_counts: dict[str, int] = defaultdict(int)
+    for record in records:
+        suite = suites.get(record.suite_id)
+        if suites and suite is None:
+            raise ValueError("per-query record references an unknown suite")
+        if suite is not None and (
+            record.system_id != suite.get("system_id")
+            or record.budget_id != suite.get("budget_id")
+            or record.seed != suite.get("seed")
+            or record.ablation_id != suite.get("ablation_id")
+        ):
+            raise ValueError("per-query record suite identity mismatch")
+        key = (record.suite_id, record.case_id, record.cache_state)
+        if key in actual_keys:
+            raise ValueError("per-query records contain a duplicate query key")
+        if expected_keys and key not in expected_keys:
+            raise ValueError("per-query record is outside the expected query keys")
+        actual_keys.add(key)
+        actual_counts[record.suite_id] += 1
+
+    if status == "COMPLETE":
+        if raw_expected is None or not expected_keys:
+            raise ValueError("complete matrix is missing exact expected query keys")
+        if actual_keys != expected_keys:
+            raise ValueError("per-query records do not exactly cover the expected query keys")
+
+    raw_statuses = matrix_manifest.get("suite_statuses", [])
+    if not isinstance(raw_statuses, list):
+        raise TypeError("suite statuses must be a list")
+    status_by_suite: dict[str, Mapping[str, Any]] = {}
+    for item in raw_statuses:
+        if not isinstance(item, Mapping) or not isinstance(item.get("suite_id"), str):
+            raise TypeError("matrix contains an invalid suite status")
+        suite_id = item["suite_id"]
+        if suite_id in status_by_suite:
+            raise ValueError("matrix contains duplicate suite statuses")
+        if suites and suite_id not in suites:
+            raise ValueError("matrix status references an unknown suite")
+        if item.get("query_count") != actual_counts[suite_id]:
+            raise ValueError("suite query count differs from its per-query records")
+        status_by_suite[suite_id] = item
+
+    if status == "COMPLETE":
+        expected_total = matrix_manifest.get(
+            "expected_query_runs", schedule.get("expected_query_runs")
+        )
+        if expected_total != len(expected_keys):
+            raise ValueError("expected query keys do not match the matrix query count")
+        suite_total = matrix_manifest.get(
+            "formal_suite_count", schedule.get("formal_suite_count", len(suites))
+        )
+        if suite_total != len(suites):
+            raise ValueError("formal suite count differs from scheduled suite identities")
+        if not suites or set(status_by_suite) != set(suites):
+            raise ValueError("complete matrix does not contain every scheduled suite status")
+        for suite_id, suite in suites.items():
+            item = status_by_suite[suite_id]
+            if item.get("status") != "COMPLETE":
+                raise ValueError("complete matrix contains a non-complete suite")
+            if actual_counts[suite_id] != suite.get("expected_query_runs"):
+                raise ValueError("per-query records do not match a suite's scheduled query count")
+        if any(record.status != "complete" for record in records):
+            raise ValueError("complete matrix contains a failed per-query record")
+        display_only = (
+            matrix_manifest.get("display_only") is True
+            or schedule.get("gold_mapping_mode") == "LEGACY_COMPATIBILITY"
+        )
+        if not display_only and any(
+            not record.formal_quality_eligible for record in records
+        ):
+            raise ValueError("complete formal matrix contains a query without required quality review")
+
+
 def build_report(
     matrix_manifest: Mapping[str, Any], records: Sequence[QueryRunRecord]
 ) -> dict[str, Any]:
     schedule = matrix_manifest.get("schedule", matrix_manifest)
+    schedule_mode = schedule.get("gold_mapping_mode")
+    display_only = schedule_mode == "LEGACY_COMPATIBILITY"
+    execution_mode = "LEGACY_DISPLAY_ONLY" if display_only else "FORMAL_G3"
+    manifest_mode = matrix_manifest.get("execution_mode")
+    if manifest_mode is not None and manifest_mode != execution_mode:
+        raise ValueError("matrix execution mode differs from the scheduled Gold mapping mode")
+    manifest_display_only = matrix_manifest.get("display_only")
+    if manifest_display_only is not None and manifest_display_only is not display_only:
+        raise ValueError("matrix display-only flag differs from the scheduled Gold mapping mode")
+    if display_only and matrix_manifest.get("formal_quality_eligible") is True:
+        raise ValueError("legacy compatibility reports cannot claim formal quality eligibility")
     manifest_generation_id = matrix_manifest.get("generation_id")
     manifest_generation_sha256 = matrix_manifest.get("generation_sha256")
     schedule_generation_id = schedule.get("generation_id")
@@ -293,6 +432,26 @@ def build_report(
         and manifest_generation_sha256 != schedule_generation_sha256
     ):
         raise ValueError("matrix manifest and schedule generation SHA-256 values differ")
+    binding_fields = (
+        "dataset_id",
+        "dataset_version",
+        "dataset_manifest_sha256",
+        "dataset_content_sha256",
+        "relation_expectations_sha256",
+        "required_relation_ids",
+        "required_relation_ids_sha256",
+        "required_relation_queue_sha256",
+        "gold_mapping_mode",
+    )
+    for field in binding_fields:
+        manifest_value = matrix_manifest.get(field)
+        schedule_value = schedule.get(field)
+        if (
+            manifest_value is not None
+            and schedule_value is not None
+            and manifest_value != schedule_value
+        ):
+            raise ValueError(f"matrix manifest and schedule {field} values differ")
     generation_id = manifest_generation_id or schedule_generation_id
     generation_sha256 = manifest_generation_sha256 or schedule_generation_sha256
     if records:
@@ -312,44 +471,81 @@ def build_report(
     failed_count = sum(item.get("status") == "FAILED" for item in suite_statuses)
     complete_count = sum(item.get("status") == "COMPLETE" for item in suite_statuses)
     status = matrix_manifest.get("status", schedule.get("status", "BLOCKED"))
-    summary = summarize_query_runs(records)
+    if not isinstance(status, str):
+        raise TypeError("matrix status must be a string")
+    _validate_query_coverage(matrix_manifest, schedule, records, status=status)
+    report_records = (
+        [record.model_copy(update={"formal_quality_eligible": False}) for record in records]
+        if display_only
+        else records
+    )
+    summary = summarize_query_runs(report_records)
     report = {
-        "schema_version": 1,
+        "schema_version": 3,
         "status": status,
+        "execution_mode": execution_mode,
+        "display_only": display_only,
+        "formal_quality_eligible": (
+            not display_only
+            and bool(records)
+            and all(record.formal_quality_eligible for record in records)
+            and status == "COMPLETE"
+        ),
         "generation_id": generation_id,
         "generation_sha256": generation_sha256,
+        **{
+            field: (
+                matrix_manifest.get(field)
+                if matrix_manifest.get(field) is not None
+                else schedule.get(field)
+            )
+            for field in binding_fields
+        },
         "protocol_id": schedule.get("protocol_id"),
         "formal_suite_count": schedule.get("formal_suite_count", len(schedule.get("suites", []))),
         "blocked_suite_count": blocked_count,
         "failed_suite_count": failed_count,
         "complete_suite_count": complete_count,
         "expected_query_runs": matrix_manifest.get("expected_query_runs", schedule.get("expected_query_runs")),
-        "expected_quality_query_runs": matrix_manifest.get(
-            "expected_quality_query_runs", schedule.get("expected_quality_query_runs")
+        "expected_quality_query_runs": (
+            0
+            if display_only
+            else matrix_manifest.get(
+                "expected_quality_query_runs", schedule.get("expected_quality_query_runs")
+            )
         ),
         "query_record_count": len(records),
         "blockers": matrix_manifest.get("blockers", schedule.get("blockers", [])),
         "missing_runs": matrix_manifest.get("missing_runs", schedule.get("missing_runs", [])),
         **summary,
-        "standard_paired_comparisons": paired_system_comparisons(records),
-        "standard_quality_cost_pareto": system_pareto_frontier(records),
+        "standard_paired_comparisons": (
+            [] if display_only else paired_system_comparisons(report_records)
+        ),
+        "standard_quality_cost_pareto": (
+            [] if display_only else system_pareto_frontier(report_records)
+        ),
         "policy_training_summary": matrix_manifest.get("policy_training_summary"),
     }
     return report
 
 
 def render_markdown_report(report: Mapping[str, Any]) -> str:
+    display_only = report.get("display_only") is True or report.get(
+        "execution_mode"
+    ) == "LEGACY_DISPLAY_ONLY"
     lines = [
-        "# B07.final experiment report",
+        "# B07.final compatibility display" if display_only else "# B07.final experiment report",
         "",
+        f"- Mode: **{'DISPLAY_ONLY' if display_only else 'FORMAL_G3'}**",
         f"- Status: **{report.get('status', 'UNKNOWN')}**",
         (
-            f"- Formal suites: {report.get('complete_suite_count', 0)}/"
+            f"- {'Execution' if display_only else 'Formal'} suites: {report.get('complete_suite_count', 0)}/"
             f"{report.get('formal_suite_count', 111)} complete; "
             f"{report.get('blocked_suite_count', 0)} blocked; {report.get('failed_suite_count', 0)} failed"
         ),
         (
-            f"- Quality cases: {report.get('expected_quality_query_runs', 'unknown')}; "
+            f"- {'Formal quality cases' if display_only else 'Quality cases'}: "
+            f"{report.get('expected_quality_query_runs', 'unknown')}; "
             f"query executions across cache states: {report.get('query_record_count', 0)} "
             f"(expected {report.get('expected_query_runs', 'unknown')})"
         ),
@@ -385,32 +581,56 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
         )
     summaries = report.get("suite_summaries", [])
     if summaries:
-        lines.extend(
-            [
-                "## Suite metrics and usage",
-                "",
-                "| Suite and cache | Queries | Failures | Evidence recall | Answer correctness (0–2) | Tokens | USD | CNY | Latency p50/p95 ms |",
-                "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
-            ]
-        )
-        for item in summaries:
-            lines.append(
-                "| {suite} ({cache}) | {count} | {failed} | {recall} | {correct} | {tokens} | {usd} | {cny} | {p50}/{p95} |".format(
-                    suite=item["suite_id"],
-                    cache=item["cache_state"],
-                    count=item["query_count"],
-                    failed=item["failed_query_count"],
-                    recall=item["mean_evidence_recall"],
-                    correct=item["answer_correctness_mean_0_to_2"],
-                    tokens=item["total_tokens"],
-                    usd=item["currency_cost_usd"],
-                    cny=item["currency_cost_cny"],
-                    p50=item["end_to_end_latency_p50_ms"],
-                    p95=item["end_to_end_latency_p95_ms"],
-                )
+        if display_only:
+            lines.extend(
+                [
+                    "## Suite usage (display only)",
+                    "",
+                    "| Suite and cache | Queries | Failures | Tokens | USD | CNY | Latency p50/p95 ms |",
+                    "|---|---:|---:|---:|---:|---:|---:|",
+                ]
             )
+            for item in summaries:
+                lines.append(
+                    "| {suite} ({cache}) | {count} | {failed} | {tokens} | {usd} | {cny} | {p50}/{p95} |".format(
+                        suite=item["suite_id"],
+                        cache=item["cache_state"],
+                        count=item["query_count"],
+                        failed=item["failed_query_count"],
+                        tokens=item["total_tokens"],
+                        usd=item["currency_cost_usd"],
+                        cny=item["currency_cost_cny"],
+                        p50=item["end_to_end_latency_p50_ms"],
+                        p95=item["end_to_end_latency_p95_ms"],
+                    )
+                )
+        else:
+            lines.extend(
+                [
+                    "## Suite metrics and usage",
+                    "",
+                    "| Suite and cache | Queries | Failures | Evidence recall | Answer correctness (0–2) | Tokens | USD | CNY | Latency p50/p95 ms |",
+                    "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+                ]
+            )
+            for item in summaries:
+                lines.append(
+                    "| {suite} ({cache}) | {count} | {failed} | {recall} | {correct} | {tokens} | {usd} | {cny} | {p50}/{p95} |".format(
+                        suite=item["suite_id"],
+                        cache=item["cache_state"],
+                        count=item["query_count"],
+                        failed=item["failed_query_count"],
+                        recall=item["mean_evidence_recall"],
+                        correct=item["answer_correctness_mean_0_to_2"],
+                        tokens=item["total_tokens"],
+                        usd=item["currency_cost_usd"],
+                        cny=item["currency_cost_cny"],
+                        p50=item["end_to_end_latency_p50_ms"],
+                        p95=item["end_to_end_latency_p95_ms"],
+                    )
+                )
         lines.append("")
-    comparisons = report.get("standard_paired_comparisons", [])
+    comparisons = [] if display_only else report.get("standard_paired_comparisons", [])
     if comparisons:
         lines.extend(["## Paired source-family comparisons", ""])
         for item in comparisons:
@@ -422,7 +642,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
                 f"confirmatory={item['confirmatory_family_count']}"
             )
         lines.append("")
-    frontier = report.get("standard_quality_cost_pareto", [])
+    frontier = [] if display_only else report.get("standard_quality_cost_pareto", [])
     if frontier:
         lines.extend(["## Standard-budget quality/cost Pareto frontier", ""])
         for item in frontier:
@@ -442,8 +662,20 @@ def recompute_report_files(
     matrix_manifest_path: Path, per_query_path: Path, report_path: Path
 ) -> dict[str, Any]:
     matrix = json.loads(matrix_manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(matrix, Mapping):
+        raise TypeError("matrix manifest must be an object")
+    expected_jsonl_sha256 = matrix.get("per_query_jsonl_sha256")
+    jsonl_bytes = per_query_path.read_bytes()
+    actual_jsonl_sha256 = hashlib.sha256(jsonl_bytes).hexdigest()
+    if (
+        not isinstance(expected_jsonl_sha256, str)
+        or len(expected_jsonl_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_jsonl_sha256)
+        or expected_jsonl_sha256 != actual_jsonl_sha256
+    ):
+        raise ValueError("per-query JSONL SHA-256 does not match the matrix manifest")
     records: list[QueryRunRecord] = []
-    for line_number, line in enumerate(per_query_path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, line in enumerate(jsonl_bytes.decode("utf-8").splitlines(), start=1):
         if not line.strip():
             raise ValueError(f"blank per-query JSONL row at line {line_number}")
         records.append(QueryRunRecord.model_validate_json(line))

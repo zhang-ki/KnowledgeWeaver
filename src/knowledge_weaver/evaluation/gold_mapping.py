@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -10,7 +11,15 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any
 
-from knowledge_weaver.evaluation.contracts import PreparedBenchmarkCase, SourceAsset
+from knowledge_weaver.evaluation.contracts import (
+    GoldEndpointExpectation,
+    GoldEvidenceBasis,
+    GoldOutcomeKind,
+    GoldQualifierReviewState,
+    GoldRelationExpectation,
+    PreparedBenchmarkCase,
+    SourceAsset,
+)
 from knowledge_weaver.evaluation.generation_binding import (
     GenerationBindingError,
     verify_generation_manifest,
@@ -23,9 +32,13 @@ from knowledge_weaver.models.contracts import (
     Evidence,
     Generation,
     MarkdownLocator,
-    Polarity,
+    Mention,
+    Provenance,
+    ProvenanceMethod,
     Relation,
     RelationPredicate,
+    Source,
+    SourceVersion,
 )
 
 
@@ -34,6 +47,14 @@ class GoldMappingStatus(StrEnum):
     unmapped = "UNMAPPED"
     ambiguous = "AMBIGUOUS"
     missing_evidence = "MISSING_GENERATION_EVIDENCE"
+
+
+DIRECT_CALL_PHYSICAL_LINE_BOUNDARY_ADAPTER_VERSION = (
+    "kw-g3-physical-line-boundary-evidence/v1"
+)
+STATIC_CALL_RESOLUTION_QUALIFIER_ADAPTER_VERSION = (
+    "kw-g3-static-call-resolution-qualifier/v1"
+)
 
 
 @dataclass(frozen=True)
@@ -57,17 +78,6 @@ class GoldSpanMapping:
 
 
 @dataclass(frozen=True)
-class GoldRelationExpectation:
-    """Expected semantic contract for resolving a Data-side Gold relation ID at runtime."""
-
-    relation_id: str
-    predicate: RelationPredicate
-    subject_names: tuple[str, ...]
-    object_names: tuple[str, ...]
-    polarity: Polarity = Polarity.positive
-
-
-@dataclass(frozen=True)
 class GoldPathMapping:
     case_id: str
     path_index: int
@@ -75,6 +85,7 @@ class GoldPathMapping:
     relation_ids: tuple[str, ...] = ()
     traversed_reverse: tuple[bool, ...] = ()
     evidence_ids_by_edge: tuple[tuple[str, ...], ...] = ()
+    adapter_versions_by_edge: tuple[tuple[str, ...], ...] = ()
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -98,7 +109,7 @@ class GoldMappingReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "generation_id": self.generation_id,
             "generation_sha256": self.generation_sha256,
             "dataset_sha256": self.dataset_sha256,
@@ -116,6 +127,20 @@ class _Candidate:
     document_id: str
     document_start: int
     document_end: int
+
+
+@dataclass(frozen=True)
+class _SemanticProjectionContext:
+    generation: Generation
+    entities_by_id: Mapping[str, Entity]
+    mentions_by_entity: Mapping[str, Sequence[Mention]]
+    evidence_by_id: Mapping[str, Evidence]
+    chunks_by_id: Mapping[str, Chunk]
+    documents_by_id: Mapping[str, Document]
+    sources_by_id: Mapping[str, Source]
+    source_versions_by_id: Mapping[str, SourceVersion]
+    provenance_by_id: Mapping[str, Provenance]
+    relations_by_id: Mapping[str, Relation]
 
 
 def _canonical_hash(value: object) -> str:
@@ -398,44 +423,6 @@ def _same_physical_quote_groups(
     return physical_identity is not None and evidence_identity is not None
 
 
-def _normalize_entity_label(label: str) -> str:
-    return " ".join(label.strip().split())
-
-
-def _entity_matches(
-    entity: Entity | None,
-    expected_names: tuple[str, ...],
-    *,
-    entities_by_id: Mapping[str, Entity],
-) -> bool:
-    if entity is None or not expected_names:
-        return False
-    expected_labels = {_normalize_entity_label(name) for name in expected_names if name.strip()}
-    if not expected_labels:
-        return False
-
-    def has_exact_registered_label(candidate: Entity) -> bool:
-        labels = {_normalize_entity_label(candidate.canonical_name)} | {
-            _normalize_entity_label(alias) for alias in candidate.aliases
-        }
-        return bool(labels & expected_labels)
-
-    if not has_exact_registered_label(entity):
-        return False
-    matching_entity_ids = {
-        candidate.id
-        for candidate in entities_by_id.values()
-        if has_exact_registered_label(candidate)
-    }
-    matching_identity_ids = {
-        candidate.id
-        for candidate in entities_by_id.values()
-        if (candidate.corpus_id, candidate.kind, candidate.identity_key)
-        == (entity.corpus_id, entity.kind, entity.identity_key)
-    }
-    return matching_entity_ids == {entity.id} and matching_identity_ids == {entity.id}
-
-
 def _relation_evidence_closure(
     relation: Relation, mapped_evidence_groups: Sequence[set[str]]
 ) -> tuple[str, ...]:
@@ -446,107 +433,675 @@ def _relation_evidence_closure(
     return tuple(sorted(set().union(*intersections)))
 
 
-def _direct_relation_expectation_failure(
+def _ast_offset(text: str, line_offsets: Sequence[int], line: int, byte_column: int) -> int | None:
+    if line < 1 or line > len(line_offsets):
+        return None
+    line_start = line_offsets[line - 1]
+    line_end = line_offsets[line] if line < len(line_offsets) else len(text)
+    line_text = text[line_start:line_end]
+    try:
+        column = len(line_text.encode("utf-8")[:byte_column].decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
+    return line_start + column if column <= len(line_text) else None
+
+
+def _ast_node_interval(
+    node: ast.AST, text: str, line_offsets: Sequence[int]
+) -> tuple[int, int] | None:
+    start_line = getattr(node, "lineno", None)
+    start_column = getattr(node, "col_offset", None)
+    end_line = getattr(node, "end_lineno", None)
+    end_column = getattr(node, "end_col_offset", None)
+    if (
+        not isinstance(start_line, int)
+        or not isinstance(start_column, int)
+        or not isinstance(end_line, int)
+        or not isinstance(end_column, int)
+    ):
+        return None
+    start = _ast_offset(text, line_offsets, start_line, start_column)
+    end = _ast_offset(text, line_offsets, end_line, end_column)
+    if start is None or end is None or end <= start:
+        return None
+    return start, end
+
+
+def _module_qualname(relative_path: str) -> str:
+    path = PurePosixPath(relative_path.replace("\\", "/")).with_suffix("")
+    parts = path.parts[:-1] if path.parts and path.parts[-1] == "__init__" else path.parts
+    return ".".join(parts)
+
+
+def _evidence_document_interval(
+    evidence: Evidence, context: _SemanticProjectionContext
+) -> tuple[Document, int, int] | None:
+    chunk = context.chunks_by_id.get(evidence.chunk_id)
+    if chunk is None:
+        return None
+    try:
+        evidence.assert_matches_chunk(chunk)
+    except ValueError:
+        return None
+    document = context.documents_by_id.get(chunk.document_id)
+    if document is None:
+        return None
+    intervals = {
+        (
+            span.document_start + evidence.start - span.chunk_start,
+            span.document_start + evidence.end - span.chunk_start,
+        )
+        for span in chunk.spans
+        if span.chunk_start <= evidence.start and evidence.end <= span.chunk_end
+    }
+    if len(intervals) != 1:
+        return None
+    start, end = next(iter(intervals))
+    if document.normalized_text[start:end] != evidence.quote:
+        return None
+    return document, start, end
+
+
+def _is_direct_callsite_evidence(
+    evidence: Evidence,
+    document: Document,
+    evidence_start: int,
+    evidence_end: int,
+    expectation: GoldRelationExpectation,
+) -> bool:
+    """Prove Evidence is an AST call or its direct containing statement."""
+    text = document.normalized_text
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    line_offsets = [0]
+    line_offsets.extend(index + 1 for index, char in enumerate(text) if char == "\n")
+    parents = {
+        id(child): parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    module_name = _module_qualname(document.relative_path)
+    expected_subject = expectation.subject.qualified_symbol
+    expected_object = expectation.object.qualified_symbol
+    expected_object_name = expected_object.rsplit(".", 1)[-1]
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        call_interval = _ast_node_interval(node, text, line_offsets)
+        if call_interval is None:
+            continue
+        parent = parents.get(id(node))
+        statement_interval: tuple[int, int] | None = None
+        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.Return, ast.Expr)) and getattr(
+            parent, "value", None
+        ) is node:
+            statement_interval = _ast_node_interval(parent, text, line_offsets)
+        if (evidence_start, evidence_end) not in {call_interval, statement_interval}:
+            continue
+
+        if isinstance(node.func, ast.Attribute):
+            target_name = node.func.attr
+            if not isinstance(node.func.value, ast.Name) or node.func.value.id not in {"self", "cls"}:
+                continue
+            class_scopes: list[str] = []
+            ancestor = parents.get(id(node))
+            while ancestor is not None:
+                if isinstance(ancestor, ast.ClassDef):
+                    class_scopes.append(ancestor.name)
+                ancestor = parents.get(id(ancestor))
+            if not class_scopes:
+                continue
+            lexical_owner = ".".join([module_name, *reversed(class_scopes)])
+            if expected_object.rsplit(".", 1)[0] != lexical_owner:
+                continue
+        elif isinstance(node.func, ast.Name):
+            target_name = node.func.id
+            if expected_object.rsplit(".", 1)[0] != module_name:
+                continue
+        else:
+            continue
+        if target_name != expected_object_name:
+            continue
+
+        scopes: list[str] = []
+        ancestor = parents.get(id(node))
+        while ancestor is not None:
+            if isinstance(ancestor, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                scopes.append(ancestor.name)
+            ancestor = parents.get(id(ancestor))
+        if not scopes:
+            continue
+        subject_qualname = ".".join([module_name, *reversed(scopes)])
+        if subject_qualname == expected_subject:
+            return True
+    return False
+
+
+def _physical_line_boundary_closure(
+    evidence: Evidence,
+    span: GoldSpanMapping,
+    expectation: GoldRelationExpectation,
+    context: _SemanticProjectionContext,
+) -> bool:
+    if len(span.document_intervals) != 1:
+        return False
+    gold_document_id, gold_start, gold_end = span.document_intervals[0]
+    evidence_interval = _evidence_document_interval(evidence, context)
+    if evidence_interval is None:
+        return False
+    document, evidence_start, evidence_end = evidence_interval
+    if document.id != gold_document_id or evidence_end != gold_end or evidence_start <= gold_start:
+        return False
+    text = document.normalized_text
+    if gold_start != 0 and text[gold_start - 1] != "\n":
+        return False
+    physical_prefix = text[gold_start:evidence_start]
+    if not physical_prefix or any(char not in " \t" for char in physical_prefix):
+        return False
+    if (
+        hashlib.sha256(text[gold_start:gold_end].encode("utf-8")).hexdigest()
+        != span.quote_sha256
+        or text[gold_start:gold_end] != physical_prefix + evidence.quote
+        or text[evidence_start:evidence_end] != evidence.quote
+    ):
+        return False
+    if not _is_direct_callsite_evidence(
+        evidence, document, evidence_start, evidence_end, expectation
+    ):
+        return False
+    return any(
+        _evidence_matches_endpoint(evidence, endpoint, expectation.evidence_basis, context)
+        for endpoint in (expectation.subject, expectation.object)
+    )
+
+
+def _direct_call_evidence_closure(
+    relation: Relation,
+    mapped_spans: Sequence[GoldSpanMapping],
+    expectation: GoldRelationExpectation,
+    context: _SemanticProjectionContext,
+) -> tuple[tuple[str, ...], str | None]:
+    """Require exact quoted source evidence for strict source-code CALLS edges."""
+    relation_evidence_ids = set(relation.evidence_ids)
+    closed_ids: set[str] = set()
+    used_boundary_adapter = False
+    for span in mapped_spans:
+        if len(span.document_intervals) != 1:
+            return (), None
+        gold_document_id, gold_start, gold_end = span.document_intervals[0]
+        exact_ids: set[str] = set()
+        boundary_ids: set[str] = set()
+        for evidence_id in relation_evidence_ids:
+            evidence = context.evidence_by_id.get(evidence_id)
+            if evidence is None:
+                continue
+            interval = _evidence_document_interval(evidence, context)
+            if interval is None:
+                continue
+            document, evidence_start, evidence_end = interval
+            if (
+                document.id != gold_document_id
+                or not _is_direct_callsite_evidence(
+                    evidence,
+                    document,
+                    evidence_start,
+                    evidence_end,
+                    expectation,
+                )
+                or not any(
+                    _evidence_matches_endpoint(
+                        evidence, endpoint, expectation.evidence_basis, context
+                    )
+                    for endpoint in (expectation.subject, expectation.object)
+                )
+            ):
+                continue
+            evidence = context.evidence_by_id[evidence_id]
+            if (
+                evidence_id in span.evidence_ids
+                and evidence_start == gold_start
+                and evidence_end == gold_end
+                and evidence.quote == document.normalized_text[gold_start:gold_end]
+                and hashlib.sha256(evidence.quote.encode("utf-8")).hexdigest()
+                == span.quote_sha256
+                and any(
+                    _evidence_matches_endpoint(
+                        evidence, endpoint, expectation.evidence_basis, context
+                    )
+                    for endpoint in (expectation.subject, expectation.object)
+                )
+            ):
+                exact_ids.add(evidence_id)
+            elif _physical_line_boundary_closure(
+                evidence, span, expectation, context
+            ):
+                boundary_ids.add(evidence_id)
+        selected_ids = exact_ids or boundary_ids
+        if not selected_ids:
+            return (), None
+        if not exact_ids:
+            used_boundary_adapter = True
+        closed_ids.update(selected_ids)
+    return (
+        tuple(sorted(closed_ids)),
+        DIRECT_CALL_PHYSICAL_LINE_BOUNDARY_ADAPTER_VERSION
+        if used_boundary_adapter
+        else None,
+    )
+
+
+def _source_version_for_endpoint(
+    endpoint: GoldEndpointExpectation, context: _SemanticProjectionContext
+) -> tuple[Source, SourceVersion] | None:
+    sources = [
+        item for item in context.sources_by_id.values() if item.logical_uri == endpoint.source_uri
+    ]
+    version = context.source_versions_by_id.get(endpoint.source_version_id)
+    if (
+        len(sources) != 1
+        or version is None
+        or version.id not in context.generation.source_version_ids
+        or version.source_id != sources[0].id
+        or sources[0].corpus_id != context.generation.corpus_id
+        or version.dirty
+    ):
+        return None
+    return sources[0], version
+
+
+def _document_is_generation_member(
+    document: Document, context: _SemanticProjectionContext
+) -> bool:
+    return any(
+        version.id in context.generation.source_version_ids
+        and version.source_id == document.source_id
+        and any(file.document_id == document.id for file in version.files)
+        for version in context.source_versions_by_id.values()
+    )
+
+
+def _document_matches_endpoint(
+    document: Document,
+    endpoint: GoldEndpointExpectation,
+    context: _SemanticProjectionContext,
+) -> bool:
+    binding = _source_version_for_endpoint(endpoint, context)
+    if binding is None:
+        return False
+    source, version = binding
+    matching_files = [
+        item
+        for item in version.files
+        if item.relative_path == endpoint.relative_path
+        and item.raw_hash == endpoint.raw_file_sha256
+        and item.document_id == document.id
+    ]
+    return (
+        len(matching_files) == 1
+        and document.source_id == source.id
+        and document.relative_path == endpoint.relative_path
+        and document.raw_hash == endpoint.raw_file_sha256
+    )
+
+
+def _provenance_matches_basis(
+    provenance: Provenance, evidence_basis: GoldEvidenceBasis
+) -> bool:
+    expected_method = {
+        GoldEvidenceBasis.source_code: ProvenanceMethod.STATIC_ANALYSIS,
+        GoldEvidenceBasis.normative_specification: ProvenanceMethod.NORMATIVE_SPECIFICATION,
+    }[evidence_basis]
+    return provenance.method is expected_method
+
+
+def _evidence_matches_endpoint(
+    evidence: Evidence,
+    endpoint: GoldEndpointExpectation,
+    evidence_basis: GoldEvidenceBasis,
+    context: _SemanticProjectionContext,
+) -> bool:
+    chunk = context.chunks_by_id.get(evidence.chunk_id)
+    provenance = context.provenance_by_id.get(evidence.provenance_id)
+    if chunk is None or provenance is None:
+        return False
+    document = context.documents_by_id.get(chunk.document_id)
+    if document is None or not _document_matches_endpoint(document, endpoint, context):
+        return False
+    if (
+        provenance.document_id != document.id
+        or provenance.source_id != document.source_id
+        or not _provenance_matches_basis(provenance, evidence_basis)
+    ):
+        return False
+    locator_path = getattr(evidence.locator, "path", None)
+    return locator_path in {None, endpoint.relative_path}
+
+
+def _endpoint_matches(
+    entity: Entity | None,
+    endpoint: GoldEndpointExpectation,
+    expectation: GoldRelationExpectation,
+    context: _SemanticProjectionContext,
+) -> bool:
+    if entity is None or entity.kind is not endpoint.entity_kind:
+        return False
+    if entity.canonical_name != endpoint.qualified_symbol:
+        return False
+    matching_identity_ids = {
+        candidate.id
+        for candidate in context.entities_by_id.values()
+        if (candidate.corpus_id, candidate.kind, candidate.identity_key)
+        == (entity.corpus_id, entity.kind, entity.identity_key)
+    }
+    if matching_identity_ids != {entity.id}:
+        return False
+    allowed_surfaces = {
+        endpoint.qualified_symbol,
+        endpoint.qualified_symbol.rsplit(".", 1)[-1],
+    }
+    if (
+        expectation.evidence_basis is GoldEvidenceBasis.source_code
+        and endpoint.qualified_symbol == "None"
+    ):
+        allowed_surfaces.add("return")
+    return any(
+        _evidence_matches_endpoint(
+            evidence,
+            endpoint,
+            expectation.evidence_basis,
+            context,
+        )
+        for mention in context.mentions_by_entity.get(entity.id, ())
+        for evidence in [context.evidence_by_id.get(mention.evidence_id)]
+        if evidence is not None
+        and mention.surface_form in allowed_surfaces
+        and mention.surface_form in evidence.quote
+    )
+
+
+_STATE_CHANGE_PREDICATES = {
+    RelationPredicate.UPDATES,
+    RelationPredicate.INVALIDATES,
+    RelationPredicate.REPLACES,
+    RelationPredicate.DISABLES,
+}
+_RESULT_ROLES = {
+    RelationPredicate.RETURNS: "return_value",
+    RelationPredicate.RAISES: "exception",
+    RelationPredicate.MAPS_TO: "mapped_value",
+    RelationPredicate.CHECKS: "checked_condition",
+    RelationPredicate.VALIDATES: "validated_target",
+    RelationPredicate.UPDATES: "updated_state",
+    RelationPredicate.SCHEDULES: "scheduled_target",
+    RelationPredicate.REQUIRES: "required_action",
+    RelationPredicate.INVALIDATES: "invalidated_target",
+    RelationPredicate.REPLACES: "replacement_target",
+    RelationPredicate.DISABLES: "disabled_target",
+    RelationPredicate.OFFERS: "offered_alternative",
+    RelationPredicate.COMPARES_AGAINST: "comparison_target",
+    RelationPredicate.PRODUCES: "produced_result",
+    RelationPredicate.REPORTS: "reported_value",
+}
+
+
+def _outcome_kind(
+    predicate: RelationPredicate,
+    evidence_basis: GoldEvidenceBasis,
+    qualifiers: Mapping[str, Any],
+) -> GoldOutcomeKind:
+    if predicate is RelationPredicate.RETURNS:
+        return GoldOutcomeKind.return_value
+    if predicate is RelationPredicate.RAISES:
+        return GoldOutcomeKind.exception
+    if (
+        evidence_basis is GoldEvidenceBasis.normative_specification
+        and "normative_modality" in qualifiers
+    ):
+        return GoldOutcomeKind.normative_obligation
+    if predicate in _STATE_CHANGE_PREDICATES:
+        return GoldOutcomeKind.state_change
+    return GoldOutcomeKind.fact
+
+
+def _semantic_qualifiers(
+    relation: Relation,
+    expectation: GoldRelationExpectation,
+    context: _SemanticProjectionContext,
+) -> tuple[Mapping[str, Any], str | None]:
+    """Remove only the known AST resolver label from static source-code CALLS."""
+    provenance = context.provenance_by_id.get(relation.provenance_id)
+    if (
+        expectation.evidence_basis is GoldEvidenceBasis.source_code
+        and expectation.predicate is RelationPredicate.CALLS
+        and provenance is not None
+        and provenance.method is ProvenanceMethod.STATIC_ANALYSIS
+        and relation.qualifiers.get("resolution") == "static_symbol"
+    ):
+        return (
+            {key: value for key, value in relation.qualifiers.items() if key != "resolution"},
+            STATIC_CALL_RESOLUTION_QUALIFIER_ADAPTER_VERSION,
+        )
+    return relation.qualifiers, None
+
+
+def _relation_provenance_matches(
+    relation: Relation,
+    expectation: GoldRelationExpectation,
+    context: _SemanticProjectionContext,
+) -> bool:
+    provenance = context.provenance_by_id.get(relation.provenance_id)
+    if provenance is None:
+        return False
+    if provenance.method is ProvenanceMethod.RULE_INFERRED:
+        document = context.documents_by_id.get(provenance.document_id)
+        if (
+            document is None
+            or document.source_id != provenance.source_id
+            or not _document_is_generation_member(document, context)
+            or not any(
+                _document_matches_endpoint(document, endpoint, context)
+                for endpoint in (expectation.subject, expectation.object)
+            )
+            or not provenance.premise_relation_ids
+        ):
+            return False
+        relation_evidence_ids = set(relation.evidence_ids)
+        for premise_id in provenance.premise_relation_ids:
+            premise = context.relations_by_id.get(premise_id)
+            if (
+                premise is None
+                or premise_id not in context.generation.relation_ids
+                or premise.provenance_id not in context.provenance_by_id
+                or not premise.evidence_ids
+                or not set(premise.evidence_ids).issubset(relation_evidence_ids)
+            ):
+                return False
+            if any(
+                evidence_id not in context.evidence_by_id
+                or not any(
+                    _evidence_matches_endpoint(
+                        context.evidence_by_id[evidence_id],
+                        endpoint,
+                        expectation.evidence_basis,
+                        context,
+                    )
+                    for endpoint in (expectation.subject, expectation.object)
+                )
+                for evidence_id in premise.evidence_ids
+            ):
+                return False
+        return True
+    if not _provenance_matches_basis(provenance, expectation.evidence_basis):
+        return False
+    document = context.documents_by_id.get(provenance.document_id)
+    if document is None or provenance.source_id != document.source_id:
+        return False
+    return any(
+        _document_matches_endpoint(document, endpoint, context)
+        for endpoint in (expectation.subject, expectation.object)
+    )
+
+
+def _semantic_projection_failure(
     relation: Relation,
     expectation: GoldRelationExpectation,
     *,
-    entities_by_id: Mapping[str, Entity],
-) -> str | None:
-    if not expectation.subject_names or not expectation.object_names:
-        return "cannot be resolved because explicit subject and object names are missing"
+    mapped_evidence_groups: Sequence[GoldSpanMapping],
+    context: _SemanticProjectionContext,
+) -> tuple[tuple[str, ...], str | None, tuple[str, ...]]:
     if relation.predicate is not expectation.predicate:
-        return "does not match the expected predicate"
+        return (), "does not match the expected predicate", ()
     if relation.polarity is not expectation.polarity:
-        return "does not match the expected polarity"
-    if relation.qualifiers:
-        return "cannot be resolved because candidate qualifiers are not represented in the expectation"
+        return (), "does not match the expected polarity", ()
+    if expectation.qualifier_review_state is GoldQualifierReviewState.unreviewed:
+        return (), "cannot be resolved because its qualifier review is UNREVIEWED", ()
+    semantic_qualifiers, qualifier_adapter_version = _semantic_qualifiers(
+        relation, expectation, context
+    )
+    adapter_versions = (
+        [qualifier_adapter_version] if qualifier_adapter_version is not None else []
+    )
+    if _canonical_hash(semantic_qualifiers) != _canonical_hash(expectation.qualifier_values):
+        return (), "does not match the exact reviewed qualifier set", ()
+    if (
+        _outcome_kind(
+            relation.predicate,
+            expectation.evidence_basis,
+            relation.qualifiers,
+        )
+        is not expectation.outcome_kind
+    ):
+        return (), "does not match the expected result outcome kind", ()
+    if _RESULT_ROLES.get(relation.predicate, "relation_object") != expectation.result_role:
+        return (), "does not match the expected result role", ()
 
-    subject = entities_by_id.get(relation.subject_id)
-    obj = entities_by_id.get(relation.object_id)
-    subject_matches = _entity_matches(
-        subject, expectation.subject_names, entities_by_id=entities_by_id
-    )
-    object_matches = _entity_matches(
-        obj, expectation.object_names, entities_by_id=entities_by_id
-    )
-    if subject_matches and object_matches:
-        return None
-    if _entity_matches(
-        subject, expectation.object_names, entities_by_id=entities_by_id
-    ) and _entity_matches(obj, expectation.subject_names, entities_by_id=entities_by_id):
-        return "has an endpoint direction mismatch"
-    return "has no candidate matching its exact endpoints"
+    subject = context.entities_by_id.get(relation.subject_id)
+    object_ = context.entities_by_id.get(relation.object_id)
+    subject_matches = _endpoint_matches(subject, expectation.subject, expectation, context)
+    object_matches = _endpoint_matches(object_, expectation.object, expectation, context)
+    if not subject_matches or not object_matches:
+        swapped = _endpoint_matches(subject, expectation.object, expectation, context) and (
+            _endpoint_matches(object_, expectation.subject, expectation, context)
+        )
+        return (), (
+            "has an endpoint direction mismatch"
+            if swapped
+            else "has no candidate matching exact source-bound endpoints"
+        ), ()
+
+    if (
+        expectation.evidence_basis is GoldEvidenceBasis.source_code
+        and expectation.predicate is RelationPredicate.CALLS
+    ):
+        closed_ids, adapter_version = _direct_call_evidence_closure(
+            relation, mapped_evidence_groups, expectation, context
+        )
+        if not closed_ids:
+            return (
+                (),
+                "does not close through exact direct callsite Evidence for every reviewed Gold quote",
+                (),
+            )
+        if adapter_version is not None:
+            adapter_versions.append(adapter_version)
+    else:
+        closed_ids = _relation_evidence_closure(
+            relation, [set(span.evidence_ids) for span in mapped_evidence_groups]
+        )
+    if not closed_ids:
+        return (), "does not close over Evidence for every reviewed Gold quote", ()
+    if not _relation_provenance_matches(relation, expectation, context):
+        return (), "does not close through the expected Generation Provenance chain", ()
+    endpoints = (expectation.subject, expectation.object)
+    if any(
+        not any(
+            _evidence_matches_endpoint(
+                context.evidence_by_id[evidence_id],
+                endpoint,
+                expectation.evidence_basis,
+                context,
+            )
+            for endpoint in endpoints
+        )
+        for evidence_id in relation.evidence_ids
+        if evidence_id in context.evidence_by_id
+    ) or any(evidence_id not in context.evidence_by_id for evidence_id in relation.evidence_ids):
+        return (), "contains Evidence outside its exact source, version, path, or basis", ()
+    return closed_ids, None, tuple(adapter_versions)
 
 
 def _resolve_runtime_relation(
     edge_relation_id: str,
-    mapped_evidence_groups: Sequence[set[str]],
+    mapped_evidence_groups: Sequence[GoldSpanMapping],
     *,
     relation_by_id: Mapping[str, Relation],
     relations: Sequence[Relation],
-    entities_by_id: Mapping[str, Entity],
     relation_expectations: Mapping[str, GoldRelationExpectation] | None,
-) -> tuple[Relation | None, tuple[str, ...], str | None]:
+    semantic_context: _SemanticProjectionContext,
+) -> tuple[Relation | None, tuple[str, ...], str | None, tuple[str, ...]]:
     direct = relation_by_id.get(edge_relation_id)
+    expectation = (relation_expectations or {}).get(edge_relation_id)
     if direct is not None:
-        expectation = (relation_expectations or {}).get(edge_relation_id)
         if expectation is not None:
-            expectation_failure = _direct_relation_expectation_failure(
-                direct, expectation, entities_by_id=entities_by_id
+            closed_ids, failure, adapter_version = _semantic_projection_failure(
+                direct,
+                expectation,
+                mapped_evidence_groups=mapped_evidence_groups,
+                context=semantic_context,
             )
-            if expectation_failure:
-                return None, (), expectation_failure
-        closed = _relation_evidence_closure(direct, mapped_evidence_groups)
-        if not closed:
-            return None, (), "does not close over Evidence for every reviewed Gold quote"
-        return direct, closed, None
-    if not relation_expectations:
-        return None, (), None
-    expectation = relation_expectations.get(edge_relation_id)
-    if expectation is None:
-        return None, (), None
-    if not expectation.subject_names or not expectation.object_names:
-        return None, (), "cannot be resolved because explicit subject and object names are missing"
-
-    matches: list[tuple[Relation, tuple[str, ...]]] = []
-    has_qualified_candidate = False
-    has_direction_mismatch = False
-    for candidate in relations:
-        if candidate.predicate is not expectation.predicate:
-            continue
-        if candidate.polarity is not expectation.polarity:
-            continue
-        closed = _relation_evidence_closure(candidate, mapped_evidence_groups)
-        if not closed:
-            continue
-        subj = entities_by_id.get(candidate.subject_id)
-        obj = entities_by_id.get(candidate.object_id)
-        if not _entity_matches(
-            subj, expectation.subject_names, entities_by_id=entities_by_id
-        ) or not _entity_matches(obj, expectation.object_names, entities_by_id=entities_by_id):
-            if _entity_matches(
-                subj, expectation.object_names, entities_by_id=entities_by_id
-            ) and _entity_matches(obj, expectation.subject_names, entities_by_id=entities_by_id):
-                has_direction_mismatch = True
-            continue
-        if candidate.qualifiers:
-            has_qualified_candidate = True
-            continue
-        matches.append((candidate, closed))
-    if has_qualified_candidate:
-        return (
-            None,
-            (),
-            "cannot be resolved because candidate qualifiers are not represented in the expectation",
+            if failure:
+                return None, (), failure, ()
+            return direct, closed_ids, None, adapter_version
+        closed = _relation_evidence_closure(
+            direct, [set(span.evidence_ids) for span in mapped_evidence_groups]
         )
+        if not closed:
+            return None, (), "does not close over Evidence for every reviewed Gold quote", ()
+        return direct, closed, None, ()
+    if expectation is None:
+        return None, (), None, ()
+
+    matches: list[tuple[Relation, tuple[str, ...], tuple[str, ...]]] = []
+    has_direction_mismatch = False
+    failures: set[str] = set()
+    for candidate in relations:
+        closed, failure, adapter_version = _semantic_projection_failure(
+            candidate,
+            expectation,
+            mapped_evidence_groups=mapped_evidence_groups,
+            context=semantic_context,
+        )
+        if failure == "has an endpoint direction mismatch":
+            has_direction_mismatch = True
+        if failure is not None:
+            failures.add(failure)
+            continue
+        if failure is None:
+            matches.append((candidate, closed, adapter_version))
     if len(matches) > 1:
-        return None, (), "has multiple semantic candidates"
+        return None, (), "has multiple semantic candidates", ()
     if not matches:
         if has_direction_mismatch:
-            return None, (), "has an endpoint direction mismatch"
-        return None, (), "has no candidate matching its exact endpoints and Evidence for every Gold quote"
-    relation, closed_ids = matches[0]
-    return relation, closed_ids, None
+            return None, (), "has an endpoint direction mismatch", ()
+        for preferred_failure in (
+            "cannot be resolved because its qualifier review is UNREVIEWED",
+            "does not match the exact reviewed qualifier set",
+            "has no candidate matching exact source-bound endpoints",
+            "does not match the expected result outcome kind",
+            "does not match the expected result role",
+            "does not close through exact direct callsite Evidence for every reviewed Gold quote",
+            "does not close over Evidence for every reviewed Gold quote",
+            "does not close through the expected Generation Provenance chain",
+            "contains Evidence outside its exact source, version, path, or basis",
+        ):
+            if preferred_failure in failures:
+                return None, (), preferred_failure, ()
+        return None, (), "has no candidate matching its exact endpoints and Evidence for every Gold quote", ()
+    relation, closed_ids, adapter_versions = matches[0]
+    return relation, closed_ids, None, adapter_versions
 
 
 def map_gold_to_generation(
@@ -558,6 +1113,10 @@ def map_gold_to_generation(
     relations: Sequence[Relation],
     *,
     entities: Sequence[Entity] = (),
+    mentions: Sequence[Mention] = (),
+    sources: Sequence[Source] = (),
+    source_versions: Sequence[SourceVersion] = (),
+    provenance: Sequence[Provenance] = (),
     relation_expectations: Mapping[str, GoldRelationExpectation] | None = None,
     generation: Generation,
     dataset_sha256: str,
@@ -578,6 +1137,8 @@ def map_gold_to_generation(
     }
     if needs_semantic_entities:
         observed_members["entity"] = [item.id for item in entities]
+        observed_members["mention"] = [item.id for item in mentions]
+        observed_members["provenance"] = [item.id for item in provenance]
     verified_generation = verify_generation_manifest(
         generation,
         observed_member_ids=observed_members,
@@ -592,6 +1153,26 @@ def map_gold_to_generation(
         entity.corpus_id != verified_generation.generation.corpus_id for entity in entities
     ):
         raise GenerationBindingError("observed Entity corpus differs from persisted Generation")
+    if needs_semantic_entities and sorted(item.id for item in source_versions) != sorted(
+        verified_generation.generation.source_version_ids
+    ):
+        raise GenerationBindingError(
+            "observed SourceVersion IDs differ from persisted Generation membership"
+        )
+    source_ids = {item.id for item in sources}
+    if needs_semantic_entities and any(
+        item.source_id not in source_ids for item in source_versions
+    ):
+        raise GenerationBindingError("observed SourceVersion references a missing Source")
+    if needs_semantic_entities:
+        for label, records in (
+            ("Source", sources),
+            ("SourceVersion", source_versions),
+            ("Mention", mentions),
+            ("Provenance", provenance),
+        ):
+            if len({item.id for item in records}) != len(records):
+                raise GenerationBindingError(f"observed {label} IDs are not unique")
     assets = {item.id: item for item in source_assets}
     docs = {item.id: item for item in documents}
     chunks_by_document: dict[str, list[Chunk]] = {}
@@ -602,6 +1183,26 @@ def map_gold_to_generation(
         evidence_by_chunk.setdefault(item.chunk_id, []).append(item)
     relation_by_id = {item.id: item for item in relations}
     entities_by_id = {item.id: item for item in entities}
+    chunks_by_id = {item.id: item for item in chunks}
+    evidence_by_id = {item.id: item for item in evidence}
+    sources_by_id = {item.id: item for item in sources}
+    source_versions_by_id = {item.id: item for item in source_versions}
+    provenance_by_id = {item.id: item for item in provenance}
+    mentions_by_entity: dict[str, list[Mention]] = {}
+    for mention in mentions:
+        mentions_by_entity.setdefault(mention.entity_id, []).append(mention)
+    semantic_context = _SemanticProjectionContext(
+        generation=verified_generation.generation,
+        entities_by_id=entities_by_id,
+        mentions_by_entity=mentions_by_entity,
+        evidence_by_id=evidence_by_id,
+        chunks_by_id=chunks_by_id,
+        documents_by_id=docs,
+        sources_by_id=sources_by_id,
+        source_versions_by_id=source_versions_by_id,
+        provenance_by_id=provenance_by_id,
+        relations_by_id=relation_by_id,
+    )
 
     span_mappings: list[GoldSpanMapping] = []
     path_mappings: list[GoldPathMapping] = []
@@ -631,10 +1232,11 @@ def map_gold_to_generation(
             mapped_relations: list[str] = []
             mapped_directions: list[bool] = []
             edge_evidence: list[tuple[str, ...]] = []
+            edge_adapter_versions: list[tuple[str, ...]] = []
             previous_to_id: str | None = None
             failure: str | None = None
             for edge_index, edge in enumerate(reviewed_path.edges):
-                mapped_evidence_groups: list[set[str]] = []
+                mapped_evidence_groups: list[GoldSpanMapping] = []
                 for quote_hash in edge.evidence_quote_sha256:
                     span_mappings_for_quote = mappings_by_case_quote.get(
                         (case.case.id, quote_hash), []
@@ -658,16 +1260,16 @@ def map_gold_to_generation(
                             "does not resolve to a mapped span"
                         )
                         break
-                    mapped_evidence_groups.append(set(span_mapping.evidence_ids))
+                    mapped_evidence_groups.append(span_mapping)
                 if failure:
                     break
-                relation, closed_ids, resolution_failure = _resolve_runtime_relation(
+                relation, closed_ids, resolution_failure, adapter_version = _resolve_runtime_relation(
                     edge.relation_id,
                     mapped_evidence_groups,
                     relation_by_id=relation_by_id,
                     relations=relations,
-                    entities_by_id=entities_by_id,
                     relation_expectations=relation_expectations,
+                    semantic_context=semantic_context,
                 )
                 if relation is None:
                     failure = (
@@ -706,6 +1308,7 @@ def map_gold_to_generation(
                 mapped_relations.append(relation.id)
                 mapped_directions.append(edge.traversed_reverse)
                 edge_evidence.append(closed_ids)
+                edge_adapter_versions.append(adapter_version)
                 previous_to_id = step_to_id
             status = GoldMappingStatus.mapped if failure is None else GoldMappingStatus.unmapped
             path = GoldPathMapping(
@@ -715,6 +1318,7 @@ def map_gold_to_generation(
                 relation_ids=tuple(mapped_relations),
                 traversed_reverse=tuple(mapped_directions),
                 evidence_ids_by_edge=tuple(edge_evidence),
+                adapter_versions_by_edge=tuple(edge_adapter_versions),
                 reason=failure,
             )
             path_mappings.append(path)

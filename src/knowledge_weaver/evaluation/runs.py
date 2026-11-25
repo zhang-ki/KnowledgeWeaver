@@ -28,7 +28,16 @@ from knowledge_weaver.evaluation.generation_binding import (
 )
 from knowledge_weaver.evaluation.redaction import redact_text
 from knowledge_weaver.evaluation.scheduling import ExperimentSuite
-from knowledge_weaver.models.contracts import Generation
+from knowledge_weaver.models.contracts import (
+    AgentExecutionResult,
+    Generation,
+    Language,
+    ModelTokenUsage,
+    Path,
+    RetrievalHit,
+    Usage,
+)
+from knowledge_weaver.retrieval.cache_state import CacheStateReceipt
 
 NonEmpty = StringConstraints(strip_whitespace=True, min_length=1)
 CountKind = Literal["exact", "estimated", "unavailable"]
@@ -46,6 +55,14 @@ def _sum_known_decimals(values: list[Decimal | None]) -> Decimal | None:
 
 class RunModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class BlindBenchmarkInput(RunModel):
+    """The only case data exposed to a benchmark executor."""
+
+    query_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    language: Language
 
 
 class QueryMeasurements(RunModel):
@@ -93,6 +110,42 @@ class QueryMeasurements(RunModel):
         return self
 
 
+class UnscoredClaim(RunModel):
+    text: str = Field(min_length=1)
+    evidence_ids: tuple[str, ...] = ()
+    relation_ids: tuple[str, ...] = ()
+
+
+class UnscoredAnswer(RunModel):
+    status: Literal["answered", "insufficient", "conflicted"]
+    claims: tuple[UnscoredClaim, ...] = ()
+    unanswered: tuple[str, ...] = ()
+
+
+class CitationResolution(RunModel):
+    evidence_id: str = Field(min_length=1)
+    resolves_to_original: bool
+
+
+class ExecutorProviderUsage(RunModel):
+    usage: ModelTokenUsage
+    model: str = Field(min_length=1)
+    revision: str = Field(min_length=1)
+
+
+class ExecutionOutput(RunModel):
+    """Raw, unscored evidence and answer returned by an execution adapter."""
+
+    retrieval_hits: tuple[RetrievalHit, ...]
+    retrieved_paths: tuple[Path, ...] = ()
+    answer: UnscoredAnswer
+    citations: tuple[CitationResolution, ...] = ()
+    retrieval_usage: Usage
+    provider_usage: ExecutorProviderUsage
+    response_summary_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    agent_execution: AgentExecutionResult | None = None
+
+
 class AttemptOutcome(RunModel):
     attempt: int = Field(ge=1, le=3)
     status: Literal["complete", "failed"]
@@ -113,9 +166,11 @@ class AttemptOutcome(RunModel):
     elapsed_ms: int = Field(default=0, ge=0)
     strategy_latency_ms: int = Field(default=0, ge=0)
     cache_state: Literal["cold", "warm"] = "cold"
+    cache_state_receipt: CacheStateReceipt | None = None
     executed_generation_id: str | None = None
     executed_generation_sha256: str | None = None
     response_summary_sha256: str | None = None
+    execution_output: ExecutionOutput | None = None
     measurements: QueryMeasurements | None = None
 
     @model_validator(mode="after")
@@ -126,12 +181,19 @@ class AttemptOutcome(RunModel):
             self.executed_generation_id, self.executed_generation_sha256
         ):
             raise ValueError("executor-confirmed Generation binding is invalid")
-        if self.status == "complete" and (self.failure_code is not None or self.measurements is None):
-            raise ValueError("a complete attempt requires measurements and no failure code")
+        if self.status == "complete" and self.failure_code is not None:
+            raise ValueError("a complete attempt cannot carry a failure code")
         if self.status == "failed" and not self.failure_code:
             raise ValueError("a failed attempt requires a failure code")
         if self.status == "complete" and self.retryable:
             raise ValueError("a complete attempt cannot be marked retryable")
+        if self.status == "complete" and (
+            self.cache_state_receipt is None
+            or not self.cache_state_receipt.complete
+            or self.cache_state_receipt.requested_state != self.cache_state
+            or self.cache_state_receipt.applied_state != self.cache_state
+        ):
+            raise ValueError("a complete attempt requires a verified cache-state receipt")
         return self
 
 
@@ -249,10 +311,15 @@ class ProviderExecutionError(RuntimeError):
         model_revision: str,
         input_tokens: int = 0,
         output_tokens: int = 0,
+        tool_calls: int = 0,
+        llm_calls: int = 0,
+        steps: int = 0,
+        strategy_latency_ms: int = 0,
         count_kind: CountKind = "unavailable",
         currency_cost_usd: Decimal | None = None,
         currency_cost_cny: Decimal | None = None,
         elapsed_ms: int = 0,
+        cache_state_receipt: CacheStateReceipt | None = None,
     ) -> None:
         self.code = redact_text(code)
         self.retryable = retryable
@@ -260,10 +327,15 @@ class ProviderExecutionError(RuntimeError):
         self.model_revision = model_revision
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
+        self.tool_calls = tool_calls
+        self.llm_calls = llm_calls
+        self.steps = steps
+        self.strategy_latency_ms = strategy_latency_ms
         self.count_kind = count_kind
         self.currency_cost_usd = currency_cost_usd
         self.currency_cost_cny = currency_cost_cny
         self.elapsed_ms = elapsed_ms
+        self.cache_state_receipt = cache_state_receipt
         super().__init__(self.code)
 
 
@@ -272,7 +344,7 @@ class BenchmarkExecutor(Protocol):
 
     async def execute_query(
         self,
-        case: PreparedBenchmarkCase,
+        query: BlindBenchmarkInput,
         suite: ExperimentSuite,
         *,
         attempt: int,
@@ -302,6 +374,11 @@ async def run_query_with_retries(
         raise ValueError("mock/synthetic provider results cannot enter a formal run")
     if formal_dataset and case.case.split.value != "test":
         raise ValueError("formal query runs are restricted to the frozen test split")
+    blind_input = BlindBenchmarkInput(
+        query_id=case.case.id,
+        question=case.case.question,
+        language=case.case.language,
+    )
     if (generation_id is None) != (generation_sha256 is None):
         raise ValueError("query execution Generation ID and digest must be supplied together")
     if generation_binding is not None and generation_resolver is not None:
@@ -343,7 +420,7 @@ async def run_query_with_retries(
                     generation=generation_binding.generation,
                     generation_sha256=generation_binding.generation_sha256,
                 )
-            outcome = await executor.execute_query(case, suite, **execution_kwargs)
+            outcome = await executor.execute_query(blind_input, suite, **execution_kwargs)
             if outcome.attempt != attempt_number:
                 raise ValueError("executor returned an attempt number that does not match")
             if outcome.provider_kind != executor.provider_kind:
@@ -355,6 +432,15 @@ async def run_query_with_retries(
                 or outcome.executed_generation_sha256 != generation_binding.generation_sha256
             ):
                 raise ValueError("executor did not confirm the verified Generation it queried")
+            if formal_dataset and outcome.measurements is not None:
+                outcome = outcome.model_copy(
+                    update={
+                        "status": "failed",
+                        "retryable": False,
+                        "failure_code": "EXECUTOR_SCORE_FORBIDDEN",
+                        "measurements": None,
+                    }
+                )
         except ProviderExecutionError as exc:
             outcome = AttemptOutcome(
                 attempt=attempt_number,
@@ -366,11 +452,16 @@ async def run_query_with_retries(
                 failure_code=exc.code,
                 input_tokens=exc.input_tokens,
                 output_tokens=exc.output_tokens,
+                tool_calls=exc.tool_calls,
+                llm_calls=exc.llm_calls,
+                steps=exc.steps,
                 count_kind=exc.count_kind,
                 currency_cost_usd=exc.currency_cost_usd,
                 currency_cost_cny=exc.currency_cost_cny,
                 elapsed_ms=exc.elapsed_ms,
+                strategy_latency_ms=exc.strategy_latency_ms,
                 cache_state=cache_state,
+                cache_state_receipt=exc.cache_state_receipt,
             )
         except Exception as exc:  # noqa: BLE001 - preserve unexpected failures in the run artifact.
             # Programming/configuration failures are retained and never retried implicitly.

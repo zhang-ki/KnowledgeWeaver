@@ -18,15 +18,22 @@ from knowledge_weaver.evaluation.generation_binding import verify_generation_man
 from knowledge_weaver.evaluation.gold_mapping import GoldMappingReport
 from knowledge_weaver.evaluation.protocol import load_protocol
 from knowledge_weaver.evaluation.redaction import canonical_json_line
-from knowledge_weaver.evaluation.reporting import build_report, summarize_query_runs
+from knowledge_weaver.evaluation.reporting import (
+    build_report,
+    recompute_report_files,
+    render_markdown_report,
+    summarize_query_runs,
+)
 from knowledge_weaver.evaluation.runner import (
     MatrixExecutionReport,
     _seeded_case_order,
     run_formal_matrix,
+    run_legacy_matrix_compatibility,
     write_execution_artifacts,
 )
 from knowledge_weaver.evaluation.runs import (
     AttemptOutcome,
+    BlindBenchmarkInput,
     QueryMeasurements,
     QueryRunRecord,
     run_query_with_retries,
@@ -52,8 +59,30 @@ from knowledge_weaver.evaluation.training import (
     write_policy_artifact,
 )
 from knowledge_weaver.models.contracts import Action, ActionTool, Generation
+from knowledge_weaver.retrieval.cache_state import CacheStateOperation, CacheStateReceipt
 
 NOW = datetime(2026, 11, 21, 12, 0, tzinfo=UTC)
+
+
+def _cache_receipt(cache_state: Literal["cold", "warm"]) -> CacheStateReceipt:
+    return CacheStateReceipt(
+        route_id="retriever.test",
+        requested_state=cache_state,
+        applied_state=cache_state,
+        implementation_sha256="a" * 64,
+        config_sha256="b" * 64,
+        controlled_components=("test.cache",),
+        warmup_sequence=("test.cache",),
+        operations=(
+            CacheStateOperation(
+                sequence=1,
+                component_id="test.cache",
+                operation="reset" if cache_state == "cold" else "warm",
+                verified=True,
+            ),
+        ),
+        complete=True,
+    )
 
 
 def _uuid(index: int) -> str:
@@ -241,6 +270,48 @@ class _UnexpectedRealExecutor:
         raise AssertionError("generation mismatch must block before provider execution")
 
 
+class _DisplayOnlyRealExecutor:
+    provider_kind = "real"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute_query(
+        self,
+        query: BlindBenchmarkInput,
+        suite,
+        *,
+        attempt: int,
+        cache_state: Literal["cold", "warm"] = "cold",
+        generation: Generation | None = None,
+        generation_sha256: str | None = None,
+    ) -> AttemptOutcome:
+        self.calls += 1
+        assert generation is not None and generation_sha256 is not None
+        return AttemptOutcome(
+            attempt=attempt,
+            status="complete",
+            provider_kind="real",
+            provider_profile="in-memory-regression-stub",
+            model_revision="in-memory-regression-stub-v1",
+            input_tokens=1,
+            output_tokens=1,
+            count_kind="exact",
+            elapsed_ms=1,
+            cache_state=cache_state,
+            cache_state_receipt=_cache_receipt(cache_state),
+            executed_generation_id=generation.id,
+            executed_generation_sha256=generation_sha256,
+            measurements=QueryMeasurements(
+                evidence_recall=0.9,
+                citation_precision=1.0,
+                answer_correctness=2,
+                human_reviewer_id="fixture-reviewer",
+                human_reviewed_at=NOW,
+            ),
+        )
+
+
 def _ready_formal_schedule(root: Path):
     protocol = load_protocol(root / "benchmarks/configs/b07_protocol_v1.json")
     dataset = _ready_dataset_for_generation_gate(root)
@@ -283,7 +354,7 @@ def test_formal_runner_blocks_gold_generation_mismatch_before_running(
     )
 
     report = _drive_immediate(
-        run_formal_matrix(
+        run_legacy_matrix_compatibility(
             schedule,
             protocol,
             dataset,
@@ -313,7 +384,7 @@ def test_formal_runner_requires_ready_gold_mapping() -> None:
     )
 
     report = _drive_immediate(
-        run_formal_matrix(
+        run_legacy_matrix_compatibility(
             schedule,
             protocol,
             dataset,
@@ -327,6 +398,244 @@ def test_formal_runner_requires_ready_gold_mapping() -> None:
 
     assert report.status is SuiteStatus.blocked
     assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
+
+
+def test_formal_entry_rejects_legacy_schedule_before_generation_lookup() -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, dataset, schedule, generation = _ready_formal_schedule(root)
+    resolver = _GenerationStore(generation)
+
+    assert schedule.gold_mapping_mode == "LEGACY_COMPATIBILITY"
+    report = _drive_immediate(
+        run_formal_matrix(
+            schedule,
+            protocol,
+            dataset,
+            _UnexpectedRealExecutor(),
+            generation_resolver=resolver,
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert any(item.startswith("BLOCKED_GOLD_MAPPING:") for item in report.blockers)
+    assert resolver.calls == 0
+    assert not report.query_records
+
+
+def test_legacy_compatibility_entry_remains_explicit_and_labeled() -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, dataset, schedule, generation = _ready_formal_schedule(root)
+    mapping = GoldMappingReport(
+        generation_id=generation.id,
+        generation_sha256=verify_generation_manifest(generation).generation_sha256,
+        dataset_sha256=schedule.dataset_sha256,
+        span_mappings=(),
+        path_mappings=(),
+        blockers=(),
+    )
+
+    report = _drive_immediate(
+        run_legacy_matrix_compatibility(
+            schedule,
+            protocol,
+            dataset,
+            mapping,
+            _SyntheticExecutor(fail_until=0),
+            generation_resolver=_GenerationStore(generation),
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.blocked
+    assert report.to_dict()["gold_mapping_mode"] == "LEGACY_COMPATIBILITY"
+    assert report.to_dict()["execution_mode"] == "LEGACY_DISPLAY_ONLY"
+    assert report.to_dict()["display_only"]
+    assert not report.to_dict()["formal_quality_eligible"]
+    assert any(item.startswith("BLOCKED_PROVIDER:") for item in report.blockers)
+
+
+def test_legacy_executor_branch_is_display_only_even_with_real_quality_shaped_output(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    protocol, blocked_dataset, _schedule, generation = _ready_formal_schedule(root)
+    template = _fixture()[0]
+    cases = tuple(
+        template.model_copy(
+            update={
+                "case": template.case.model_copy(update={"id": _uuid(500 + index)})
+            }
+        )
+        for index in range(protocol.test_case_minimum)
+    )
+    dataset = LoadedDataset(
+        manifest=blocked_dataset.manifest,
+        cases=cases,
+        summary=DatasetSummary(
+            case_count=100,
+            category_counts={},
+            language_counts={},
+            split_counts={"train": 30, "dev": 30, "test": protocol.test_case_minimum},
+            split_family_counts={"train": 5, "dev": 5, "test": 5},
+            unanswerable_count=10,
+        ),
+    )
+    schedule = build_formal_matrix(
+        protocol,
+        dataset,
+        dependency_commits=REQUIRED_DEPENDENCIES,
+        dependencies_integrated=True,
+        provider_profiles=("deepseek", "qwen-embedding"),
+        provider_ready=True,
+        budget_approved=True,
+        policy_artifact_ready=True,
+        policy_artifact_sha256="b" * 64,
+        generation_id=generation.id,
+        generation_sha256=verify_generation_manifest(generation).generation_sha256,
+    )
+    single_suite = replace(
+        schedule.suites[0],
+        expected_query_runs=protocol.test_case_minimum * 2,
+    )
+    schedule = replace(
+        schedule,
+        suites=(single_suite,),
+        expected_query_runs=protocol.test_case_minimum * 2,
+        expected_quality_query_runs=protocol.test_case_minimum,
+    )
+    generation_sha256 = verify_generation_manifest(generation).generation_sha256
+    mapping = GoldMappingReport(
+        generation_id=generation.id,
+        generation_sha256=generation_sha256,
+        dataset_sha256=schedule.dataset_sha256,
+        span_mappings=(),
+        path_mappings=(),
+        blockers=(),
+    )
+    executor = _DisplayOnlyRealExecutor()
+
+    report = _drive_immediate(
+        run_legacy_matrix_compatibility(
+            schedule,
+            protocol,
+            dataset,
+            mapping,
+            executor,
+            generation_resolver=_GenerationStore(generation),
+            policy_training_summary={"formal_ready": True, "synthetic_fixture": False},
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert report.status is SuiteStatus.complete
+    assert executor.calls == protocol.test_case_minimum * 2
+    assert report.query_records
+    assert all(not record.formal_quality_eligible for record in report.query_records)
+    manifest = report.to_dict()
+    assert manifest["execution_mode"] == "LEGACY_DISPLAY_ONLY"
+    assert manifest["expected_quality_query_runs"] == 0
+    assert not manifest["formal_quality_eligible"]
+    assert manifest["schema_version"] == 4
+    assert len(manifest["expected_query_keys"]) == protocol.test_case_minimum * 2
+
+    with pytest.raises(ValueError, match="exactly cover"):
+        build_report(manifest, report.query_records[:-1])
+    with pytest.raises(ValueError, match="duplicate query key"):
+        build_report(
+            manifest,
+            [*report.query_records[:-1], report.query_records[0]],
+        )
+    for identity_change in (
+        {"system_id": "dense"},
+        {"budget_id": "high"},
+        {"seed": 29},
+        {"ablation_id": "A01"},
+    ):
+        mismatched_row = report.query_records[0].model_copy(update=identity_change)
+        with pytest.raises(ValueError, match="suite identity mismatch"):
+            build_report(manifest, [mismatched_row, *report.query_records[1:]])
+    inconsistent_suite_counts = {
+        **manifest,
+        "suite_statuses": [
+            {
+                **manifest["suite_statuses"][0],
+                "query_count": manifest["suite_statuses"][0]["query_count"] + 1,
+            }
+        ],
+    }
+    with pytest.raises(ValueError, match="suite query count"):
+        build_report(inconsistent_suite_counts, report.query_records)
+
+    paths = write_execution_artifacts(report, repository_root=tmp_path)
+    matrix_path = Path(paths["matrix_manifest"])
+    per_query_path = Path(paths["per_query"])
+    saved_manifest = json.loads(matrix_path.read_text(encoding="utf-8"))
+    assert saved_manifest["per_query_jsonl_sha256"] == paths["per_query_sha256"]
+    rebuilt_from_files = recompute_report_files(
+        matrix_path,
+        per_query_path,
+        tmp_path / "report.md",
+    )
+    assert rebuilt_from_files["query_record_count"] == len(report.query_records)
+
+    original_jsonl = per_query_path.read_bytes()
+    per_query_path.write_bytes(original_jsonl + b"\n")
+    with pytest.raises(ValueError, match="SHA-256"):
+        recompute_report_files(matrix_path, per_query_path, tmp_path / "tampered.md")
+
+    lines = original_jsonl.decode("utf-8").splitlines()
+    missing_jsonl = "\n".join(lines[:-1]) + "\n"
+    missing_manifest = {
+        **saved_manifest,
+        "per_query_jsonl_sha256": hashlib.sha256(missing_jsonl.encode("utf-8")).hexdigest(),
+    }
+    missing_manifest_path = tmp_path / "matrix-missing.json"
+    missing_jsonl_path = tmp_path / "per-query-missing.jsonl"
+    missing_manifest_path.write_text(json.dumps(missing_manifest), encoding="utf-8")
+    missing_jsonl_path.write_bytes(missing_jsonl.encode("utf-8"))
+    with pytest.raises(ValueError, match="exactly cover"):
+        recompute_report_files(
+            missing_manifest_path,
+            missing_jsonl_path,
+            tmp_path / "missing.md",
+        )
+
+    duplicate_jsonl = "\n".join([*lines[:-1], lines[0]]) + "\n"
+    duplicate_manifest = {
+        **saved_manifest,
+        "per_query_jsonl_sha256": hashlib.sha256(duplicate_jsonl.encode("utf-8")).hexdigest(),
+    }
+    duplicate_manifest_path = tmp_path / "matrix-duplicate.json"
+    duplicate_jsonl_path = tmp_path / "per-query-duplicate.jsonl"
+    duplicate_manifest_path.write_text(json.dumps(duplicate_manifest), encoding="utf-8")
+    duplicate_jsonl_path.write_bytes(duplicate_jsonl.encode("utf-8"))
+    with pytest.raises(ValueError, match="duplicate query key"):
+        recompute_report_files(
+            duplicate_manifest_path,
+            duplicate_jsonl_path,
+            tmp_path / "duplicate.md",
+        )
+
+    # Legacy artifacts from before this guard may contain quality-shaped records.
+    unsafe_rows = [record.model_copy(update={"formal_quality_eligible": True}) for record in report.query_records]
+    rebuilt = build_report(manifest, unsafe_rows)
+    assert rebuilt["execution_mode"] == "LEGACY_DISPLAY_ONLY"
+    assert rebuilt["expected_quality_query_runs"] == 0
+    assert not rebuilt["formal_quality_eligible"]
+    assert rebuilt["suite_summaries"][0]["formal_quality_query_count"] == 0
+    assert rebuilt["suite_summaries"][0]["mean_evidence_recall"] is None
+    assert rebuilt["standard_paired_comparisons"] == []
+    assert rebuilt["standard_quality_cost_pareto"] == []
+    markdown = render_markdown_report(rebuilt)
+    assert "B07.final compatibility display" in markdown
+    assert "DISPLAY_ONLY" in markdown
+    assert "Suite usage (display only)" in markdown
+    assert "Evidence recall" not in markdown
+    with pytest.raises(ValueError, match="cannot claim formal quality eligibility"):
+        build_report({**manifest, "formal_quality_eligible": True}, unsafe_rows)
 
 
 @pytest.mark.parametrize("mismatch", ["missing_id", "digest"])
@@ -352,7 +661,7 @@ def test_formal_runner_blocks_unverified_schedule_generation_before_provider(
     )
 
     report = _drive_immediate(
-        run_formal_matrix(
+        run_legacy_matrix_compatibility(
             schedule,
             protocol,
             dataset,
@@ -401,6 +710,28 @@ def test_generation_identity_is_written_through_matrix_and_query_artifacts(tmp_p
     rebuilt = build_report(manifest, [QueryRunRecord.model_validate(query)])
     assert rebuilt["generation_id"] == generation.id
     assert rebuilt["generation_sha256"] == verify_generation_manifest(generation).generation_sha256
+
+    bound_schedule = replace(
+        schedule,
+        gold_mapping_mode="STRICT_SEMANTIC",
+        dataset_manifest_sha256="a" * 64,
+        relation_expectations_sha256="b" * 64,
+        required_relation_ids=("00000000-0000-4000-8000-000000000001",),
+        required_relation_ids_sha256="c" * 64,
+        required_relation_queue_sha256="d" * 64,
+    )
+    bound_matrix = replace(matrix, schedule=bound_schedule)
+    bound_manifest = bound_matrix.to_dict()
+    bound_report = build_report(bound_manifest, [QueryRunRecord.model_validate(query)])
+    assert bound_report["dataset_manifest_sha256"] == "a" * 64
+    assert bound_report["dataset_content_sha256"] == bound_schedule.dataset_content_sha256
+    assert bound_report["relation_expectations_sha256"] == "b" * 64
+    assert bound_report["required_relation_ids"] == list(bound_schedule.required_relation_ids)
+    assert bound_report["required_relation_ids_sha256"] == "c" * 64
+    assert bound_report["required_relation_queue_sha256"] == "d" * 64
+    tampered_binding = {**bound_manifest, "relation_expectations_sha256": "e" * 64}
+    with pytest.raises(ValueError, match="relation_expectations_sha256"):
+        build_report(tampered_binding, [QueryRunRecord.model_validate(query)])
 
     mismatched_id = "55555555-5555-4555-8555-555555555555"
     mismatched_manifest = {**manifest, "generation_id": mismatched_id}
@@ -563,12 +894,13 @@ class _SyntheticExecutor:
 
     def __init__(self, *, fail_until: int = 2, permanent: bool = False) -> None:
         self.calls = 0
+        self.queries: list[BlindBenchmarkInput] = []
         self.fail_until = fail_until
         self.permanent = permanent
 
     async def execute_query(
         self,
-        case,
+        query: BlindBenchmarkInput,
         suite,
         *,
         attempt: int,
@@ -577,6 +909,7 @@ class _SyntheticExecutor:
         generation_sha256: str | None = None,
     ) -> AttemptOutcome:
         self.calls += 1
+        self.queries.append(query)
         if attempt <= self.fail_until:
             return AttemptOutcome(
                 attempt=attempt,
@@ -611,6 +944,7 @@ class _SyntheticExecutor:
             elapsed_ms=15,
             strategy_latency_ms=4,
             cache_state=cache_state,
+            cache_state_receipt=_cache_receipt(cache_state),
             executed_generation_id=generation.id if generation is not None else None,
             executed_generation_sha256=generation_sha256,
             measurements=QueryMeasurements(evidence_recall=0.9),
@@ -643,6 +977,13 @@ def test_runner_retains_retry_usage_and_marks_fixture_quality_ineligible() -> No
         )
     )
     assert executor.calls == 3
+    assert len(executor.queries) == 3
+    assert all(query is executor.queries[0] for query in executor.queries)
+    assert executor.queries[0].model_dump() == {
+        "query_id": case.case.id,
+        "question": case.case.question,
+        "language": case.case.language,
+    }
     assert record.status == "complete"
     assert record.total_tokens == 11
     assert record.tool_calls == 3
@@ -670,6 +1011,29 @@ def test_runner_does_not_retry_configuration_failures() -> None:
     assert record.status == "failed"
     assert record.attempts[0].failure_code == "CONFIG_INVALID"
     assert record.input_tokens == 2
+
+
+def test_formal_runner_rejects_executor_supplied_gold_measurements() -> None:
+    case = _fixture()[0]
+    generation, _generation_sha256 = _make_generation()
+    executor = _DisplayOnlyRealExecutor()
+
+    record = _drive_immediate(
+        run_query_with_retries(
+            executor,
+            case,
+            _suite(),
+            formal_dataset=True,
+            generation_binding=verify_generation_manifest(generation),
+            retry_delay_seconds=0,
+        )
+    )
+
+    assert executor.calls == 1
+    assert record.status == "failed"
+    assert record.attempts[-1].failure_code == "EXECUTOR_SCORE_FORBIDDEN"
+    assert record.total_tokens == 2
+    assert record.measurements is None
 
 
 def test_secret_redaction_covers_fields_bearer_url_password_and_key() -> None:

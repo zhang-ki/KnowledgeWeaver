@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
-from typing import Any, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 from knowledge_weaver.core.budget import BudgetLedger, BudgetReservation
 from knowledge_weaver.core.errors import (
@@ -23,6 +23,10 @@ from knowledge_weaver.core.ids import deterministic_id, new_id
 from knowledge_weaver.models import (
     Action,
     ActionTool,
+    AgentExecutionProfile,
+    AgentExecutionResult,
+    AgentExecutionTraceStep,
+    AgentProviderCallUsage,
     Answer,
     AnswerStatus,
     Budget,
@@ -58,8 +62,10 @@ from knowledge_weaver.ports import (
     RetrievalPolicy,
     Retriever,
 )
+from knowledge_weaver.retrieval.hybrid import HybridRetriever
 
 from .evidence import EvidenceEntry, EvidenceLedger
+from .execution_profiles import agent_behavior_profile
 from .features import (
     clamp,
     extract_exact_symbol,
@@ -67,7 +73,14 @@ from .features import (
     independent_source_gap,
     stable_action_key,
 )
-from .policies import FixedPolicy, LLMRoutingPolicy, RulePolicy, SegrPolicy
+from .policies import (
+    FixedAgentPolicy,
+    FixedPolicy,
+    Generate,
+    LLMRoutingPolicy,
+    RulePolicy,
+    SegrPolicy,
+)
 from .verifier import StructuredEvidenceVerifier
 from .weights import ACTION_FAMILIES, SegrPolicyWeights, load_policy_weights
 
@@ -96,6 +109,7 @@ _DEFAULT_COSTS: dict[str, tuple[int, int]] = {
     "symbol": (128, 2_500),
     "entity": (256, 3_500),
     "graph": (512, 5_000),
+    "hybrid": (1_024, 19_000),
     "rerank": (5_120, 15_000),
 }
 
@@ -308,7 +322,19 @@ def _build_candidates(
     used_tool_calls: int,
     used_tokens: int,
     reranker_available: bool,
+    fixed_agent: bool = False,
 ) -> tuple[list[Action], bool]:
+    if fixed_agent:
+        return _build_fixed_agent_candidate(
+            state,
+            ledger,
+            tools,
+            weights,
+            budget,
+            used_tool_calls,
+            used_tokens,
+            reranker_available,
+        )
     remaining_tokens = max(0, budget.max_total_tokens - used_tokens)
     tool_slots = max(0, budget.max_tool_calls - used_tool_calls)
     if tool_slots <= 0:
@@ -440,6 +466,129 @@ def _build_candidates(
     if len(actions) > 30:
         actions = actions[:30]
     return actions, pruned
+
+
+def _build_fixed_agent_candidate(
+    state: InvestigationState,
+    ledger: EvidenceLedger,
+    tools: RetrieverMap,
+    weights: SegrPolicyWeights | None,
+    budget: Budget,
+    used_tool_calls: int,
+    used_tokens: int,
+    reranker_available: bool,
+) -> tuple[list[Action], bool]:
+    remaining_tokens = max(0, budget.max_total_tokens - used_tokens)
+    tool_slots = max(0, budget.max_tool_calls - used_tool_calls)
+    if tool_slots <= 0:
+        return [], True
+
+    facet = _find_focus_facet(state)
+    raw_attempts = state.policy_memory.get("attempts", [])
+    attempts = (
+        [item for item in raw_attempts if isinstance(item, Mapping)]
+        if isinstance(raw_attempts, list)
+        else []
+    )
+
+    def attempted(tool: ActionTool, query_kind: str | None = None) -> bool:
+        return any(
+            row.get("tool") == tool.value
+            and (query_kind is None or row.get("query_kind") == query_kind)
+            for row in attempts
+        )
+
+    candidate: Action | None = None
+    if not attempted(ActionTool.hybrid, "base"):
+        tool = ActionTool.hybrid
+        query = facet.text
+        candidate = Action(
+            id=deterministic_id(
+                "agent_action",
+                {
+                    "tool": tool.value,
+                    "facet_id": facet.id,
+                    "query": query,
+                    "query_kind": "base",
+                    "top_k": 10,
+                    "hops": None,
+                },
+            ),
+            tool=tool,
+            facet_id=facet.id,
+            query=query,
+            top_k=10,
+        )
+    elif not attempted(ActionTool.graph, "base"):
+        tool = ActionTool.graph
+        candidate = Action(
+            id=deterministic_id(
+                "agent_action",
+                {
+                    "tool": tool.value,
+                    "facet_id": facet.id,
+                    "query": facet.text,
+                    "query_kind": "base",
+                    "top_k": 10,
+                    "hops": 2,
+                },
+            ),
+            tool=tool,
+            facet_id=facet.id,
+            query=facet.text,
+            top_k=10,
+            hops=2,
+        )
+    elif not attempted(ActionTool.hybrid, "expanded"):
+        expanded = _expanded_query(state, facet, ledger)
+        if expanded:
+            tool = ActionTool.hybrid
+            candidate = Action(
+                id=deterministic_id(
+                    "agent_action",
+                    {
+                        "tool": tool.value,
+                        "facet_id": facet.id,
+                        "query": expanded,
+                        "query_kind": "expanded",
+                        "top_k": 10,
+                        "hops": None,
+                    },
+                ),
+                tool=tool,
+                facet_id=facet.id,
+                query=expanded,
+                top_k=10,
+            )
+
+    if candidate is None:
+        if attempted(ActionTool.rerank) or not ledger.hits or not reranker_available:
+            return [], False
+        tool = ActionTool.rerank
+        candidate = Action(
+            id=deterministic_id(
+                "agent_action",
+                {"tool": tool.value, "facet_id": facet.id, "query": facet.text, "top_k": 10},
+            ),
+            tool=tool,
+            facet_id=facet.id,
+            query=facet.text,
+            top_k=10,
+        )
+
+    estimated_tokens, estimated_ms = _action_cost(
+        candidate.tool.value,
+        candidate.query,
+        candidate.top_k,
+        weights,
+    )
+    if estimated_tokens > remaining_tokens:
+        return [], True
+    return [
+        candidate.model_copy(
+            update={"estimated_tokens": estimated_tokens, "estimated_ms": estimated_ms}
+        )
+    ], False
 
 
 def _merge_support_rows(
@@ -589,6 +738,7 @@ class _BudgetedGeneration:
         self.budget = budget
         self.context_deadline = context_deadline
         self.external_tokens = external_tokens
+        self.calls: list[AgentProviderCallUsage] = []
         provider_budget = getattr(provider, "budget", None)
         if provider_budget is not None and provider_budget is not ledger:
             raise KnowledgeWeaverError(
@@ -597,36 +747,76 @@ class _BudgetedGeneration:
             )
         self.provider_uses_ledger = provider_budget is ledger
 
-    async def generate(self, request: LLMRequest) -> LLMResult:
-        now = datetime.now(UTC)
-        deadline = min(self.context_deadline, self.budget.deadline_utc)
-        remaining = (deadline - now).total_seconds()
-        if remaining <= 0:
-            raise DeadlineExceeded()
-        request = request.model_copy(update={"timeout_seconds": min(request.timeout_seconds, remaining)})
-        used_external = self.external_tokens()
-        self.ledger.budget = self.budget.model_copy(
-            update={"max_total_tokens": max(1, self.budget.max_total_tokens - used_external)}
-        )
+    def for_purpose(
+        self, purpose: Literal["router", "verifier", "answer", "agent"]
+    ) -> Generate:
+        async def generate(request: LLMRequest) -> LLMResult:
+            return await self.generate(request, purpose=purpose)
+
+        return generate
+
+    async def generate(
+        self,
+        request: LLMRequest,
+        *,
+        purpose: Literal["router", "verifier", "answer", "agent"] = "agent",
+    ) -> LLMResult:
         reservation: BudgetReservation | None = None
-        if not self.provider_uses_ledger:
-            prompt = "\n".join(
-                [request.system_instruction, request.untrusted_context, json.dumps(request.response_schema, sort_keys=True)]
-            )
-            reservation = await self.ledger.reserve_llm_call(
-                input_tokens_estimate=_estimate_tokens(prompt),
-                max_output_tokens=request.max_output_tokens,
-            )
+        sequence = len(self.calls) + 1
         try:
+            now = datetime.now(UTC)
+            deadline = min(self.context_deadline, self.budget.deadline_utc)
+            remaining = (deadline - now).total_seconds()
+            if remaining <= 0:
+                raise DeadlineExceeded()
+            request = request.model_copy(
+                update={"timeout_seconds": min(request.timeout_seconds, remaining)}
+            )
+            used_external = self.external_tokens()
+            self.ledger.budget = self.budget.model_copy(
+                update={"max_total_tokens": max(1, self.budget.max_total_tokens - used_external)}
+            )
+            if not self.provider_uses_ledger:
+                prompt = "\n".join(
+                    [
+                        request.system_instruction,
+                        request.untrusted_context,
+                        json.dumps(request.response_schema, sort_keys=True),
+                    ]
+                )
+                reservation = await self.ledger.reserve_llm_call(
+                    input_tokens_estimate=_estimate_tokens(prompt),
+                    max_output_tokens=request.max_output_tokens,
+                )
             async with asyncio.timeout(remaining):
                 result = await self.provider.generate(request)
-        except BaseException:
+            if reservation is not None and not reservation.settled:
+                await reservation.finish(result.usage)
+            self.calls.append(
+                AgentProviderCallUsage(
+                    sequence=sequence,
+                    purpose=purpose,
+                    status="complete",
+                    model=result.model,
+                    revision=result.revision,
+                    usage=result.usage,
+                )
+            )
+            return result
+        except BaseException as exc:
             if reservation is not None and not reservation.settled:
                 await reservation.finish(None)
+            code = getattr(exc, "code", None)
+            failure_code = code.value if isinstance(code, ErrorCode) else type(exc).__name__
+            self.calls.append(
+                AgentProviderCallUsage(
+                    sequence=sequence,
+                    purpose=purpose,
+                    status="failed",
+                    error_code=failure_code,
+                )
+            )
             raise
-        if reservation is not None and not reservation.settled:
-            await reservation.finish(result.usage)
-        return result
 
 
 class AgentServiceImpl(AgentService):
@@ -641,6 +831,8 @@ class AgentServiceImpl(AgentService):
         reranker: Reranker | RerankerFactory | None = None,
         verifier_factory: VerifierFactory | None = None,
         weights: SegrPolicyWeights | None = None,
+        weights_sha256: str | None = None,
+        generation_config_sha256: str | None = None,
         trace_callback: TraceCallback | None = None,
     ) -> None:
         self.knowledge_store = knowledge_store
@@ -649,27 +841,172 @@ class AgentServiceImpl(AgentService):
         self.reranker = reranker
         self.verifier_factory = verifier_factory
         self.weights = weights
+        self.weights_sha256 = weights_sha256
+        self.generation_config_sha256 = generation_config_sha256
         self.trace_callback = trace_callback
         self._traces: dict[str, list[dict[str, Any]]] = {}
+        for name, digest in (
+            ("weights_sha256", weights_sha256),
+            ("generation_config_sha256", generation_config_sha256),
+        ):
+            if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError(f"{name} must be a lowercase SHA-256 digest")
         if isinstance(retrievers, Mapping):
             self._validate_retriever_map(retrievers)
 
     @staticmethod
     def _validate_retriever_map(retrievers: RetrieverMap) -> None:
         required = {"bm25", "dense", "symbol", "entity", "graph"}
+        allowed = required | {"hybrid"}
         missing = required - set(retrievers)
-        extra = set(retrievers) - required
+        extra = set(retrievers) - allowed
         if missing or extra:
             raise KnowledgeWeaverError(
                 ErrorCode.INVALID_INPUT,
-                "B06 requires exactly the five frozen retrieval tools",
+                "B06 requires the five frozen retrieval tools and only an optional hybrid route",
                 details={"missing": sorted(missing), "extra": sorted(extra)},
+            )
+        hybrid = retrievers.get("hybrid")
+        if hybrid is not None and (
+            not isinstance(hybrid, HybridRetriever)
+            or set(hybrid.channels) != {"bm25", "dense", "symbol", "entity"}
+            or hybrid.reranker is not None
+        ):
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B06 hybrid action requires the frozen four-channel RRF route without reranking",
             )
 
     def get_trace(self, investigation_id: str) -> list[dict[str, Any]]:
         return copy.deepcopy(self._traces.get(investigation_id, []))
 
     async def investigate(self, request: InvestigationRequest) -> Answer:
+        answer, _steps, _provider_calls = await self._investigate(request, None)
+        return answer
+
+    async def investigate_with_trace(
+        self,
+        request: InvestigationRequest,
+        execution_profile: AgentExecutionProfile,
+    ) -> AgentExecutionResult:
+        self._validate_execution_profile(request, execution_profile)
+        answer, retrieval_steps, provider_calls = await self._investigate(
+            request, execution_profile
+        )
+        validated_citation_ids = tuple(
+            dict.fromkeys(
+                evidence_id
+                for claim in answer.claims
+                for evidence_id in claim.evidence_ids
+            )
+        )
+        return AgentExecutionResult(
+            answer=answer,
+            profile=execution_profile,
+            generation_id=execution_profile.generation_id,
+            generation_sha256=execution_profile.generation_sha256,
+            provider_calls=provider_calls,
+            retrieval_steps=retrieval_steps,
+            aggregate_usage=answer.usage,
+            validated_citation_ids=validated_citation_ids,
+        )
+
+    def _validate_execution_profile(
+        self,
+        request: InvestigationRequest,
+        execution_profile: AgentExecutionProfile,
+    ) -> object:
+        if type(execution_profile) is not AgentExecutionProfile:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B07 trace execution requires the immutable AgentExecutionProfile DTO",
+                request_id=request.context.request_id,
+            )
+        if request.query.context != request.context:
+            raise KnowledgeWeaverError(
+                ErrorCode.GENERATION_CONFLICT,
+                "request query and investigation contexts differ",
+                request_id=request.context.request_id,
+            )
+        try:
+            behavior = agent_behavior_profile(execution_profile.route_id)
+        except ValueError as exc:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B07 Agent execution profile is not supported by this B06 build",
+                request_id=request.context.request_id,
+            ) from exc
+        if (
+            behavior.system_id != execution_profile.system_id
+            or behavior.ablation_id != execution_profile.ablation_id
+            or behavior.config_sha256 != execution_profile.config_sha256
+        ):
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B07 Agent ID/config binding differs from the frozen B06 profile",
+                request_id=request.context.request_id,
+            )
+        if request.policy is not behavior.policy or request.policy_artifact is not None:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B07 request policy differs from its frozen Agent profile",
+                request_id=request.context.request_id,
+            )
+        flags = _safe_features(request.features)
+        expected_flags = dict(FEATURE_DEFAULTS)
+        expected_flags.update(behavior.request_features())
+        if flags != expected_flags:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B07 request features differ from the frozen Agent profile",
+                request_id=request.context.request_id,
+            )
+        if request.language is None:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B07 trace request must include the blind query language",
+                request_id=request.context.request_id,
+            )
+        if execution_profile.generation_id != request.context.generation_id:
+            raise KnowledgeWeaverError(
+                ErrorCode.GENERATION_CONFLICT,
+                "B07 profile Generation differs from the request context",
+                request_id=request.context.request_id,
+            )
+        if self.generation_config_sha256 != execution_profile.generation_config_sha256:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B07 generation config SHA differs from the configured Agent provider",
+                request_id=request.context.request_id,
+            )
+        if behavior.system_id == "segr" or behavior.ablation_id is not None:
+            if (
+                self.weights is None
+                or self.weights_sha256 is None
+                or self.weights_sha256 != execution_profile.weights_sha256
+            ):
+                raise KnowledgeWeaverError(
+                    ErrorCode.INVALID_INPUT,
+                    "B07 weights SHA differs from the configured Agent policy artifact",
+                    request_id=request.context.request_id,
+                )
+        elif execution_profile.weights_sha256 is not None:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "non-SEGR Agent profile cannot carry a policy weights SHA",
+                request_id=request.context.request_id,
+            )
+        return behavior
+
+    async def _investigate(
+        self,
+        request: InvestigationRequest,
+        trace_profile: AgentExecutionProfile | None,
+    ) -> tuple[
+        Answer,
+        tuple[AgentExecutionTraceStep, ...],
+        tuple[AgentProviderCallUsage, ...],
+    ]:
         flags = _safe_features(request.features)
         if request.query.context != request.context:
             raise KnowledgeWeaverError(
@@ -694,18 +1031,32 @@ class AgentServiceImpl(AgentService):
         def external_token_count() -> int:
             return external_tokens
 
+        retrieval_steps: list[AgentExecutionTraceStep] = []
         tools = self._make_tools(ledger)
-        generator = self._make_generator(ledger, effective_budget, deadline, external_token_count)
         reranker = self._make_reranker(ledger)
+        fixed_agent = trace_profile is not None and trace_profile.route_id == "agent.fixed"
+        if fixed_agent and "hybrid" not in tools:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "fixed_agent requires the configured B04 hybrid RRF route",
+                request_id=request.context.request_id,
+            )
+        if fixed_agent and reranker is None:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "fixed_agent requires the configured final reranker",
+                request_id=request.context.request_id,
+            )
+        generator = self._make_generator(ledger, effective_budget, deadline, external_token_count)
         self._assert_budget_ownership(tools, ledger)
         self._assert_budget_ownership({"reranker": reranker} if reranker else {}, ledger)
         verifier: EvidenceVerifier = (
-            self.verifier_factory(generator.generate)
+            self.verifier_factory(generator.for_purpose("verifier"))
             if self.verifier_factory is not None
-            else StructuredEvidenceVerifier(generator.generate)
+            else StructuredEvidenceVerifier(generator.for_purpose("verifier"))
         )
         weights = self._request_weights(request)
-        policy = self._make_policy(request, flags, weights)
+        policy = self._make_policy(request, flags, weights, trace_profile)
         stop_reason: StopReason | None = None
         steps = 0
 
@@ -742,6 +1093,7 @@ class AgentServiceImpl(AgentService):
                     snapshot.tool_calls,
                     snapshot.total_tokens + external_tokens,
                     reranker is not None,
+                    fixed_agent=fixed_agent,
                 )
                 state = state.model_copy(update={"candidates": candidates})
                 if not candidates:
@@ -757,7 +1109,7 @@ class AgentServiceImpl(AgentService):
                             state = await policy.prepare(
                                 state,
                                 candidates,
-                                generator.generate,
+                                generator.for_purpose("router"),
                                 timeout_seconds=max(0.1, (deadline - datetime.now(UTC)).total_seconds()),
                             )
                         except (BudgetExceeded, DeadlineExceeded) as exc:
@@ -792,6 +1144,7 @@ class AgentServiceImpl(AgentService):
                 external_before = external_tokens
                 action_started = time.monotonic()
                 action_started_at = datetime.now(UTC)
+                result: RetrievalResult | None = None
                 try:
                     tool_reservation = await ledger.reserve_tool_call()
                     if action.tool is ActionTool.rerank:
@@ -815,6 +1168,7 @@ class AgentServiceImpl(AgentService):
                             effective_budget,
                             deadline,
                             state,
+                            allow_graph_seed_lookup=fixed_agent,
                         )
                         if action.tool is ActionTool.entity and result.hits:
                             memory = _policy_memory(state)
@@ -931,6 +1285,18 @@ class AgentServiceImpl(AgentService):
                         external_estimated=external_estimated and external_tokens > external_before,
                         tool_calls_override=1,
                     )
+                    if trace_profile is not None and result is not None:
+                        retrieval_steps.append(
+                            self._execution_trace_step(
+                                sequence=len(retrieval_steps) + 1,
+                                step=steps + 1,
+                                action=action,
+                                request=request,
+                                status="complete",
+                                result=result,
+                                usage=action_usage,
+                            )
+                        )
                     if result is not None:
                         record = RetrievalRecord(
                             id=new_id(),
@@ -988,6 +1354,27 @@ class AgentServiceImpl(AgentService):
                         else StopReason.budget_exhausted
                     )
                     trace_entry["error_code"] = getattr(getattr(exc, "envelope", None), "code", type(exc).__name__)
+                    if trace_profile is not None:
+                        retrieval_steps.append(
+                            self._execution_trace_step(
+                                sequence=len(retrieval_steps) + 1,
+                                step=steps + 1,
+                                action=action,
+                                request=request,
+                                status="failed",
+                                result=result,
+                                usage=await self._failed_action_usage(
+                                    ledger,
+                                    before_snapshot,
+                                    action_started,
+                                    external_before,
+                                    external_tokens,
+                                    external_estimated,
+                                    tool_reservation is not None,
+                                ),
+                                error_code=str(trace_entry["error_code"]),
+                            )
+                        )
                     trace.append(trace_entry)
                     self._emit_trace(investigation_id, trace_entry)
                     break
@@ -997,16 +1384,82 @@ class AgentServiceImpl(AgentService):
                     raise
                 except KnowledgeWeaverError as exc:
                     if exc.code in {ErrorCode.INVALID_INPUT, ErrorCode.MISSING_REFERENCE, ErrorCode.SCHEMA_INVALID, ErrorCode.GENERATION_CONFLICT}:
+                        trace_entry["error_code"] = exc.code.value
+                        if trace_profile is not None:
+                            retrieval_steps.append(
+                                self._execution_trace_step(
+                                    sequence=len(retrieval_steps) + 1,
+                                    step=steps + 1,
+                                    action=action,
+                                    request=request,
+                                    status="failed",
+                                    result=result,
+                                    usage=await self._failed_action_usage(
+                                        ledger,
+                                        before_snapshot,
+                                        action_started,
+                                        external_before,
+                                        external_tokens,
+                                        external_estimated,
+                                        tool_reservation is not None,
+                                    ),
+                                    error_code=exc.code.value,
+                                )
+                            )
+                        trace.append(trace_entry)
+                        self._emit_trace(investigation_id, trace[-1])
                         raise
                     state = self._record_failed_attempt(state, action, exc.code.value)
                     steps += 1
                     trace_entry["error_code"] = exc.code.value
+                    if trace_profile is not None:
+                        retrieval_steps.append(
+                            self._execution_trace_step(
+                                sequence=len(retrieval_steps) + 1,
+                                step=steps,
+                                action=action,
+                                request=request,
+                                status="failed",
+                                result=result,
+                                usage=await self._failed_action_usage(
+                                    ledger,
+                                    before_snapshot,
+                                    action_started,
+                                    external_before,
+                                    external_tokens,
+                                    external_estimated,
+                                    tool_reservation is not None,
+                                ),
+                                error_code=exc.code.value,
+                            )
+                        )
                     trace.append(trace_entry)
                     self._emit_trace(investigation_id, trace_entry)
                 except Exception as exc:  # noqa: BLE001 - isolated tool failure still consumes budget.
                     state = self._record_failed_attempt(state, action, type(exc).__name__)
                     steps += 1
                     trace_entry["error_code"] = type(exc).__name__
+                    if trace_profile is not None:
+                        retrieval_steps.append(
+                            self._execution_trace_step(
+                                sequence=len(retrieval_steps) + 1,
+                                step=steps,
+                                action=action,
+                                request=request,
+                                status="failed",
+                                result=result,
+                                usage=await self._failed_action_usage(
+                                    ledger,
+                                    before_snapshot,
+                                    action_started,
+                                    external_before,
+                                    external_tokens,
+                                    external_estimated,
+                                    tool_reservation is not None,
+                                ),
+                                error_code=type(exc).__name__,
+                            )
+                        )
                     trace.append(trace_entry)
                     self._emit_trace(investigation_id, trace_entry)
                 finally:
@@ -1060,7 +1513,7 @@ class AgentServiceImpl(AgentService):
                 trace,
                 investigation_id,
             )
-        return answer
+        return answer, tuple(retrieval_steps), tuple(generator.calls)
 
     def _apply_conflict_resolution_rewards(
         self,
@@ -1175,8 +1628,11 @@ class AgentServiceImpl(AgentService):
         request: InvestigationRequest,
         flags: Mapping[str, Any],
         weights: SegrPolicyWeights | None,
+        trace_profile: AgentExecutionProfile | None = None,
     ) -> RetrievalPolicy:
         if request.policy is PolicyKind.fixed:
+            if trace_profile is not None and trace_profile.route_id == "agent.fixed":
+                return FixedAgentPolicy()
             return FixedPolicy()
         if request.policy is PolicyKind.rule:
             return RulePolicy(enable_source_features=flags["enable_source_features"])
@@ -1201,13 +1657,19 @@ class AgentServiceImpl(AgentService):
         budget: Budget,
         deadline: datetime,
         state: InvestigationState,
+        *,
+        allow_graph_seed_lookup: bool = False,
     ) -> RetrievalResult:
         remaining = (deadline - datetime.now(UTC)).total_seconds()
         if remaining <= 0:
             raise DeadlineExceeded()
         graph_options = None
         if action.tool is ActionTool.graph:
-            if not state.policy_memory.get("seed_available") and not state.paths:
+            if (
+                not state.policy_memory.get("seed_available")
+                and not state.paths
+                and not allow_graph_seed_lookup
+            ):
                 raise KnowledgeWeaverError(
                     ErrorCode.MISSING_REFERENCE,
                     "graph action requires a resolved entity seed",
@@ -1395,6 +1857,11 @@ class AgentServiceImpl(AgentService):
         ]
         displayed_ids = {entry.evidence.id for entry in answer_evidence}
         displayed_paths = _active_paths(ledger, displayed_ids)
+        language_instruction = (
+            f" Write answer text in language {request.language.value}."
+            if request.language is not None
+            else ""
+        )
         payload = {
             "question": request.query.text,
             "facets": [{"id": facet.id, "text": facet.text} for facet in state.subquestions],
@@ -1423,7 +1890,7 @@ class AgentServiceImpl(AgentService):
             "allowed_relation_ids": sorted({step.relation_id for path in displayed_paths for step in path.steps}),
         }
         try:
-            response = await generator.generate(
+            response = await generator.for_purpose("answer")(
                 LLMRequest(
                     system_instruction=(
                         "Answer only from the supplied evidence. Every claim must cite one or more offered evidence IDs; "
@@ -1437,6 +1904,7 @@ class AgentServiceImpl(AgentService):
                         "or, when insufficient, {\"status\":\"insufficient\",\"claims\":[],"
                         "\"unanswered\":[\"facet text\"]}. Replace example text and IDs with exact supplied values. "
                         "Do not provide chain of thought."
+                        f"{language_instruction}"
                     ),
                     untrusted_context=json.dumps(payload, ensure_ascii=False, sort_keys=True),
                     response_schema=_ANSWER_SCHEMA,
@@ -1656,6 +2124,63 @@ class AgentServiceImpl(AgentService):
         family_counts[action.tool.value] = int(family_counts.get(action.tool.value, 0)) + 1
         memory["family_counts"] = family_counts
         return state.model_copy(update={"policy_memory": memory})
+
+    @staticmethod
+    async def _failed_action_usage(
+        ledger: BudgetLedger,
+        before: Usage,
+        action_started: float,
+        external_before: int,
+        external_after: int,
+        external_estimated: bool,
+        tool_reserved: bool,
+    ) -> Usage:
+        after = await ledger.snapshot()
+        elapsed_ms = max(0, int((time.monotonic() - action_started) * 1000))
+        delta = Usage(
+            elapsed_ms=elapsed_ms,
+            tool_calls=1 if tool_reserved else 0,
+            llm_calls=max(0, after.llm_calls - before.llm_calls),
+            input_tokens=max(0, after.input_tokens - before.input_tokens),
+            output_tokens=max(0, after.output_tokens - before.output_tokens),
+            count_kind=after.count_kind,
+        )
+        return _usage_from_ledger(
+            delta,
+            elapsed_ms=elapsed_ms,
+            external_tokens=max(0, external_after - external_before),
+            external_estimated=external_estimated and external_after > external_before,
+            tool_calls_override=delta.tool_calls,
+        )
+
+    @staticmethod
+    def _execution_trace_step(
+        *,
+        sequence: int,
+        step: int,
+        action: Action,
+        request: InvestigationRequest,
+        status: Literal["complete", "failed"],
+        result: RetrievalResult | None,
+        usage: Usage,
+        error_code: str | None = None,
+    ) -> AgentExecutionTraceStep:
+        return AgentExecutionTraceStep(
+            sequence=sequence,
+            step=step,
+            action_id=action.id,
+            source=action.tool,
+            facet_id=action.facet_id,
+            query_sha256=hashlib.sha256(action.query.encode("utf-8")).hexdigest(),
+            context=request.context,
+            status=status,
+            hits=tuple(result.hits) if result is not None else (),
+            paths=tuple(result.paths) if result is not None else (),
+            warnings=tuple(result.warnings) if result is not None else (),
+            partial=result.partial if result is not None else False,
+            usage=usage,
+            error_code=error_code,
+        )
 
     @staticmethod
     def _trace_entry(

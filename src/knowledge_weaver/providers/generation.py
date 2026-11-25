@@ -10,7 +10,13 @@ from knowledge_weaver.core.config import RemoteUseApproval, RuntimeSettings
 from knowledge_weaver.core.errors import ProviderUnavailable
 from knowledge_weaver.models import LLMRequest, LLMResult
 
-from ._common import auth_headers, estimate_tokens, parse_token_usage, validate_json_response
+from ._common import (
+    StructuredResponseInvalid,
+    auth_headers,
+    estimate_tokens,
+    parse_token_usage,
+    validate_json_response,
+)
 from ._retry import post_with_retries
 from .http import HttpxJsonTransport, JsonTransport
 from .profiles import OpenAIChatProfile
@@ -105,7 +111,22 @@ class CloudGenerationProvider:
         except ProviderUnavailable:
             await reservation.finish(None)
             raise
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        except json.JSONDecodeError:
+            await reservation.finish(None)
+            choices = body.get("choices")
+            choice = choices[0] if isinstance(choices, list) and choices else {}
+            finish_reason = (
+                choice.get("finish_reason") if isinstance(choice, dict) else None
+            )
+            raise StructuredResponseInvalid(
+                "provider response content was not valid JSON",
+                diagnostic={
+                    "failure_stage": "content_json_parse",
+                    "finish_reason": finish_reason,
+                    "content_truncated": finish_reason == "length",
+                },
+            ) from None
+        except (KeyError, IndexError, TypeError):
             await reservation.finish(None)
             raise ProviderUnavailable(
                 "provider response did not match the JSON object contract",

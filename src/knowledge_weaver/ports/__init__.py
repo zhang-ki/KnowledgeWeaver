@@ -5,6 +5,8 @@ from typing import Protocol, runtime_checkable
 
 from knowledge_weaver.models import (
     Action,
+    AgentExecutionProfile,
+    AgentExecutionResult,
     Answer,
     Chunk,
     ChunkConfig,
@@ -121,6 +123,10 @@ class RetrievalPolicy(Protocol):
 @runtime_checkable
 class AgentService(Protocol):
     async def investigate(self, request: InvestigationRequest) -> Answer: ...
+
+    async def investigate_with_trace(
+        self, request: InvestigationRequest, execution_profile: AgentExecutionProfile
+    ) -> AgentExecutionResult: ...
 
 
 @runtime_checkable

@@ -14,12 +14,20 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StringConstraints,
     field_validator,
     model_validator,
 )
 
-from knowledge_weaver.models.contracts import BenchmarkCase, SHA256Text, SourceKind
+from knowledge_weaver.models.contracts import (
+    BenchmarkCase,
+    EntityKind,
+    Polarity,
+    RelationPredicate,
+    SHA256Text,
+    SourceKind,
+)
 
 NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 UUIDText = Annotated[
@@ -42,6 +50,117 @@ class PermissionScope(str, Enum):
 class DatasetStatus(str, Enum):
     blocked_inputs = "BLOCKED_INPUTS"
     frozen = "FROZEN"
+
+
+class GoldQualifierReviewState(str, Enum):
+    unreviewed = "UNREVIEWED"
+    reviewed_empty = "REVIEWED_EMPTY"
+    reviewed_values = "REVIEWED_VALUES"
+
+
+class GoldEvidenceBasis(str, Enum):
+    source_code = "SOURCE_CODE"
+    normative_specification = "NORMATIVE_SPECIFICATION"
+
+
+class GoldOutcomeKind(str, Enum):
+    fact = "FACT"
+    return_value = "RETURN_VALUE"
+    exception = "EXCEPTION"
+    state_change = "STATE_CHANGE"
+    normative_obligation = "NORMATIVE_OBLIGATION"
+
+
+class GoldEndpointExpectation(EvaluationModel):
+    source_uri: NonEmptyText
+    source_version_id: UUIDText
+    raw_file_sha256: SHA256Text
+    relative_path: NonEmptyText
+    qualified_symbol: NonEmptyText
+    entity_kind: EntityKind
+
+    @field_validator("relative_path")
+    @classmethod
+    def normalized_relative_path(cls, value: str) -> str:
+        if "\\" in value or ":" in value:
+            raise ValueError("endpoint paths must use relative POSIX syntax")
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or path.as_posix() != value
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("endpoint paths must be normalized relative paths")
+        return value
+
+
+class GoldRelationExpectation(EvaluationModel):
+    """Versioned, exact semantic expectation used only by B07 Gold mapping."""
+
+    schema_version: Literal[1] = 1
+    relation_id: UUIDText
+    predicate: RelationPredicate
+    polarity: Polarity
+    subject: GoldEndpointExpectation
+    object: GoldEndpointExpectation
+    qualifier_review_state: GoldQualifierReviewState
+    qualifier_values: dict[str, JsonValue] = Field(default_factory=dict)
+    result_role: NonEmptyText
+    outcome_kind: GoldOutcomeKind
+    evidence_basis: GoldEvidenceBasis
+
+    @model_validator(mode="after")
+    def reviewed_values_and_outcome_match(self) -> Self:
+        if self.qualifier_review_state is GoldQualifierReviewState.unreviewed:
+            if self.qualifier_values:
+                raise ValueError("UNREVIEWED expectations cannot supply qualifier values")
+        elif self.qualifier_review_state is GoldQualifierReviewState.reviewed_empty:
+            if self.qualifier_values:
+                raise ValueError("REVIEWED_EMPTY expectations must have no qualifier values")
+        elif not self.qualifier_values:
+            raise ValueError("REVIEWED_VALUES expectations require at least one qualifier")
+
+        if self.predicate is RelationPredicate.RETURNS and (
+            self.outcome_kind is not GoldOutcomeKind.return_value
+            or self.result_role != "return_value"
+        ):
+            raise ValueError("RETURNS expectations must describe a return_value outcome")
+        if self.predicate is RelationPredicate.RAISES and (
+            self.outcome_kind is not GoldOutcomeKind.exception
+            or self.result_role != "exception"
+        ):
+            raise ValueError("RAISES expectations must describe an exception outcome")
+        if self.outcome_kind is GoldOutcomeKind.normative_obligation:
+            if self.evidence_basis is not GoldEvidenceBasis.normative_specification:
+                raise ValueError("NORMATIVE_OBLIGATION requires normative specification evidence")
+            if (
+                self.qualifier_review_state is GoldQualifierReviewState.reviewed_values
+                and "normative_modality" not in self.qualifier_values
+            ):
+                raise ValueError("reviewed normative obligations must retain their modality")
+        if (
+            self.evidence_basis is GoldEvidenceBasis.normative_specification
+            and self.qualifier_review_state is GoldQualifierReviewState.reviewed_values
+            and "normative_modality" in self.qualifier_values
+            and self.predicate not in {RelationPredicate.RETURNS, RelationPredicate.RAISES}
+            and self.outcome_kind is not GoldOutcomeKind.normative_obligation
+        ):
+            raise ValueError("reviewed normative duties must use NORMATIVE_OBLIGATION")
+        return self
+
+
+class GoldRelationExpectationManifest(EvaluationModel):
+    schema_version: Literal[1] = 1
+    dataset_id: NonEmptyText
+    dataset_version: NonEmptyText
+    expectations: list[GoldRelationExpectation] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_relation_ids(self) -> Self:
+        ids = [item.relation_id for item in self.expectations]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Gold relation expectation IDs must be unique")
+        return self
 
 
 class ReviewChecklist(EvaluationModel):
@@ -185,6 +304,8 @@ class DatasetManifest(EvaluationModel):
     case_count: int = Field(ge=0, le=100)
     cases_file: NonEmptyText | None = None
     cases_sha256: SHA256Text | None = None
+    relation_expectations_file: NonEmptyText | None = None
+    relation_expectations_sha256: SHA256Text | None = None
     sources: list[SourceAsset] = Field(default_factory=list)
     blockers: list[NonEmptyText] = Field(default_factory=list)
 
@@ -197,6 +318,10 @@ class DatasetManifest(EvaluationModel):
                 )
             if self.sources:
                 raise ValueError("BLOCKED_INPUTS manifests cannot claim reviewed source assets")
+            if self.relation_expectations_file is not None:
+                raise ValueError(
+                    "BLOCKED_INPUTS manifests cannot carry Gold relation expectations"
+                )
             if not self.blockers:
                 raise ValueError("BLOCKED_INPUTS requires explicit blocker records")
         else:
@@ -208,6 +333,24 @@ class DatasetManifest(EvaluationModel):
                 raise ValueError("FROZEN datasets cannot retain unresolved blockers")
             if not self.sources:
                 raise ValueError("FROZEN datasets require licensed source records")
+        if (self.relation_expectations_file is None) != (
+            self.relation_expectations_sha256 is None
+        ):
+            raise ValueError(
+                "relation expectation sidecar path and hash must be supplied together"
+            )
+        if self.relation_expectations_file is not None:
+            if "\\" in self.relation_expectations_file or ":" in self.relation_expectations_file:
+                raise ValueError("relation_expectations_file must use relative POSIX syntax")
+            expectation_path = PurePosixPath(self.relation_expectations_file)
+            if (
+                expectation_path.is_absolute()
+                or expectation_path.as_posix() != self.relation_expectations_file
+                or any(part in {"", ".", ".."} for part in expectation_path.parts)
+            ):
+                raise ValueError(
+                    "relation_expectations_file must remain inside the dataset root"
+                )
         if self.cases_file is not None:
             if "\\" in self.cases_file or ":" in self.cases_file:
                 raise ValueError("cases_file must use relative POSIX syntax")

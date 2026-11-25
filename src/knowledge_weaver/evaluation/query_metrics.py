@@ -49,6 +49,8 @@ def compute_query_measurements(
     retrieved_paths: Sequence[Path] = (),
     citations: Sequence[CitationJudgment] = (),
     citation_count: int | None = None,
+    citation_reviewed: bool = True,
+    citation_resolvability: Sequence[bool] | None = None,
     abstained: bool,
     answer_correctness: Literal[0, 1, 2] | None = None,
     human_reviewer_id: str | None = None,
@@ -119,7 +121,19 @@ def compute_query_measurements(
             strict_chunk_recall_at_k[k] = len(top_chunks & all_gold_chunks) / len(all_gold_chunks)
         strict_chunk_recall_value = strict_chunk_recall_at_k[10]
 
+    if citation_resolvability is not None and len(citation_resolvability) > citation_count:
+        raise ValueError("citation resolvability cannot exceed the observed citation count")
     citation = citation_metrics(citations, answerable=case.answerable, abstained=abstained)
+    citation_precision = citation.precision if citation_reviewed else None
+    citation_validity = (
+        citation.validity
+        if citation_reviewed
+        else (
+            sum(citation_resolvability) / len(citation_resolvability)
+            if citation_resolvability
+            else None
+        )
+    )
     no_answer = no_answer_metrics([(case.answerable, abstained, citation_count)])
 
     complete_path_accuracy: float | None = None
@@ -141,8 +155,8 @@ def compute_query_measurements(
         reciprocal_rank=reciprocal_rank,
         evidence_recall=evidence_recall_value,
         strict_chunk_recall=strict_chunk_recall_value,
-        citation_precision=citation.precision,
-        citation_validity=citation.validity,
+        citation_precision=citation_precision,
+        citation_validity=citation_validity,
         unanswerable_refusal_accuracy=no_answer.refusal_accuracy,
         unanswerable_false_citation_rate=(
             no_answer.false_citation_rate
