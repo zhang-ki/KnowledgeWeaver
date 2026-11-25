@@ -87,8 +87,8 @@ if TYPE_CHECKING:
 
 _EXTRACTION_ROUTING_PROFILE_VERSION = "kw-extraction-routing-v2"
 _NORMATIVE_PROMPT_VERSION = "kw-normative-response-schema-v3"
-_PYTHON_SOURCE_INDEX_VERSION = "kw-python-source-index-v1"
-_PYTHON_AST_EXTRACTION_VERSION = "kw-python-ast-extraction-v2"
+_PYTHON_SOURCE_INDEX_VERSION = "kw-python-source-index-v2"
+_PYTHON_AST_EXTRACTION_VERSION = "kw-python-ast-extraction-v3"
 
 
 def _source_extraction_profile_sha256(

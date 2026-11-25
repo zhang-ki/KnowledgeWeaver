@@ -110,6 +110,18 @@ def _module_name(relative_path: str) -> str:
     return ".".join(safe_parts) or path.stem or "<module>"
 
 
+def _attribute_chain_parts(expression: ast.Attribute) -> tuple[str, str] | None:
+    parts = [expression.attr]
+    value: ast.expr = expression.value
+    while isinstance(value, ast.Attribute):
+        parts.append(value.attr)
+        value = value.value
+    if not isinstance(value, ast.Name):
+        return None
+    parts.reverse()
+    return value.id, ".".join(parts)
+
+
 def _namespace(source_id: str) -> str:
     return f"python:{source_id}"
 
@@ -140,6 +152,7 @@ class _PythonSourceIndex:
     module_counts: Mapping[str, int]
     opaque_exports: frozenset[str]
     opaque_modules: frozenset[str]
+    instance_methods: Mapping[tuple[str, str, str], Entity]
 
     def matches(self, *, source_id: str, source_version_id: str | None, corpus_id: str) -> bool:
         return (
@@ -187,6 +200,34 @@ class _PythonSourceIndex:
         elif candidate.entity.kind is not expected:
             return None
         return candidate.entity
+
+    def resolve_instance_method(
+        self,
+        owner_identity_key: str,
+        attribute: str,
+        method: str,
+        *,
+        source_id: str,
+        source_version_id: str | None,
+        corpus_id: str,
+    ) -> Entity | None:
+        if not self.matches(
+            source_id=source_id,
+            source_version_id=source_version_id,
+            corpus_id=corpus_id,
+        ):
+            return None
+        return self.instance_methods.get((owner_identity_key, attribute, method))
+
+
+@dataclass(frozen=True)
+class _PythonModuleIndex:
+    document: Document
+    module_name: str
+    tree: ast.Module
+    binding_counts: Mapping[str, int]
+    imports: Mapping[str, tuple[tuple[str, bool], ...]]
+    value_names: frozenset[str]
 
 
 class _DefinitionBindingCollector(ast.NodeVisitor):
@@ -412,6 +453,577 @@ def _resolve_import_module(
     return ".".join([*package_parts[:keep], *(imported_module or "").split(".")]).strip(".")
 
 
+def _index_python_module(document: Document, tree: ast.Module) -> _PythonModuleIndex:
+    binding_counts: dict[str, int] = defaultdict(int)
+    imports: dict[str, list[tuple[str, bool]]] = defaultdict(list)
+    value_names: set[str] = set()
+    module_name = _module_name(document.relative_path)
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            for alias in statement.names:
+                local_name = alias.asname or alias.name.split(".", 1)[0]
+                qualified = alias.name if alias.asname else local_name
+                binding_counts[local_name] += 1
+                imports[local_name].append((qualified, True))
+                value_names.add(local_name)
+            continue
+        if isinstance(statement, ast.ImportFrom):
+            if statement.module == "__future__":
+                continue
+            imported_module = _resolve_import_module(
+                relative_path=document.relative_path,
+                level=statement.level,
+                imported_module=statement.module,
+            )
+            for alias in statement.names:
+                if alias.name == "*":
+                    continue
+                local_name = alias.asname or alias.name
+                binding_counts[local_name] += 1
+                if imported_module is not None:
+                    imports[local_name].append(
+                        (f"{imported_module}.{alias.name}".strip("."), False)
+                    )
+                value_names.add(local_name)
+            continue
+        collector = _DefinitionBindingCollector()
+        collector.visit(statement)
+        for name in collector.names:
+            binding_counts[name] += 1
+        value_names.update(collector.names)
+    return _PythonModuleIndex(
+        document=document,
+        module_name=module_name,
+        tree=tree,
+        binding_counts=dict(binding_counts),
+        imports={name: tuple(values) for name, values in imports.items()},
+        value_names=frozenset(value_names),
+    )
+
+
+def _qualified_module_expression(
+    module: _PythonModuleIndex, expression: ast.expr
+) -> str | None:
+    suffix = ""
+    root_expression = expression
+    if isinstance(expression, ast.Attribute):
+        chain = _attribute_chain_parts(expression)
+        if chain is None:
+            return None
+        root, suffix = chain
+        root_expression = ast.Name(id=root, ctx=ast.Load())
+    if not isinstance(root_expression, ast.Name):
+        return None
+    root = root_expression.id
+    imported = module.imports.get(root, ())
+    if imported:
+        if len(imported) != 1 or module.binding_counts.get(root) != 1:
+            return None
+        qualified, _is_module = imported[0]
+        return ".".join(part for part in (qualified, suffix) if part)
+    return ".".join(part for part in (module.module_name, root, suffix) if part)
+
+
+def _resolve_indexed_class_expression(
+    module: _PythonModuleIndex,
+    expression: ast.expr,
+    source_index: _PythonSourceIndex,
+) -> Entity | None:
+    qualified = _qualified_module_expression(module, expression)
+    if qualified is None:
+        return None
+    return source_index.resolve(
+        qualified,
+        expected=EntityKind.class_,
+        source_id=module.document.source_id,
+        source_version_id=source_index.source_version_id,
+        corpus_id=source_index.corpus_id,
+    )
+
+
+def _method_local_bindings(method: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    bindings = {
+        argument.arg
+        for argument in [
+            *method.args.posonlyargs,
+            *method.args.args,
+            *method.args.kwonlyargs,
+        ]
+    }
+    if method.args.vararg is not None:
+        bindings.add(method.args.vararg.arg)
+    if method.args.kwarg is not None:
+        bindings.add(method.args.kwarg.arg)
+    for statement in method.body:
+        collector = _DefinitionBindingCollector()
+        collector.visit(statement)
+        bindings.update(collector.names)
+    for node in ast.walk(method):
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            bindings.update(node.names)
+    return bindings
+
+
+def _expression_root_name(expression: ast.expr) -> str | None:
+    if isinstance(expression, ast.Name):
+        return expression.id
+    if isinstance(expression, ast.Attribute):
+        chain = _attribute_chain_parts(expression)
+        return chain[0] if chain is not None else None
+    return None
+
+
+def _direct_name_assignments(
+    module: _PythonModuleIndex, name: str
+) -> list[tuple[ast.stmt, ast.expr]]:
+    assignments: list[tuple[ast.stmt, ast.expr]] = []
+    for statement in module.tree.body:
+        if isinstance(statement, ast.Assign):
+            if (
+                len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+                and statement.targets[0].id == name
+            ):
+                assignments.append((statement, statement.value))
+        elif isinstance(statement, ast.AnnAssign) and (
+            isinstance(statement.target, ast.Name)
+            and statement.target.id == name
+            and statement.value is not None
+        ):
+            assignments.append((statement, statement.value))
+    return assignments
+
+
+def _module_expression_instance_type(
+    module_name: str,
+    expression: ast.expr,
+    modules_by_name: Mapping[str, tuple[_PythonModuleIndex, ...]],
+    source_index: _PythonSourceIndex,
+    visiting: frozenset[tuple[str, str]],
+) -> Entity | None:
+    module_candidates = modules_by_name.get(module_name, ())
+    if len(module_candidates) != 1:
+        return None
+    module = module_candidates[0]
+    if isinstance(expression, ast.Call):
+        return _resolve_indexed_class_expression(module, expression.func, source_index)
+    if isinstance(expression, ast.Name):
+        target_name = expression.id
+        imported = module.imports.get(target_name, ())
+        if imported:
+            if len(imported) != 1 or module.binding_counts.get(target_name) != 1:
+                return None
+            qualified, is_module = imported[0]
+            if is_module:
+                return None
+            imported_module, separator, imported_name = qualified.rpartition(".")
+            if not separator:
+                return None
+            return _module_variable_instance_type(
+                imported_module,
+                imported_name,
+                modules_by_name,
+                source_index,
+                visiting,
+            )
+        return _module_variable_instance_type(
+            module_name,
+            target_name,
+            modules_by_name,
+            source_index,
+            visiting,
+        )
+    if isinstance(expression, ast.Attribute):
+        chain = _attribute_chain_parts(expression)
+        if chain is None:
+            return None
+        root, suffix = chain
+        imported = module.imports.get(root, ())
+        if len(imported) != 1 or module.binding_counts.get(root) != 1:
+            return None
+        qualified, is_module = imported[0]
+        if not is_module:
+            return None
+        target = ".".join(part for part in (qualified, suffix) if part)
+        imported_module, separator, imported_name = target.rpartition(".")
+        if not separator:
+            return None
+        return _module_variable_instance_type(
+            imported_module,
+            imported_name,
+            modules_by_name,
+            source_index,
+            visiting,
+        )
+    return None
+
+
+def _module_variable_instance_type(
+    module_name: str,
+    variable_name: str,
+    modules_by_name: Mapping[str, tuple[_PythonModuleIndex, ...]],
+    source_index: _PythonSourceIndex,
+    visiting: frozenset[tuple[str, str]] = frozenset(),
+) -> Entity | None:
+    key = (module_name, variable_name)
+    if key in visiting:
+        return None
+    modules = modules_by_name.get(module_name, ())
+    if len(modules) != 1:
+        return None
+    module = modules[0]
+    if module.binding_counts.get(variable_name) != 1:
+        return None
+    imported = module.imports.get(variable_name, ())
+    if imported:
+        if len(imported) != 1:
+            return None
+        qualified, is_module = imported[0]
+        if is_module:
+            return None
+        imported_module, separator, imported_name = qualified.rpartition(".")
+        if not separator:
+            return None
+        return _module_variable_instance_type(
+            imported_module,
+            imported_name,
+            modules_by_name,
+            source_index,
+            visiting | {key},
+        )
+    assignments = _direct_name_assignments(module, variable_name)
+    if len(assignments) != 1:
+        return None
+    _statement, value = assignments[0]
+    if isinstance(value, ast.Call):
+        return _resolve_indexed_class_expression(module, value.func, source_index)
+    return _module_expression_instance_type(
+        module_name,
+        value,
+        modules_by_name,
+        source_index,
+        visiting | {key},
+    )
+
+
+def _target_writes_instance_attribute(
+    target: ast.expr, receiver_names: frozenset[str], attribute: str
+) -> bool:
+    if isinstance(target, ast.Attribute):
+        return (
+            isinstance(target.value, ast.Name)
+            and target.value.id in receiver_names
+            and target.attr == attribute
+        )
+    if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Attribute):
+        return (
+            isinstance(target.value.value, ast.Name)
+            and target.value.value.id in receiver_names
+            and target.value.attr == "__dict__"
+            and isinstance(target.slice, ast.Constant)
+            and target.slice.value == attribute
+        )
+    return False
+
+
+def _class_attribute_binding(
+    module: _PythonModuleIndex,
+    class_node: ast.ClassDef,
+    attribute: str,
+    source_index: _PythonSourceIndex,
+) -> Entity | None:
+    if class_node.decorator_list or class_node.bases or class_node.keywords:
+        return None
+    methods = [
+        statement
+        for statement in class_node.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    initializers = [method for method in methods if method.name == "__init__"]
+    if len(initializers) != 1:
+        return None
+    for statement in class_node.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if statement.name in {attribute, "__getattribute__", "__getattr__", "__setattr__"}:
+                return None
+        else:
+            for target in (
+                statement.targets
+                if isinstance(statement, ast.Assign)
+                else [statement.target]
+                if isinstance(statement, ast.AnnAssign)
+                else []
+            ):
+                if isinstance(target, ast.Name) and target.id in {
+                    attribute,
+                    "__getattribute__",
+                    "__getattr__",
+                    "__setattr__",
+                }:
+                    return None
+    expected_type: Entity | None = None
+    initializer_writes = 0
+    for method in methods:
+        positional = [*method.args.posonlyargs, *method.args.args]
+        if not positional:
+            continue
+        receiver = positional[0].arg
+        receiver_names = {receiver}
+        aliases: set[str] = set()
+        for node in ast.walk(method):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Name):
+                if node.value.id == receiver:
+                    aliases.update(
+                        name
+                        for target in node.targets
+                        for name in _DefinitionBindingCollector._target_names(target)
+                    )
+            elif (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == receiver
+            ):
+                aliases.update(_DefinitionBindingCollector._target_names(node.target))
+        receiver_names.update(aliases)
+        direct_statements = {id(statement) for statement in method.body}
+        for node in ast.walk(method):
+            writes: list[tuple[ast.expr, ast.expr | None]] = []
+            if isinstance(node, ast.Assign):
+                writes.extend((target, node.value) for target in node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                writes.append((node.target, node.value))
+            elif isinstance(node, ast.AugAssign):
+                writes.append((node.target, None))
+            elif isinstance(node, ast.Delete):
+                writes.extend((target, None) for target in node.targets)
+            matching = [
+                (target, value)
+                for target, value in writes
+                if _target_writes_instance_attribute(target, frozenset(receiver_names), attribute)
+            ]
+            if matching:
+                if (
+                    id(node) not in direct_statements
+                    or not isinstance(node, ast.Assign)
+                    or len(node.targets) != 1
+                    or len(matching) != 1
+                    or not isinstance(matching[0][0], ast.Attribute)
+                    or not isinstance(matching[0][0].value, ast.Name)
+                    or matching[0][0].value.id != receiver
+                    or not isinstance(matching[0][1], ast.Call)
+                ):
+                    return None
+                root_name = _expression_root_name(matching[0][1].func)
+                if root_name is None or root_name in _method_local_bindings(method):
+                    return None
+                target_type = _resolve_indexed_class_expression(
+                    module, matching[0][1].func, source_index
+                )
+                if target_type is None:
+                    return None
+                if expected_type is None:
+                    expected_type = target_type
+                elif expected_type.identity_key != target_type.identity_key:
+                    return None
+                if method.name == "__init__":
+                    initializer_writes += 1
+        for call in (item for item in ast.walk(method) if isinstance(item, ast.Call)):
+            function_name = (
+                call.func.id
+                if isinstance(call.func, ast.Name)
+                else call.func.attr
+                if isinstance(call.func, ast.Attribute)
+                else None
+            )
+            if (
+                function_name in {"setattr", "delattr", "__setattr__"}
+                and call.args
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id in receiver_names
+            ):
+                return None
+    if expected_type is None or initializer_writes != 1:
+        return None
+    return expected_type
+
+
+def _module_rebindings_preserve_attribute_type(
+    attribute: str,
+    owner_type: Entity,
+    expected_type: Entity,
+    modules: tuple[_PythonModuleIndex, ...],
+    modules_by_name: Mapping[str, tuple[_PythonModuleIndex, ...]],
+    source_index: _PythonSourceIndex,
+) -> bool:
+    for module in modules:
+        instance_names = {
+            name
+            for name in module.value_names
+            if (
+                (instance_type := _module_variable_instance_type(
+                    module.module_name, name, modules_by_name, source_index
+                ))
+                is not None
+                and instance_type.identity_key == owner_type.identity_key
+            )
+        }
+        if not instance_names:
+            continue
+        receiver_names = frozenset(instance_names)
+        direct_statements = {id(statement) for statement in module.tree.body}
+        for node in ast.walk(module.tree):
+            writes: list[tuple[ast.expr, ast.expr | None]] = []
+            if isinstance(node, ast.Assign):
+                writes.extend((target, node.value) for target in node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                writes.append((node.target, node.value))
+            elif isinstance(node, ast.AugAssign):
+                writes.append((node.target, None))
+            elif isinstance(node, ast.Delete):
+                writes.extend((target, None) for target in node.targets)
+            matching = [
+                (target, value)
+                for target, value in writes
+                if _target_writes_instance_attribute(target, receiver_names, attribute)
+            ]
+            for target, value in matching:
+                if (
+                    id(node) not in direct_statements
+                    or not isinstance(node, ast.Assign)
+                    or len(node.targets) != 1
+                    or not isinstance(target, ast.Attribute)
+                    or not isinstance(target.value, ast.Name)
+                    or not isinstance(value, ast.expr)
+                ):
+                    return False
+                value_type = _module_expression_instance_type(
+                    module.module_name,
+                    value,
+                    modules_by_name,
+                    source_index,
+                    frozenset(),
+                )
+                if value_type is None or value_type.identity_key != expected_type.identity_key:
+                    return False
+        for call in (item for item in ast.walk(module.tree) if isinstance(item, ast.Call)):
+            function_name = (
+                call.func.id
+                if isinstance(call.func, ast.Name)
+                else call.func.attr
+                if isinstance(call.func, ast.Attribute)
+                else None
+            )
+            if (
+                function_name in {"setattr", "delattr", "__setattr__"}
+                and call.args
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id in receiver_names
+            ):
+                return False
+    return True
+
+
+def _build_instance_method_index(
+    source_index: _PythonSourceIndex,
+    modules: tuple[_PythonModuleIndex, ...],
+) -> dict[tuple[str, str, str], Entity]:
+    modules_by_name_mutable: dict[str, list[_PythonModuleIndex]] = defaultdict(list)
+    for module in modules:
+        modules_by_name_mutable[module.module_name].append(module)
+    modules_by_name = {
+        name: tuple(items) for name, items in modules_by_name_mutable.items()
+    }
+    resolved: dict[tuple[str, str, str], Entity] = {}
+    for module in modules:
+        if modules_by_name.get(module.module_name) != (module,):
+            continue
+        for class_node in module.tree.body:
+            if not isinstance(class_node, ast.ClassDef):
+                continue
+            owner = source_index.resolve(
+                f"{module.module_name}.{class_node.name}",
+                expected=EntityKind.class_,
+                source_id=source_index.source_id,
+                source_version_id=source_index.source_version_id,
+                corpus_id=source_index.corpus_id,
+            )
+            if owner is None:
+                continue
+            attributes = {
+                target.attr
+                for method in class_node.body
+                if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for statement in method.body
+                if isinstance(statement, ast.Assign)
+                for target in statement.targets
+                if isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            }
+            for attribute in attributes:
+                value_type = _class_attribute_binding(
+                    module, class_node, attribute, source_index
+                )
+                if value_type is None:
+                    continue
+                target_class = source_index.resolve(
+                    value_type.canonical_name,
+                    expected=EntityKind.class_,
+                    source_id=source_index.source_id,
+                    source_version_id=source_index.source_version_id,
+                    corpus_id=source_index.corpus_id,
+                )
+                if target_class is None:
+                    continue
+                target_module_name, _separator, target_class_name = (
+                    target_class.canonical_name.rpartition(".")
+                )
+                target_modules = modules_by_name.get(target_module_name, ())
+                if len(target_modules) != 1:
+                    continue
+                target_nodes = [
+                    statement
+                    for statement in target_modules[0].tree.body
+                    if isinstance(statement, ast.ClassDef)
+                    and statement.name == target_class_name
+                ]
+                if len(target_nodes) != 1:
+                    continue
+                target_node = target_nodes[0]
+                if target_node.decorator_list or target_node.bases or target_node.keywords:
+                    continue
+                if any(
+                    isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and statement.name in {"__getattribute__", "__getattr__", "__setattr__"}
+                    for statement in target_node.body
+                ):
+                    continue
+                if not _module_rebindings_preserve_attribute_type(
+                    attribute,
+                    owner,
+                    target_class,
+                    modules,
+                    modules_by_name,
+                    source_index,
+                ):
+                    continue
+                for target_method in target_node.body:
+                    if not isinstance(
+                        target_method, (ast.FunctionDef, ast.AsyncFunctionDef)
+                    ):
+                        continue
+                    method = source_index.resolve(
+                        f"{target_class.canonical_name}.{target_method.name}",
+                        expected=EntityKind.function,
+                        source_id=source_index.source_id,
+                        source_version_id=source_index.source_version_id,
+                        corpus_id=source_index.corpus_id,
+                    )
+                    if method is not None:
+                        resolved[(owner.identity_key, attribute, target_method.name)] = method
+    return resolved
+
+
 class _ReExportVisitor(ast.NodeVisitor):
     """Record module-level import aliases that may be re-exported to callers."""
 
@@ -467,6 +1079,7 @@ def _build_python_source_index(
     module_counts: dict[str, int] = defaultdict(int)
     opaque_exports: set[str] = set()
     opaque_modules: set[str] = set()
+    modules: list[_PythonModuleIndex] = []
     for document in documents:
         if (
             document.source_id != source_id
@@ -480,6 +1093,7 @@ def _build_python_source_index(
             continue
         module_name = _module_name(document.relative_path)
         module_counts[module_name] += 1
+        modules.append(_index_python_module(document, tree))
         module_identity = _identity_key(
             source_id, document.relative_path, module_name, EntityKind.module
         )
@@ -505,7 +1119,7 @@ def _build_python_source_index(
         reexports.visit(tree)
         opaque_exports.update(reexports.opaque_exports)
         opaque_modules.update(reexports.opaque_modules)
-    return _PythonSourceIndex(
+    source_index = _PythonSourceIndex(
         source_id=source_id,
         source_version_id=source_version_id,
         corpus_id=corpus_id,
@@ -513,6 +1127,18 @@ def _build_python_source_index(
         module_counts=dict(module_counts),
         opaque_exports=frozenset(opaque_exports),
         opaque_modules=frozenset(opaque_modules),
+        instance_methods={},
+    )
+    instance_methods = _build_instance_method_index(source_index, tuple(modules))
+    return _PythonSourceIndex(
+        source_id=source_index.source_id,
+        source_version_id=source_index.source_version_id,
+        corpus_id=source_index.corpus_id,
+        definitions=source_index.definitions,
+        module_counts=source_index.module_counts,
+        opaque_exports=source_index.opaque_exports,
+        opaque_modules=source_index.opaque_modules,
+        instance_methods=instance_methods,
     )
 
 
@@ -723,7 +1349,13 @@ class _StaticExtractor(ast.NodeVisitor):
         self.builder.add_mention(entity, evidence, surface_form)
         return entity
 
-    def expression_target(self, expression: ast.expr, *, expected: EntityKind) -> Entity | None:
+    def expression_target(
+        self,
+        expression: ast.expr,
+        *,
+        expected: EntityKind,
+        allow_instance_attribute: bool = False,
+    ) -> Entity | None:
         if isinstance(expression, ast.Name):
             target = self.resolve_name(expression.id)
             if target is not None:
@@ -755,7 +1387,37 @@ class _StaticExtractor(ast.NodeVisitor):
                 return None
             root, suffix = chain
             if self.frame.class_entity is not None and root in {"self", "cls"}:
-                return self.class_members.get(self.frame.class_entity.id, {}).get(suffix)
+                direct_member = self.class_members.get(
+                    self.frame.class_entity.id, {}
+                ).get(suffix)
+                if direct_member is not None:
+                    return direct_member
+                parts = suffix.split(".")
+                if (
+                    allow_instance_attribute
+                    and
+                    root == "self"
+                    and len(parts) == 2
+                    and self.source_index is not None
+                    and self.builder.corpus_id is not None
+                ):
+                    indexed = self.source_index.resolve_instance_method(
+                        self.frame.class_entity.identity_key,
+                        parts[0],
+                        parts[1],
+                        source_id=self.document.source_id,
+                        source_version_id=self.source_version_id,
+                        corpus_id=self.builder.corpus_id,
+                    )
+                    if indexed is not None:
+                        return self.builder.add_entity(
+                            indexed.kind,
+                            indexed.canonical_name,
+                            indexed.namespace,
+                            indexed.identity_key,
+                            indexed.aliases,
+                        )
+                return None
             local = self.resolve_name(root)
             if local is not None and local.kind == EntityKind.class_:
                 return self.class_members.get(local.id, {}).get(suffix)
@@ -1129,6 +1791,25 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
             *statement_range, self.analyzer.provenance
         )
 
+    def _is_direct_self_method_call(self, expression: ast.expr) -> bool:
+        if not isinstance(expression, ast.Attribute) or not self.function_nodes:
+            return False
+        chain = self.analyzer._attribute_chain(expression)
+        if chain is None or chain[0] != "self":
+            return False
+        method = self.function_nodes[-1]
+        if method.decorator_list or not isinstance(self.parents.get(id(method)), ast.ClassDef):
+            return False
+        positional = [*method.args.posonlyargs, *method.args.args]
+        if not positional or positional[0].arg != "self":
+            return False
+        for statement in method.body:
+            collector = _DefinitionBindingCollector()
+            collector.visit(statement)
+            if "self" in collector.names:
+                return False
+        return True
+
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         class_entity = self.analyzer.symbols_by_scope.get(self.frame.qualname, {}).get(node.name)
         for decorator in node.decorator_list:
@@ -1428,7 +2109,11 @@ class _CallAndInheritanceVisitor(ast.NodeVisitor):
         evidence = self.analyzer._expression_evidence(node)
         target: Entity | None = None
         if isinstance(node.func, (ast.Name, ast.Attribute)):
-            target = self.analyzer.expression_target(node.func, expected=EntityKind.function)
+            target = self.analyzer.expression_target(
+                node.func,
+                expected=EntityKind.function,
+                allow_instance_attribute=self._is_direct_self_method_call(node.func),
+            )
         if target is None or evidence is None:
             line = getattr(node, "lineno", 1)
             dynamic = not isinstance(node.func, (ast.Name, ast.Attribute))
