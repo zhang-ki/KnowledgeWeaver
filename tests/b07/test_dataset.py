@@ -252,6 +252,63 @@ def test_prepared_case_rejects_quote_hash_or_manual_field_mismatch() -> None:
         PreparedBenchmarkCase.model_validate(record)
 
 
+def test_prepared_case_preserves_exact_gold_quote_whitespace() -> None:
+    prepared = _prepared_case(
+        index=110,
+        family_number=0,
+        split=Split.dev,
+        category=BenchmarkCategory.single,
+        language=Language.en,
+        answerable=True,
+    )
+    quote = "        decoded = self.decode_complete(token)\n            return decoded, token\n"
+    gold = BenchmarkGold.model_validate(
+        {**prepared.case.gold[0].model_dump(mode="json"), "quote": quote}
+    )
+    case = BenchmarkCase.model_validate(
+        {**prepared.case.model_dump(mode="json"), "gold": [gold.model_dump(mode="json")]}
+    )
+    quote_hash = hashlib.sha256(quote.encode("utf-8")).hexdigest()
+    review_hash = human_review_digest(
+        case,
+        prepared.source_ids,
+        [quote_hash],
+        prepared.human_review.reviewer_id,
+        prepared.human_review.reviewed_at,
+        prepared.human_review.checklist,
+        prepared.gold_paths,
+        prepared.source_record_sha256,
+    )
+    review = prepared.human_review.model_copy(
+        update={"reviewed_record_sha256": review_hash}
+    )
+    exact_prepared = PreparedBenchmarkCase.model_validate(
+        {
+            **prepared.model_dump(mode="json"),
+            "case": case.model_dump(mode="json"),
+            "gold_quote_sha256": [quote_hash],
+            "human_review": review.model_dump(mode="json"),
+        }
+    )
+
+    assert exact_prepared.case.gold[0].quote == quote
+    assert exact_prepared.gold_quote_sha256 == [quote_hash]
+
+
+def test_benchmark_gold_rejects_whitespace_only_quote_without_normalizing() -> None:
+    gold = _prepared_case(
+        index=111,
+        family_number=0,
+        split=Split.dev,
+        category=BenchmarkCategory.single,
+        language=Language.en,
+        answerable=True,
+    ).case.gold[0]
+
+    with pytest.raises(ValidationError, match="Gold quote must contain non-whitespace"):
+        BenchmarkGold.model_validate({**gold.model_dump(mode="json"), "quote": "   \n\t"})
+
+
 def test_reviewed_gold_paths_bind_direction_and_original_quote_evidence() -> None:
     source = _source(0)
     quote = "Test source evidence."

@@ -292,6 +292,7 @@ def test_python_extraction_profile_binds_source_index_version() -> None:
                 "normative_prompt_version": None,
                 "provider_configured": None,
                 "python_source_index_version": _PYTHON_SOURCE_INDEX_VERSION,
+                "python_ast_extraction_version": "kw-python-ast-extraction-v2",
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -310,7 +311,7 @@ def test_python_extraction_profile_binds_source_index_version() -> None:
 
 def test_current_source_version_ast_edges_persist_in_generation_shape() -> None:
     caller_request, caller_chunk = _python_request(
-        "from pkg.target import transform as tx\n\ndef caller():\n    tx()\n",
+        "from pkg.target import transform as tx\n\ndef caller():\n    result = tx()\n",
         path="pkg/caller.py",
         document_id="00000000-0000-4000-8000-000000000141",
         chunk_id="00000000-0000-4000-8000-000000000241",
@@ -452,6 +453,12 @@ def test_current_source_version_ast_edges_persist_in_generation_shape() -> None:
         if model is RelationRow and row.predicate == RelationPredicate.CALLS.value
     )
     assert call_relation.object_id == target.id
+    persisted_call_evidence_ids = {
+        row.evidence_id
+        for (model, _key), row in session.rows.items()
+        if model is RelationEvidenceRow and row.relation_id == call_relation.id
+    }
+    assert persisted_call_evidence_ids
     target_mentions = [
         row
         for (model, _key), row in session.rows.items()
@@ -463,6 +470,10 @@ def test_current_source_version_ast_edges_persist_in_generation_shape() -> None:
         for (model, _key), row in session.rows.items()
         if model is EvidenceRow
     }
+    assert any(
+        evidence_by_id[evidence_id].payload["quote"] == "result = tx()"
+        for evidence_id in persisted_call_evidence_ids
+    )
     assert {
         evidence_by_id[row.evidence_id].chunk_id for row in target_mentions
     } == {caller_chunk.id, target_chunk.id}

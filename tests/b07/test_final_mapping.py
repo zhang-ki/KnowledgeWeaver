@@ -25,6 +25,8 @@ from knowledge_weaver.evaluation.contracts import (
 )
 from knowledge_weaver.evaluation.generation_binding import GenerationBindingError
 from knowledge_weaver.evaluation.gold_mapping import (
+    DIRECT_CALL_PHYSICAL_LINE_BOUNDARY_ADAPTER_VERSION,
+    STATIC_CALL_RESOLUTION_QUALIFIER_ADAPTER_VERSION,
     GoldMappingStatus,
     GoldRelationExpectation,
     map_gold_to_generation,
@@ -54,6 +56,7 @@ from knowledge_weaver.models.contracts import (
     Polarity,
     Provenance,
     ProvenanceMethod,
+    PythonLocator,
     Relation,
     RelationPredicate,
     Source,
@@ -562,6 +565,146 @@ def _semantic_kwargs(
     }
 
 
+def _python_call_semantic_fixture(
+    *, gold_includes_physical_indent: bool
+) -> tuple[
+    PreparedBenchmarkCase,
+    SourceAsset,
+    Document,
+    list[Chunk],
+    list[Evidence],
+    Relation,
+    list[Entity],
+    GoldRelationExpectation,
+]:
+    text = (
+        "class PyJWT:\n"
+        "    def decode(self, token):\n"
+        '        description = "accepted evidence."\n'
+        "        decoded = self.decode_complete(token)\n"
+        "        return decoded\n"
+        "\n"
+        "    def decode_complete(self, token):\n"
+        "        return token"
+    )
+    prepared, source, document, chunks, evidence, relations = _fixture(
+        text, overlap=False, include_path=True
+    )
+    statement = "decoded = self.decode_complete(token)"
+    statement_start = text.index(statement)
+    line_start = text.rfind("\n", 0, statement_start) + 1
+    line_end = text.index("\n", statement_start)
+    gold_start = line_start if gold_includes_physical_indent else statement_start
+    quote = text[gold_start:line_end]
+    prepared = _with_gold_quotes(prepared, [quote])
+    python_path = "sources/repositories/pyjwt/api_jwt.py"
+    line_number = text.count("\n", 0, statement_start) + 1
+    locator = PythonLocator(
+        path=python_path,
+        line_start=line_number,
+        line_end=line_number,
+        qualname="PyJWT.decode",
+        col_start=0 if gold_includes_physical_indent else statement_start - line_start,
+        col_end=line_end - line_start,
+    )
+    prepared = _with_gold_groups(
+        prepared, [("claim-1", locator)], source_path=python_path
+    )
+    source = source.model_copy(
+        update={"kind": SourceKind.python_repo, "source_path": python_path}
+    )
+    document = document.model_copy(update={"relative_path": python_path})
+    broad_locator = PythonLocator(
+        path=python_path,
+        line_start=1,
+        line_end=len(text.splitlines()),
+        col_start=0,
+        col_end=max(len(line) for line in text.splitlines()),
+    )
+    chunks = [
+        chunk.model_copy(
+            update={
+                "spans": [
+                    span.model_copy(update={"locator": broad_locator})
+                    for span in chunk.spans
+                ]
+            }
+        )
+        for chunk in chunks
+    ]
+    broad_evidence = evidence[0].model_copy(update={"locator": broad_locator})
+    direct_evidence = Evidence(
+        id=EVIDENCE_TWO_ID,
+        chunk_id=chunks[0].id,
+        start=statement_start,
+        end=line_end,
+        quote=text[statement_start:line_end],
+        locator=PythonLocator(
+            path=python_path,
+            line_start=line_number,
+            line_end=line_number,
+            qualname="PyJWT.decode",
+            col_start=statement_start - line_start,
+            col_end=line_end - line_start,
+        ),
+        provenance_id=PROVENANCE_ID,
+    )
+    evidence = [broad_evidence, direct_evidence]
+    relation = relations[0].model_copy(
+        update={
+            "predicate": RelationPredicate.CALLS,
+            "evidence_ids": [broad_evidence.id, direct_evidence.id],
+        }
+    )
+    module_name = "sources.repositories.pyjwt.api_jwt"
+    subject_name = f"{module_name}.PyJWT.decode"
+    object_name = f"{module_name}.PyJWT.decode_complete"
+    entities = [
+        Entity(
+            id=SUBJECT_ID,
+            corpus_id=GENERATION_CORPUS_ID,
+            kind=EntityKind.function,
+            canonical_name=subject_name,
+            aliases=["decode"],
+            namespace=f"{module_name}.PyJWT",
+            identity_key=f"{module_name}.PyJWT:decode",
+        ),
+        Entity(
+            id=OBJECT_ID,
+            corpus_id=GENERATION_CORPUS_ID,
+            kind=EntityKind.function,
+            canonical_name=object_name,
+            aliases=["decode_complete"],
+            namespace=f"{module_name}.PyJWT",
+            identity_key=f"{module_name}.PyJWT:decode_complete",
+        ),
+    ]
+    template = _expected_data_relation()
+    expectation = template.model_copy(
+        update={
+            "predicate": RelationPredicate.CALLS,
+            "subject": template.subject.model_copy(
+                update={
+                    "raw_file_sha256": source.raw_sha256,
+                    "relative_path": python_path,
+                    "qualified_symbol": subject_name,
+                    "entity_kind": EntityKind.function,
+                }
+            ),
+            "object": template.object.model_copy(
+                update={
+                    "raw_file_sha256": source.raw_sha256,
+                    "relative_path": python_path,
+                    "qualified_symbol": object_name,
+                    "entity_kind": EntityKind.function,
+                }
+            ),
+        }
+    )
+    prepared = _with_gold_relation_id(prepared, DATA_RELATION_ID)
+    return prepared, source, document, chunks, evidence, relation, entities, expectation
+
+
 def _with_gold_groups(
     prepared: PreparedBenchmarkCase,
     groups: list[tuple[str, MarkdownLocator]],
@@ -966,6 +1109,179 @@ def test_gold_path_resolves_data_relation_via_semantic_expectation_and_rejects_m
     )
     assert not bad_report.ready
     assert bad_report.path_mappings[0].status is GoldMappingStatus.unmapped
+
+
+def test_strict_calls_requires_exact_direct_source_evidence_not_function_context() -> None:
+    (
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        relation,
+        entities,
+        expectation,
+    ) = _python_call_semantic_fixture(gold_includes_physical_indent=False)
+    broad_only_relation = relation.model_copy(
+        update={"evidence_ids": [evidence[0].id]}
+    )
+
+    broad_only_report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [broad_only_relation],
+        entities,
+        expectation,
+    )
+
+    assert broad_only_report.path_mappings[0].status is GoldMappingStatus.unmapped
+    assert "exact direct callsite Evidence" in (broad_only_report.path_mappings[0].reason or "")
+
+    exact_report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [relation],
+        entities,
+        expectation,
+    )
+
+    assert exact_report.ready
+    assert exact_report.path_mappings[0].evidence_ids_by_edge == ((evidence[1].id,),)
+    assert exact_report.path_mappings[0].adapter_versions_by_edge == ((),)
+
+
+def test_physical_line_boundary_adapter_closes_exact_indentation_only() -> None:
+    (
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        relation,
+        entities,
+        expectation,
+    ) = _python_call_semantic_fixture(gold_includes_physical_indent=True)
+
+    report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [relation],
+        entities,
+        expectation,
+    )
+
+    assert report.ready
+    path = report.path_mappings[0]
+    assert path.evidence_ids_by_edge == ((evidence[1].id,),)
+    assert path.adapter_versions_by_edge == (
+        (DIRECT_CALL_PHYSICAL_LINE_BOUNDARY_ADAPTER_VERSION,),
+    )
+    assert report.to_dict()["schema_version"] == 2
+
+
+def test_static_call_resolution_label_is_versioned_and_guard_qualifiers_remain_exact() -> None:
+    (
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        relation,
+        entities,
+        expectation,
+    ) = _python_call_semantic_fixture(gold_includes_physical_indent=False)
+    resolved_relation = relation.model_copy(
+        update={"qualifiers": {"resolution": "static_symbol"}}
+    )
+    resolution_report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [resolved_relation],
+        entities,
+        expectation,
+    )
+    assert resolution_report.ready
+    assert resolution_report.path_mappings[0].adapter_versions_by_edge == (
+        (STATIC_CALL_RESOLUTION_QUALIFIER_ADAPTER_VERSION,),
+    )
+
+    guarded_relation = resolved_relation.model_copy(
+        update={"qualifiers": {"resolution": "static_symbol", "guard": ["if token"]}}
+    )
+    guarded_report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [guarded_relation],
+        entities,
+        expectation,
+    )
+    assert not guarded_report.ready
+    assert "exact reviewed qualifier set" in (
+        guarded_report.path_mappings[0].reason or ""
+    )
+
+
+def test_physical_line_boundary_adapter_rejects_internal_whitespace_and_end_drift() -> None:
+    (
+        prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        relation,
+        entities,
+        expectation,
+    ) = _python_call_semantic_fixture(gold_includes_physical_indent=True)
+    quote = prepared.case.gold[0].quote
+    changed_quote = quote.replace(" = ", "  = ", 1)
+    changed_prepared = _with_gold_quotes(prepared, [changed_quote])
+    whitespace_report = _map_with_expectation(
+        changed_prepared,
+        source,
+        document,
+        chunks,
+        evidence,
+        [relation],
+        entities,
+        expectation,
+    )
+    assert not whitespace_report.ready
+    assert whitespace_report.path_mappings[0].status is GoldMappingStatus.unmapped
+
+    truncated_direct = evidence[1].model_copy(
+        update={"end": evidence[1].end - 1, "quote": evidence[1].quote[:-1]}
+    )
+    truncated_evidence = [evidence[0], truncated_direct]
+    truncated_relation = relation.model_copy(
+        update={"evidence_ids": [evidence[0].id, truncated_direct.id]}
+    )
+    end_report = _map_with_expectation(
+        prepared,
+        source,
+        document,
+        chunks,
+        truncated_evidence,
+        [truncated_relation],
+        entities,
+        expectation,
+    )
+    assert not end_report.ready
+    assert "exact direct callsite Evidence" in (end_report.path_mappings[0].reason or "")
 
 
 def test_direct_gold_relation_id_validates_explicit_semantics() -> None:

@@ -20,6 +20,7 @@ SCHEMA_VERSION = 1
 UUIDText = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")]
 SHA256Text = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NonEmptyText = Annotated[str, StringConstraints(min_length=1, strip_whitespace=True)]
+ExactQuoteText = Annotated[str, StringConstraints(min_length=1)]
 Fingerprint = Annotated[str, StringConstraints(min_length=1, max_length=256)]
 EmbeddingMode = Literal["query", "document"]
 
@@ -1078,9 +1079,16 @@ class BenchmarkGold(SchemaModel):
     source_path: NonEmptyText
     raw_hash: SHA256Text
     locator: Locator
-    quote: NonEmptyText
+    quote: ExactQuoteText
     grade: int = Field(ge=1, le=3)
     claim_group: NonEmptyText
+
+    @field_validator("quote")
+    @classmethod
+    def quote_must_contain_non_whitespace(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Gold quote must contain non-whitespace text")
+        return value
 
 
 class BenchmarkCase(SchemaModel):

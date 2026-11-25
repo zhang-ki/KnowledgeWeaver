@@ -218,6 +218,46 @@ async def test_ast_emits_located_static_relations_and_rejects_dynamic_calls() ->
         evidence.assert_matches_chunk(chunk)
 
 
+def test_ast_call_relation_includes_exact_direct_assignment_statement_evidence() -> None:
+    text = (
+        "class PyJWT:\n"
+        "    def decode(self, token):\n"
+        "        result = self.decode_complete(token)\n"
+        "        return result\n"
+        "    def decode_complete(self, token):\n"
+        "        return token\n"
+    )
+    request, chunk = make_request(text, path="sources/repositories/pyjwt/api_jwt.py")
+    result = run_immediate(KnowledgeExtractor(corpus_id=CORPUS_ID).extract(request))
+    entities = {item.id: item.canonical_name for item in result.entities}
+    relation = next(
+        item
+        for item in result.relations
+        if item.predicate is RelationPredicate.CALLS
+        and entities[item.subject_id].endswith("PyJWT.decode")
+        and entities[item.object_id].endswith("PyJWT.decode_complete")
+    )
+    relation_evidence = {
+        item.id: item
+        for item in result.evidence
+        if item.id in relation.evidence_ids
+    }
+
+    assert any(
+        item.quote == "result = self.decode_complete(token)"
+        and item.locator.kind == "python"
+        and item.locator.line_start == 3
+        for item in relation_evidence.values()
+    )
+    assert any(
+        item.quote == "self.decode_complete(token)"
+        and item.locator.line_start == 3
+        for item in relation_evidence.values()
+    )
+    for item in relation_evidence.values():
+        item.assert_matches_chunk(chunk)
+
+
 @pytest.mark.parametrize(
     "import_statement",
     [
@@ -294,6 +334,129 @@ def test_ast_import_alias_resolves_to_same_source_definition(
     )
     assert definition_evidence.chunk_id == target_chunk.id
     assert "def transform" in definition_evidence.quote
+
+
+@pytest.mark.parametrize(
+    ("target_text", "import_name", "call_expression"),
+    [
+        (
+            "if ENABLED:\n    def transform():\n        return None\n",
+            "transform",
+            "tx()",
+        ),
+        (
+            "class Handler:\n    if ENABLED:\n        def run(self):\n            return None\n",
+            "Handler",
+            "target.run(None)",
+        ),
+        (
+            "def enclosing():\n    def transform():\n        return None\n",
+            "enclosing",
+            "outer.transform()",
+        ),
+        (
+            "def transform():\n    return None\ntransform = lambda: None\n",
+            "transform",
+            "tx()",
+        ),
+        (
+            "def transform():\n    return None\ndel transform\n",
+            "transform",
+            "tx()",
+        ),
+    ],
+    ids=["conditional-module-definition", "conditional-class-member", "function-local-definition", "module-rebind", "module-delete"],
+)
+def test_ast_source_index_rejects_nonstable_definitions(
+    target_text: str,
+    import_name: str,
+    call_expression: str,
+) -> None:
+    target_request, _target_chunk = make_request(
+        target_text,
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000161",
+        chunk_id="00000000-0000-4000-8000-000000000261",
+    )
+    caller_alias = "outer" if import_name == "enclosing" else "target" if import_name == "Handler" else "tx"
+    caller_request, _caller_chunk = make_request(
+        f"from pkg.target import {import_name} as {caller_alias}\n"
+        f"def caller():\n    {call_expression}\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000162",
+        chunk_id="00000000-0000-4000-8000-000000000262",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+
+    assert not any(item.predicate is RelationPredicate.CALLS for item in result.relations)
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+
+
+def test_ast_source_index_keeps_plain_module_and_direct_class_definitions() -> None:
+    target_request, _target_chunk = make_request(
+        "def transform(value):\n    return value\n\n"
+        "class Handler:\n    def run(self):\n        return None\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000171",
+        chunk_id="00000000-0000-4000-8000-000000000271",
+    )
+    caller_request, _caller_chunk = make_request(
+        "from pkg.target import transform as tx\n"
+        "def caller(value):\n    return tx(value)\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000172",
+        chunk_id="00000000-0000-4000-8000-000000000272",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    target_result = run_immediate(extractor.extract(target_request))
+    caller_result = run_immediate(extractor.extract(caller_request))
+    direct_method = source_index.resolve(
+        "pkg.target.Handler.run",
+        expected=EntityKind.function,
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+    )
+    target = next(
+        entity
+        for entity in target_result.entities
+        if entity.canonical_name == "pkg.target.transform"
+        and entity.kind is EntityKind.function
+    )
+    call = next(
+        relation
+        for relation in caller_result.relations
+        if relation.predicate is RelationPredicate.CALLS
+    )
+
+    assert call.object_id == target.id
+    assert direct_method is not None
+    assert direct_method.canonical_name == "pkg.target.Handler.run"
 
 
 @pytest.mark.parametrize(
@@ -413,6 +576,437 @@ def test_ast_source_index_rejects_dynamic_import_calls() -> None:
     result = run_immediate(extractor.extract(caller_request))
 
     assert not any(item.predicate is RelationPredicate.CALLS for item in result.relations)
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+
+
+@pytest.mark.parametrize(
+    ("init_body", "replace_body", "global_rebind", "expected_call"),
+    [
+        (
+            "self.inner = R()",
+            "self.inner = R()",
+            "_global.inner = _receiver",
+            True,
+        ),
+        ("if enabled:\n    self.inner = R()", "pass", "", False),
+        ("self.inner = build_receiver()", "pass", "", False),
+        (
+            "R = Other\nself.inner = R()",
+            "pass",
+            "",
+            False,
+        ),
+        (
+            "self.inner = R()",
+            "if enabled:\n    self.inner = R()",
+            "",
+            False,
+        ),
+        ("self.inner = R()", "self.inner = Other()", "", False),
+        (
+            "self.inner = R()",
+            "pass",
+            "_global.inner = _other",
+            False,
+        ),
+    ],
+    ids=[
+        "same-type-visible-rebind",
+        "conditional-construction",
+        "dynamic-constructor",
+        "local-import-shadow",
+        "conditional-rebind",
+        "different-type-rebind",
+        "different-type-module-singleton-rebind",
+    ],
+)
+def test_ast_instance_method_resolution_requires_unique_stable_binding(
+    init_body: str,
+    replace_body: str,
+    global_rebind: str,
+    expected_call: bool,
+) -> None:
+    target_request, _target_chunk = make_request(
+        "class Receiver:\n"
+        "    def run(self, value):\n"
+        "        return value\n"
+        "_receiver = Receiver()\n"
+        "class Other:\n"
+        "    def run(self, value):\n"
+        "        return value\n"
+        "_other = Other()\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000181",
+        chunk_id="00000000-0000-4000-8000-000000000281",
+    )
+
+    def indented(body: str) -> str:
+        if not body:
+            return "        pass\n"
+        return "".join(f"        {line}\n" for line in body.splitlines())
+
+    caller_text = (
+        "from pkg.target import Receiver as R, _receiver, Other, _other\n"
+        "class Caller:\n"
+        "    def __init__(self, enabled=True):\n"
+        f"{indented(init_body)}"
+        "    def replace(self, enabled=True):\n"
+        f"{indented(replace_body)}"
+        "    def invoke(self, value):\n"
+        "        return self.inner.run(value)\n"
+        "_global = Caller()\n"
+        + (f"{global_rebind}\n" if global_rebind else "")
+    )
+    caller_request, caller_chunk = make_request(
+        caller_text,
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000182",
+        chunk_id="00000000-0000-4000-8000-000000000282",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+    caller_result = run_immediate(extractor.extract(caller_request))
+    target_result = run_immediate(extractor.extract(target_request))
+    entities = {item.id: item.canonical_name for item in caller_result.entities}
+    target = next(
+        item
+        for item in target_result.entities
+        if item.canonical_name == "pkg.target.Receiver.run"
+        and item.kind is EntityKind.function
+    )
+    calls = [
+        relation
+        for relation in caller_result.relations
+        if relation.predicate is RelationPredicate.CALLS
+        and entities.get(relation.subject_id) == "pkg.caller.Caller.invoke"
+        and relation.object_id == target.id
+    ]
+
+    assert bool(calls) is expected_call
+    if expected_call:
+        relation = calls[0]
+        evidence_by_id = {
+            item.id: item
+            for item in caller_result.evidence
+            if item.id in relation.evidence_ids
+        }
+        call_evidence = next(
+            item for item in evidence_by_id.values() if item.quote == "self.inner.run(value)"
+        )
+        call_evidence.assert_matches_chunk(caller_chunk)
+        assert any(
+            mention.entity_id == target.id
+            and mention.evidence_id == call_evidence.id
+            for mention in caller_result.mentions
+        )
+        assert relation.qualifiers == {"resolution": "static_symbol"}
+    else:
+        assert any(
+            item.code == "CALL_TARGET_UNRESOLVED"
+            for item in caller_result.rejected_items
+        )
+
+
+def test_ast_instance_method_resolution_fails_closed_for_ambiguous_source_or_version() -> None:
+    target_request, _target_chunk = make_request(
+        "class Receiver:\n    def run(self):\n        return None\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000191",
+        chunk_id="00000000-0000-4000-8000-000000000291",
+    )
+    caller_request, _caller_chunk = make_request(
+        "from pkg.target import Receiver as R\n"
+        "class Caller:\n"
+        "    def __init__(self):\n"
+        "        self.inner = R()\n"
+        "    def invoke(self):\n"
+        "        return self.inner.run()\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000192",
+        chunk_id="00000000-0000-4000-8000-000000000292",
+    )
+    ambiguous_target, _ambiguous_chunk = make_request(
+        "class Receiver:\n    def run(self):\n        return None\n",
+        path="pkg/target/__init__.py",
+        document_id="00000000-0000-4000-8000-000000000193",
+        chunk_id="00000000-0000-4000-8000-000000000293",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document, ambiguous_target.document],
+    )
+
+    wrong_version_extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id="00000000-0000-4000-8000-000000000399",
+    )
+    wrong_version_result = run_immediate(
+        wrong_version_extractor.extract(caller_request)
+    )
+    wrong_version_entities = {
+        item.id: item.canonical_name for item in wrong_version_result.entities
+    }
+    assert not any(
+        item.predicate is RelationPredicate.CALLS
+        and wrong_version_entities.get(item.subject_id) == "pkg.caller.Caller.invoke"
+        and wrong_version_entities.get(item.object_id) == "pkg.target.Receiver.run"
+        for item in wrong_version_result.relations
+    )
+    assert any(
+        item.code == "CALL_TARGET_UNRESOLVED"
+        for item in wrong_version_result.rejected_items
+    )
+
+    ambiguous_extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+    ambiguous_result = run_immediate(ambiguous_extractor.extract(caller_request))
+    ambiguous_entities = {
+        item.id: item.canonical_name for item in ambiguous_result.entities
+    }
+    assert not any(
+        item.predicate is RelationPredicate.CALLS
+        and ambiguous_entities.get(item.subject_id) == "pkg.caller.Caller.invoke"
+        and ambiguous_entities.get(item.object_id) == "pkg.target.Receiver.run"
+        for item in ambiguous_result.relations
+    )
+    assert any(
+        item.code == "CALL_TARGET_UNRESOLVED"
+        for item in ambiguous_result.rejected_items
+    )
+
+
+def test_ast_instance_method_resolution_supports_relative_alias_imports() -> None:
+    target_request, _target_chunk = make_request(
+        "class Receiver:\n    def run(self):\n        return None\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000194",
+        chunk_id="00000000-0000-4000-8000-000000000294",
+    )
+    caller_request, _caller_chunk = make_request(
+        "from .target import Receiver as R\n"
+        "class Caller:\n"
+        "    def __init__(self):\n"
+        "        self.inner = R()\n"
+        "    def invoke(self):\n"
+        "        return self.inner.run()\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000195",
+        chunk_id="00000000-0000-4000-8000-000000000295",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+    entities = {item.id: item.canonical_name for item in result.entities}
+    assert any(
+        relation.predicate is RelationPredicate.CALLS
+        and entities.get(relation.subject_id) == "pkg.caller.Caller.invoke"
+        and entities.get(relation.object_id) == "pkg.target.Receiver.run"
+        for relation in result.relations
+    )
+
+
+def test_ast_instance_method_resolution_rejects_ambiguous_import_alias() -> None:
+    target_request, _target_chunk = make_request(
+        "class Receiver:\n    def run(self):\n        return None\n"
+        "class Other:\n    def run(self):\n        return None\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000196",
+        chunk_id="00000000-0000-4000-8000-000000000296",
+    )
+    caller_request, _caller_chunk = make_request(
+        "from pkg.target import Receiver as R\n"
+        "from pkg.target import Other as R\n"
+        "class Caller:\n"
+        "    def __init__(self):\n"
+        "        self.inner = R()\n"
+        "    def invoke(self):\n"
+        "        return self.inner.run()\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000197",
+        chunk_id="00000000-0000-4000-8000-000000000297",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+    assert not any(
+        relation.predicate is RelationPredicate.CALLS
+        and relation.object_id
+        in {
+            definition.entity.id
+            for definition in source_index.definitions.get("pkg.target.Receiver.run", ())
+        }
+        for relation in result.relations
+    )
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+
+
+def test_ast_instance_method_resolution_rejects_cross_source_target() -> None:
+    target_request, _target_chunk = make_request(
+        "class Receiver:\n    def run(self):\n        return None\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000198",
+        chunk_id="00000000-0000-4000-8000-000000000298",
+    )
+    caller_request, _caller_chunk = make_request(
+        "from pkg.target import Receiver as R\n"
+        "class Caller:\n"
+        "    def __init__(self):\n"
+        "        self.inner = R()\n"
+        "    def invoke(self):\n"
+        "        return self.inner.run()\n",
+        path="pkg/caller.py",
+        source_id=SECOND_SOURCE_ID,
+        document_id="00000000-0000-4000-8000-000000000199",
+        chunk_id="00000000-0000-4000-8000-000000000299",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={
+            SOURCE_ID: SourceKind.python_repo,
+            SECOND_SOURCE_ID: SourceKind.python_repo,
+        },
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+    assert not any(
+        relation.predicate is RelationPredicate.CALLS
+        and relation.object_id
+        in {
+            definition.entity.id
+            for definition in source_index.definitions.get("pkg.target.Receiver.run", ())
+        }
+        for relation in result.relations
+    )
+
+
+def test_ast_instance_method_resolution_does_not_use_nested_function_context() -> None:
+    target_request, _target_chunk = make_request(
+        "class Receiver:\n    def run(self):\n        return None\n",
+        path="pkg/target.py",
+        document_id="00000000-0000-4000-8000-000000000198",
+        chunk_id="00000000-0000-4000-8000-000000000298",
+    )
+    caller_request, _caller_chunk = make_request(
+        "from pkg.target import Receiver as R\n"
+        "class Caller:\n"
+        "    def __init__(self):\n"
+        "        self.inner = R()\n"
+        "    def invoke(self):\n"
+        "        def nested():\n"
+        "            return self.inner.run()\n"
+        "        return nested()\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000199",
+        chunk_id="00000000-0000-4000-8000-000000000299",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[target_request.document, caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+    entities = {item.id: item.canonical_name for item in result.entities}
+    assert not any(
+        relation.predicate is RelationPredicate.CALLS
+        and entities.get(relation.subject_id) == "pkg.caller.Caller.invoke.nested"
+        and entities.get(relation.object_id) == "pkg.target.Receiver.run"
+        for relation in result.relations
+    )
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+
+
+def test_ast_instance_method_resolution_requires_explicit_import() -> None:
+    caller_request, _caller_chunk = make_request(
+        "class Receiver:\n"
+        "    def run(self):\n"
+        "        return None\n"
+        "class Caller:\n"
+        "    def __init__(self):\n"
+        "        self.inner = Receiver()\n"
+        "    def invoke(self):\n"
+        "        return self.inner.run()\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000197",
+        chunk_id="00000000-0000-4000-8000-000000000297",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+    entities = {item.id: item.canonical_name for item in result.entities}
+    assert not any(
+        relation.predicate is RelationPredicate.CALLS
+        and entities.get(relation.subject_id) == "pkg.caller.Caller.invoke"
+        and entities.get(relation.object_id) == "pkg.caller.Receiver.run"
+        for relation in result.relations
+    )
     assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
 
 
