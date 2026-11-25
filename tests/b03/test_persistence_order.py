@@ -292,7 +292,7 @@ def test_python_extraction_profile_binds_source_index_version() -> None:
                 "normative_prompt_version": None,
                 "provider_configured": None,
                 "python_source_index_version": _PYTHON_SOURCE_INDEX_VERSION,
-                "python_ast_extraction_version": "kw-python-ast-extraction-v2",
+                "python_ast_extraction_version": "kw-python-ast-extraction-v3",
             },
             ensure_ascii=False,
             sort_keys=True,
