@@ -237,3 +237,34 @@ This run replaces the earlier in-memory hydration attempt as evidence for one is
 - Exact new source/test scope: `src/knowledge_weaver/evaluation/fixed_agent_dev.py`, `tests/b07/test_fixed_agent_dev.py`; CR: `docs/changes/CR-B07-FIXED-AGENT-DEV-ASSEMBLY-v1-20261125.md`; this delivery record. Existing `tests/b04/test_cache_state.py` was reused without edits.
 - Focused validation in the shared `D:/agent/KnowledgeWeaver/.venv`: `pytest tests/b07/test_fixed_agent_dev.py tests/b04/test_cache_state.py -q` → 10 passed; Ruff, compileall, and `git diff --check` passed. Tests only construct route objects and verify preflight/config binding; the test reranker raises if called. No Test data, SQL read/write, Qdrant collection read/write, paid API, external provider, Data, production configuration, or ledger was touched.
 - Implementation commit: `e2e29fed43b1836d58a486c0ba0ae34ebdd350f9`, parent `daf0ffd560e1d86458a19a8fa78b9d525ae2a6d2`. Rollback ref `refs/codex/rollback/b07-fixed-agent-dev-assembly-20261125-001` points to the parent. The delivery-record follow-up rollback ref `refs/codex/rollback/b07-fixed-agent-dev-delivery-20261125-001` points to this implementation commit.
+
+## Continuation: real fixed_agent synthetic Dev slice — 2026-11-25
+
+### Real assembly and formal boundary
+
+- Continued from `0b82dc0aaba6a6348b39ecec92f311c31e4ef8a0` on `task/b07-blind-formal-executor`; required baseline `1052ddcc75c09acf1199889df152bceaffab1915` remains an ancestor.
+- No local reranker model or weight files were present. Added a deterministic local text reranker that uses the existing B04 BM25 tokenizer and actual chunk text hydrated by B03. It is tagged `dev_only=true`, `formal_eligible=false`, has its own configuration SHA, and has no formal `AgentSuiteRouteAdapter`. It is not described as a model.
+- Added a loopback B04 channel constructor for the actual BM25, Dense, Symbol, and Entity adapters. Dense used local Qwen embedding plus Qdrant. B05 used the real `GraphRetriever` and `PostgresGraphStore`; B06 used the public `investigate_with_trace` API. The one-query entry accepts only `BlindBenchmarkInput` and a verified Generation; Gold stayed in the runner after execution.
+- The first local verifier attempt timed out at 20 seconds. With a 90-second timeout and the previous 256-token response cap it produced invalid JSON. The Dev-only verifier now allows 512 output tokens and retains schema validation. Its implementation, timeout, and output cap are covered by the component SHA. No formal verifier setting changed.
+
+### Persisted Generation and isolated index
+
+- Read-only B03 hydration confirmed Generation `30152134-f2d0-4395-bc0a-420a1b9439c2`, state `READY`, SHA-256 `99328dc402f975f851b292eadb099a21d98115b38708ccf6c1673f1dba3a085d`; 4 chunks (2 leaf), 6 evidence, 3 entities, and 3 relations. The two leaf chunk texts and hashes matched the existing BM25 index; BM25, Symbol, and Entity index files were present. The two parent chunks are intentionally absent from leaf retrieval indexes.
+- The old collection `kw_9cb43fa41b679dd1b8ef88b5` was read only and contained the two Generation leaf points. A fresh collection, `b07dev_aecd7a2ca36c_9cb43fa41b679dd1b8ef88b5`, was seeded from PG-hydrated leaf text using Qwen3 embedding 0.6B, 1024 dimensions. It contained 2 points before and after the query. Query-fingerprint metadata writes were confined to this new synthetic collection. PostgreSQL received no writes or query lease.
+- Live local endpoints were Postgres `127.0.0.1:55432`, Qdrant `127.0.0.1:56333`, embedding `127.0.0.1:56336`, and chat `127.0.0.1:56337`. Qdrant's version check warned that client `1.20.0` differs from server `1.17.1`; versions and service settings were not changed.
+
+### One blinded query result
+
+- Input: `What does acceptance_codename return?` (`en`). The B06 fixed-agent trace executed Hybrid → Graph → expanded Hybrid → rerank. Hybrid returned two hits; target chunk `b80f776d-38f2-5379-99a7-fac8dead54ee` ranked first. Graph executed against PostgreSQL and returned 0 hits / 0 paths for this query. Verifier-supported evidence generated the expanded suffix `LARKSPUR def str`. The Dev text reranker scored the target `0.6`, the other hit `0.0`, and kept the target at rank 1.
+- The local chat model answered: “The function acceptance_codename returns the string `LARKSPUR`.” It cited evidence IDs `22bca254-f7fa-5d7f-ab11-79125df8ee0f`, `90b3a272-748e-5d9b-a1d9-8c238b1e7512`, and `e1910a1e-354a-549c-8bf0-4bc809c63414`; all three passed B03 citation validation and resolved to the persisted target chunk.
+- Runner-side synthetic diagnostics: target chunk/evidence rank 1, recall@10 `1.0`, reciprocal rank `1.0`. These values are not formal suite scores and do not change quality thresholds.
+- Local chat usage was exact per successful provider call: verifier 1192 input / 267 output tokens; answer 1068 / 140. Aggregate B06 usage was `estimated`: 2282 input / 407 output tokens, 4 model calls including embedding, 5 tool calls, 73811 ms. Seeding the two document vectors used 37 input / 0 output tokens, exact.
+- Component SHA `9eda607127129c842154c01b5ad446abe246f2db6ac34f0dc525eefc931c7ae4`; Generation-provider SHA `5bb370dfa3e3e56aacb59ced0338e0045306fe9f7e6f866273f316bacd9ec36a`; reranker SHA `d320fba31322713b6937572e89c726e37773daef8506dfefd569452360f3c254`; frozen `agent.fixed` route SHA `c44d937a6374821a992e79e88cc7aec3bf19738443e42508cc5bfab2cd45cb53`.
+
+### Verification and limits
+
+- `pytest tests/b07/test_fixed_agent_dev.py tests/b04/test_cache_state.py -q` → 14 passed. Ruff, `compileall`, and `git diff --check` passed. Tests ran with the shared `D:/agent/KnowledgeWeaver/.venv`; no packages were installed or synchronized.
+- Exact implementation scope: `src/knowledge_weaver/evaluation/fixed_agent_dev.py` and `tests/b07/test_fixed_agent_dev.py`. This CR and the present delivery record are the only documentation files for this continuation.
+- The final execution was one self-authored synthetic Dev query, not a frozen suite or Test run. No external/paid provider, production data, Data workspace, or shared ledger was accessed. The formal cache receipt remains incomplete; this Dev result does not make a formal suite executable.
+- Code/test commit: `8956c8af0443bdb2b9ee36bec188917aa81304b9`, parent `0b82dc0aaba6a6348b39ecec92f311c31e4ef8a0`. Rollback ref `refs/codex/rollback/b07-fixed-agent-dev-text-20261125-001` points to that parent.
+- Detailed component contract and evidence: [CR-B07-FIXED-AGENT-DEV-LOCAL-TEXT-RUN-v1](../changes/CR-B07-FIXED-AGENT-DEV-LOCAL-TEXT-RUN-v1-20261125.md).
