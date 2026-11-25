@@ -67,6 +67,11 @@ class AgentSuiteRouteAdapter:
     def config_sha256(self) -> str:
         return agent_behavior_profile(self.route_id).config_sha256
 
+    @property
+    def cache_state_manifest(self) -> object | None:
+        """Expose the concrete Agent manifest to B04 without inventing nested scope."""
+        return getattr(self.service, "cache_state_manifest", None)
+
     def matches_route(self, route_id: str) -> bool:
         behavior = agent_behavior_profile(self.route_id, require_supported=False)
         return (

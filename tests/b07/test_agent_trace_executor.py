@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from test_generation_binding import _make_generation
 
+from knowledge_weaver.agent import AgentCacheStateManifest
 from knowledge_weaver.core.ids import deterministic_id
 from knowledge_weaver.evaluation.agent_adapter import AgentSuiteRouteAdapter
 from knowledge_weaver.evaluation.executors import _agent_execution_output
@@ -15,6 +16,7 @@ from knowledge_weaver.evaluation.protocol import load_protocol
 from knowledge_weaver.evaluation.runs import BlindBenchmarkInput
 from knowledge_weaver.evaluation.scheduling import ExperimentSuite, SuiteStatus
 from knowledge_weaver.evaluation.suite_registry import SuiteExecutionPlan
+from knowledge_weaver.graph.retriever import GraphRetriever
 from knowledge_weaver.models import (
     ActionTool,
     AgentExecutionResult,
@@ -28,7 +30,12 @@ from knowledge_weaver.models import (
     QueryContext,
     Usage,
 )
-from knowledge_weaver.retrieval.cache_state import CacheStateOperation, CacheStateReceipt
+from knowledge_weaver.retrieval.cache_state import (
+    CacheStateController,
+    CacheStateOperation,
+    CacheStateReceipt,
+)
+from knowledge_weaver.retrieval.indexed import DenseRetriever
 
 
 class _AgentServiceSpy:
@@ -318,3 +325,61 @@ async def test_agent_adapter_fails_closed_on_unknown_cache_and_generation_hash()
             cache_state_receipt=receipt,
         )
     assert adapter.service.requests == []
+
+
+@pytest.mark.asyncio
+async def test_b04_controller_uses_agent_nested_cache_manifest_and_keeps_external_scope_blocked() -> None:
+    (
+        _protocol,
+        _generation,
+        _verified,
+        _query,
+        _suite,
+        _adapter,
+        _plan,
+        context,
+        _budget,
+        _receipt,
+    ) = _case_inputs()
+    graph = GraphRetriever(object(), object(), object())
+    dense = DenseRetriever(object(), object())
+    service = _AgentServiceSpy()
+    service.cache_state_manifest = AgentCacheStateManifest(
+        components={"dense": dense, "graph": graph},
+        uncontrolled_components=(
+            "generation-provider/shared-cache",
+            "reranker/shared-provider-cache",
+        ),
+        manifest_sha256="d" * 64,
+    )
+    route = AgentSuiteRouteAdapter(service, "agent.rule")
+    controller = CacheStateController.for_retrievers(
+        {"agent.rule": route},
+        uncontrolled_by_route={
+            "agent.rule": ("agent.rule/answer-provider/shared-cache",)
+        },
+    )
+
+    receipt = await controller.prepare("agent.rule", context, "cold")
+
+    assert receipt.controlled_components == (
+        "agent.rule/component/graph/graph-snapshot-cache",
+    )
+    assert receipt.applied_state == "cold"
+    assert receipt.complete is False
+    assert "agent.rule/unknown-cache-scope" not in receipt.uncontrolled_components
+    assert "agent.rule/component/dense/embedding-provider/shared-cache" in receipt.uncontrolled_components
+    assert "agent.rule/generation-provider/shared-cache" in receipt.uncontrolled_components
+    assert "agent.rule/reranker/shared-provider-cache" in receipt.uncontrolled_components
+    assert "agent.rule/answer-provider/shared-cache" in receipt.uncontrolled_components
+
+    service.cache_state_manifest = AgentCacheStateManifest(
+        components={"dense": dense, "graph": graph},
+        uncontrolled_components=(
+            "generation-provider/shared-cache",
+            "reranker/shared-provider-cache",
+        ),
+        manifest_sha256="e" * 64,
+    )
+    changed = CacheStateController.for_retrievers({"agent.rule": route})
+    assert changed.config_sha256_for("agent.rule") != receipt.config_sha256

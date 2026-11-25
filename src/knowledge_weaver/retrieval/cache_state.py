@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,6 +107,7 @@ class CacheRouteProfile:
     route_id: str
     participants: tuple[CacheStateParticipant, ...]
     uncontrolled_components: tuple[str, ...]
+    inventory_sha256: str | None = None
 
 
 class CacheStateController:
@@ -123,6 +125,7 @@ class CacheStateController:
                 route_id=route_id,
                 participants=tuple(sorted(profile.participants, key=lambda item: item.component_id)),
                 uncontrolled_components=tuple(sorted(set(profile.uncontrolled_components))),
+                inventory_sha256=profile.inventory_sha256,
             )
         self._routes = profiles
         self._implementation_sha256 = _canonical_sha256(
@@ -264,6 +267,7 @@ class CacheStateController:
                     for item in profile.participants
                 ],
                 "uncontrolled_components": profile.uncontrolled_components,
+                "nested_inventory_sha256": profile.inventory_sha256,
                 "warmup_sequence": [item.component_id for item in profile.participants],
                 "cold_operation": "reset_cache_and_verify_empty",
                 "warm_operation": "warm_cache_for_current_query_context_and_verify_hit",
@@ -314,6 +318,45 @@ def _profile_for_retriever(route_id: str, adapter: object) -> CacheRouteProfile:
         EntityRetriever,
         SymbolRetriever,
     )
+
+    manifest = getattr(adapter, "cache_state_manifest", None)
+    if manifest is not None:
+        components = getattr(manifest, "components", None)
+        uncontrolled_scope = getattr(manifest, "uncontrolled_components", None)
+        manifest_sha256 = getattr(manifest, "manifest_sha256", None)
+        if (
+            not isinstance(components, Mapping)
+            or not components
+            or not isinstance(uncontrolled_scope, tuple)
+            or not isinstance(manifest_sha256, str)
+            or not re.fullmatch(_SHA256, manifest_sha256)
+        ):
+            return CacheRouteProfile(
+                route_id=route_id,
+                participants=(),
+                uncontrolled_components=(f"{route_id}/invalid-agent-cache-manifest",),
+            )
+        nested_participants: list[CacheStateParticipant] = []
+        nested_uncontrolled: list[str] = [
+            f"{route_id}/{item}" for item in uncontrolled_scope
+        ]
+        for component_name, component in sorted(components.items()):
+            if not isinstance(component_name, str) or not component_name:
+                nested_uncontrolled.append(f"{route_id}/invalid-agent-component-name")
+                continue
+            nested = _profile_for_retriever(
+                f"{route_id}/component/{component_name}", component
+            )
+            nested_participants.extend(nested.participants)
+            nested_uncontrolled.extend(nested.uncontrolled_components)
+        if not nested_participants and not nested_uncontrolled:
+            nested_uncontrolled.append(f"{route_id}/empty-agent-cache-manifest")
+        return CacheRouteProfile(
+            route_id=route_id,
+            participants=tuple(nested_participants),
+            uncontrolled_components=tuple(sorted(set(nested_uncontrolled))),
+            inventory_sha256=manifest_sha256,
+        )
 
     participants: list[CacheStateParticipant] = []
     uncontrolled: list[str] = []

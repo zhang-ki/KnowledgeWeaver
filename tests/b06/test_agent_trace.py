@@ -14,7 +14,11 @@ from conftest import (
 )
 from test_agent import _weights
 
-from knowledge_weaver.agent import AgentServiceImpl, agent_behavior_profile
+from knowledge_weaver.agent import (
+    AgentCacheStateManifest,
+    AgentServiceImpl,
+    agent_behavior_profile,
+)
 from knowledge_weaver.core.errors import ErrorCode, KnowledgeWeaverError
 from knowledge_weaver.models import (
     ActionTool,
@@ -287,3 +291,55 @@ def test_supported_agent_profiles_have_distinct_routes_and_config_hashes() -> No
         "enable_source_features": False
     }
     assert "agent.fixed" in SUPPORTED_AGENT_ROUTE_IDS
+
+
+def test_agent_service_exposes_an_immutable_nested_cache_manifest() -> None:
+    order: list[str] = []
+    retrievers = {
+        name: _SpyRetriever(name, None, order)
+        for name in ("bm25", "dense", "symbol", "entity", "graph")
+    }
+    manifest = AgentCacheStateManifest(
+        components=retrievers,
+        uncontrolled_components=("generation-provider/shared-cache",),
+        manifest_sha256="d" * 64,
+    )
+    service = AgentServiceImpl(
+        FakeStore({}, {}),
+        retrievers,
+        RecordingProvider(),
+        cache_state_manifest=manifest,
+    )
+
+    assert service.cache_state_manifest is manifest
+    assert dict(service.cache_state_manifest.components) == retrievers
+    assert service.cache_state_manifest.uncontrolled_components == (
+        "generation-provider/shared-cache",
+    )
+    with pytest.raises(TypeError):
+        service.cache_state_manifest.components["dense"] = object()
+
+
+def test_agent_service_rejects_a_cache_manifest_unbound_to_its_retriever_factory() -> None:
+    order: list[str] = []
+    retrievers = {
+        name: _SpyRetriever(name, None, order)
+        for name in ("bm25", "dense", "symbol", "entity", "graph")
+    }
+    manifest = AgentCacheStateManifest(
+        components=retrievers,
+        uncontrolled_components=("generation-provider/shared-cache",),
+        manifest_sha256="d" * 64,
+    )
+
+    def build_retrievers(_ledger):
+        return retrievers
+
+    build_retrievers.__dict__["cache_state_manifest_sha256"] = "e" * 64
+    with pytest.raises(ValueError, match="manifest SHA differs from its retriever factory"):
+        AgentServiceImpl(
+            FakeStore({}, {}),
+            build_retrievers,
+            RecordingProvider(),
+            cache_state_manifest=manifest,
+        )

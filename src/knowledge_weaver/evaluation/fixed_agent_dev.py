@@ -33,7 +33,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from knowledge_weaver.agent.execution_profiles import agent_behavior_profile
-from knowledge_weaver.agent.service import AgentServiceImpl
+from knowledge_weaver.agent.service import AgentCacheStateManifest, AgentServiceImpl
 from knowledge_weaver.agent.verifier import StructuredEvidenceVerifier
 from knowledge_weaver.core.budget import BudgetLedger
 from knowledge_weaver.core.ids import deterministic_id
@@ -544,6 +544,27 @@ def build_fixed_agent_dev_assembly(
 
     expected_reranker_descriptor = _reranker_descriptor(reranker_probe, reranker_factory)
     reranker_factory_identity = _reranker_factory_identity(reranker_factory)
+    report_manifest = _component_manifest(
+        knowledge_store=knowledge_store,
+        channels=probe_channels,
+        channel_factory=channel_factory,
+        graph_retriever=graph_retriever,
+        reranker=reranker_probe,
+        reranker_factory=reranker_factory,
+        generation_profile=generation_profile,
+        local_services=local_services or {},
+    )
+    component_config_sha256 = _canonical_sha256(report_manifest)
+    cache_state_manifest = AgentCacheStateManifest(
+        components={**probe_channels, "graph": graph_retriever},
+        uncontrolled_components=(
+            "generation-provider/shared-cache",
+            "knowledge-store/backend-cache",
+            "reranker/shared-provider-cache",
+        ),
+        manifest_sha256=component_config_sha256,
+    )
+    build_retrievers.__dict__["cache_state_manifest_sha256"] = component_config_sha256
 
     def generation_factory(ledger: BudgetLedger) -> DevLocalOpenAICompatibleGenerationProvider:
         return DevLocalOpenAICompatibleGenerationProvider(generation_profile, ledger)
@@ -569,19 +590,10 @@ def build_fixed_agent_dev_assembly(
         reranker=bound_reranker_factory,
         verifier_factory=_make_dev_evidence_verifier,
         generation_config_sha256=generation_sha,
+        cache_state_manifest=cache_state_manifest,
     )
     dev_only = isinstance(reranker_factory, DevOnlyTextRerankerFactory)
     adapter = None if dev_only else AgentSuiteRouteAdapter(agent, "agent.fixed")
-    report_manifest = _component_manifest(
-        knowledge_store=knowledge_store,
-        channels=probe_channels,
-        channel_factory=channel_factory,
-        graph_retriever=graph_retriever,
-        reranker=reranker_probe,
-        reranker_factory=reranker_factory,
-        generation_profile=generation_profile,
-        local_services=local_services or {},
-    )
     return FixedAgentDevAssembly(
         retriever_factory=build_retrievers,
         hybrid_retriever_factory=build_hybrid,
@@ -589,7 +601,7 @@ def build_fixed_agent_dev_assembly(
         agent_service=agent,
         route_adapter=adapter,
         generation_config_sha256=generation_sha,
-        component_config_sha256=_canonical_sha256(report_manifest),
+        component_config_sha256=component_config_sha256,
         component_manifest=MappingProxyType(report_manifest),
         dev_only=dev_only,
     )

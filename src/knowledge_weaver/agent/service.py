@@ -9,7 +9,9 @@ import re
 import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypeAlias
 
 from knowledge_weaver.core.budget import BudgetLedger, BudgetReservation
@@ -89,6 +91,25 @@ RetrieverFactory: TypeAlias = Callable[[BudgetLedger], RetrieverMap]
 GenerationFactory: TypeAlias = Callable[[BudgetLedger], GenerationProvider]
 RerankerFactory: TypeAlias = Callable[[BudgetLedger], Reranker | None]
 VerifierFactory: TypeAlias = Callable[[Callable[[LLMRequest], Awaitable[LLMResult]]], EvidenceVerifier]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentCacheStateManifest:
+    """Public inventory of the actual B04 components nested in an Agent runtime."""
+
+    components: Mapping[str, Retriever]
+    uncontrolled_components: tuple[str, ...]
+    manifest_sha256: str
+
+    def __post_init__(self) -> None:
+        components = dict(self.components)
+        if not components or any(not key or not key.strip() for key in components):
+            raise ValueError("Agent cache manifest requires named nested retrieval components")
+        if tuple(sorted(set(self.uncontrolled_components))) != self.uncontrolled_components:
+            raise ValueError("Agent uncontrolled cache components must be unique and sorted")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.manifest_sha256):
+            raise ValueError("Agent cache manifest requires a lowercase SHA-256 digest")
+        object.__setattr__(self, "components", MappingProxyType(dict(sorted(components.items()))))
 
 FEATURE_DEFAULTS: dict[str, bool] = {
     "enable_graph": True,
@@ -834,6 +855,7 @@ class AgentServiceImpl(AgentService):
         weights_sha256: str | None = None,
         generation_config_sha256: str | None = None,
         trace_callback: TraceCallback | None = None,
+        cache_state_manifest: AgentCacheStateManifest | None = None,
     ) -> None:
         self.knowledge_store = knowledge_store
         self.retrievers = retrievers
@@ -844,6 +866,30 @@ class AgentServiceImpl(AgentService):
         self.weights_sha256 = weights_sha256
         self.generation_config_sha256 = generation_config_sha256
         self.trace_callback = trace_callback
+        if cache_state_manifest is not None and not isinstance(
+            cache_state_manifest, AgentCacheStateManifest
+        ):
+            raise TypeError("Agent cache state manifest must use the immutable public DTO")
+        if (
+            isinstance(retrievers, Mapping)
+            and cache_state_manifest is not None
+            and (
+                set(cache_state_manifest.components) != set(retrievers)
+                or any(
+                    cache_state_manifest.components[key] is not retrievers[key]
+                    for key in retrievers
+                )
+            )
+        ):
+            raise ValueError("Agent cache manifest must reference the exact live retriever map")
+        if (
+            not isinstance(retrievers, Mapping)
+            and cache_state_manifest is not None
+            and getattr(retrievers, "cache_state_manifest_sha256", None)
+            != cache_state_manifest.manifest_sha256
+        ):
+            raise ValueError("Agent cache manifest SHA differs from its retriever factory")
+        self._cache_state_manifest = cache_state_manifest
         self._traces: dict[str, list[dict[str, Any]]] = {}
         for name, digest in (
             ("weights_sha256", weights_sha256),
@@ -853,6 +899,11 @@ class AgentServiceImpl(AgentService):
                 raise ValueError(f"{name} must be a lowercase SHA-256 digest")
         if isinstance(retrievers, Mapping):
             self._validate_retriever_map(retrievers)
+
+    @property
+    def cache_state_manifest(self) -> AgentCacheStateManifest | None:
+        """Expose the immutable component inventory used by B04 cache preflight."""
+        return self._cache_state_manifest
 
     @staticmethod
     def _validate_retriever_map(retrievers: RetrieverMap) -> None:
