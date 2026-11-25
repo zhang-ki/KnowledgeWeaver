@@ -573,6 +573,14 @@ def _expression_root_name(expression: ast.expr) -> str | None:
     return None
 
 
+def _uses_unique_explicit_import(
+    module: _PythonModuleIndex, expression: ast.expr
+) -> bool:
+    root = _expression_root_name(expression)
+    imported = module.imports.get(root, ()) if root is not None else ()
+    return len(imported) == 1 and module.binding_counts.get(root or "") == 1
+
+
 def _direct_name_assignments(
     module: _PythonModuleIndex, name: str
 ) -> list[tuple[ast.stmt, ast.expr]]:
@@ -814,7 +822,11 @@ def _class_attribute_binding(
                 ):
                     return None
                 root_name = _expression_root_name(matching[0][1].func)
-                if root_name is None or root_name in _method_local_bindings(method):
+                if (
+                    root_name is None
+                    or root_name in _method_local_bindings(method)
+                    or not _uses_unique_explicit_import(module, matching[0][1].func)
+                ):
                     return None
                 target_type = _resolve_indexed_class_expression(
                     module, matching[0][1].func, source_index

@@ -55,7 +55,7 @@ No public DTO, Data project, existing Generation, database, production pointer, 
 
 ## Required synthetic cases and gates
 
-The production B02 regressions exercise absolute and relative explicit aliases, same-type class and module-singleton rebinds, duplicate target modules/import aliases, local alias shadowing, conditional construction/rebinding, dynamic factories, different-type rebinds, cross-source/version inputs, and nested-function context. They assert that unresolved cases emit no target `CALLS`, and that the positive case retains the direct call-site Evidence/Mention and existing qualifier. The targeted extractor group passed 14 tests, including two pre-existing import-alias cases. A full-file B02 invocation was stopped after 40 seconds without producing output; no result is claimed for that invocation.
+The production B02 regressions exercise absolute and relative explicit aliases, same-type class and module-singleton rebinds, duplicate target modules/import aliases, local alias shadowing, conditional construction/rebinding, dynamic factories, different-type rebinds, cross-source/version inputs, nested-function context, and same-module construction without an explicit import. They assert that unresolved cases emit no target `CALLS`, and that the positive case retains the direct call-site Evidence/Mention and existing qualifier. After adding the explicit-import guard, the targeted extractor group passed 15 tests, including two pre-existing import-alias cases. A full-file B02 invocation was stopped after 40 seconds without producing output; no result is claimed for that invocation.
 
 An in-memory source-only run parsed the checksum-verified `api_jwt.py` / `api_jws.py` pair together under a synthetic single Source/SourceVersion. It emitted exactly one matching edge-1 direct `CALLS`: `PyJWT.decode_complete` → `PyJWS.decode_complete`, with the exact direct call span at lines 267–273 (quote SHA-256 `612626016584dee7c9a9c347b8b279a1764e5fde2d020e1b0828d890927279a4`). The source bytes match the frozen file hashes recorded above. This is an in-memory diagnostic with synthetic IDs, not a persisted Generation, strict mapper closure, or G3 pass.
 
@@ -80,7 +80,13 @@ The v1.0.17 step-3 `USES` / `PARSED_BY` and step-5 `VALIDATES` / `VALIDATED_BY` 
 - `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_instance_method_b07_mapping_20261125.log`
 - `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_instance_method_final_ruff_20261125.log`
 - `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_instance_method_final_full_mypy_20261125.log`
+- `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_instance_method_b02_regression_v2_20261125.log`
+- `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_instance_method_b07_mapping_v2_20261125.log`
+- `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_instance_method_final_ruff_v2_20261125.log`
+- `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_instance_method_full_mypy_v2_20261125.log`
 - `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_p020_edge1_source_only_memory_20261125.py`
 - `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_p020_edge1_source_only_memory_20261125.json`
+- `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_p020_edge1_source_only_memory_v2_20261125.py`
+- `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_p020_edge1_source_only_memory_v2_20261125.json`
 - `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_p020_v117_step4_comparison_v2_20261125.json`
 - `.kw/runtime/verification/B07-G3-P020-edge1-source-pair-20261125-01/r2_p020_v117_raw_quote_check_20261125.json`

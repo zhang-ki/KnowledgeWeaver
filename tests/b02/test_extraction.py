@@ -972,6 +972,44 @@ def test_ast_instance_method_resolution_does_not_use_nested_function_context() -
     assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
 
 
+def test_ast_instance_method_resolution_requires_explicit_import() -> None:
+    caller_request, _caller_chunk = make_request(
+        "class Receiver:\n"
+        "    def run(self):\n"
+        "        return None\n"
+        "class Caller:\n"
+        "    def __init__(self):\n"
+        "        self.inner = Receiver()\n"
+        "    def invoke(self):\n"
+        "        return self.inner.run()\n",
+        path="pkg/caller.py",
+        document_id="00000000-0000-4000-8000-000000000197",
+        chunk_id="00000000-0000-4000-8000-000000000297",
+    )
+    source_index = _build_python_source_index(
+        source_id=SOURCE_ID,
+        source_version_id=SOURCE_VERSION_ID,
+        corpus_id=CORPUS_ID,
+        documents=[caller_request.document],
+    )
+    extractor = KnowledgeExtractor(
+        corpus_id=CORPUS_ID,
+        source_kinds_by_id={SOURCE_ID: SourceKind.python_repo},
+        _python_source_index=source_index,
+        _python_source_version_id=SOURCE_VERSION_ID,
+    )
+
+    result = run_immediate(extractor.extract(caller_request))
+    entities = {item.id: item.canonical_name for item in result.entities}
+    assert not any(
+        relation.predicate is RelationPredicate.CALLS
+        and entities.get(relation.subject_id) == "pkg.caller.Caller.invoke"
+        and entities.get(relation.object_id) == "pkg.caller.Receiver.run"
+        for relation in result.relations
+    )
+    assert any(item.code == "CALL_TARGET_UNRESOLVED" for item in result.rejected_items)
+
+
 def test_ast_source_index_rejects_relative_import_beyond_package_root() -> None:
     target_request, _target_chunk = make_request(
         "def transform():\n    return None\n",
