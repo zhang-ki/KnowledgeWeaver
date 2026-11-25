@@ -19,6 +19,11 @@ from knowledge_weaver.extraction import (
     scoped_alias_key,
 )
 from knowledge_weaver.extraction.ast_extractor import _build_python_source_index
+from knowledge_weaver.extraction.text_extractor import (
+    _NORMATIVE_SPEC_GUIDANCE,
+    _NORMATIVE_SPEC_REPAIR_INSTRUCTION,
+    _normative_qualifiers_match_quote,
+)
 from knowledge_weaver.models import (
     Budget,
     Chunk,
@@ -1619,6 +1624,33 @@ async def test_normative_specification_rejects_modality_not_present_in_quote() -
         item.code == "NORMATIVE_MODALITY_OR_GUARD_UNVERIFIED"
         for item in result.rejected_items
     )
+
+
+@pytest.mark.parametrize(
+    ("qualifiers", "quote", "expected"),
+    [
+        ({"normative_modality": "OPTIONAL"}, "The field is OPTIONAL.", True),
+        ({}, "The field is OPTIONAL.", False),
+        ({"normative_modality": "MUST NOT"}, "The client MUST NOT send it.", True),
+        ({"normative_modality": "MUST"}, "The client MUST NOT send it.", False),
+        ({"normative_modality": "must_not"}, "The client must\tnot send it.", True),
+        ({"normative_modality": "MUST NOT"}, "The client MUST send it.", False),
+        (
+            {"normative_modality": "SHALL", "condition": "if enabled"},
+            "The service SHALL return a value.",
+            False,
+        ),
+    ],
+)
+def test_normative_modality_requires_exact_complete_phrase_and_retained_conditions(
+    qualifiers: dict[str, Any], quote: str, expected: bool
+) -> None:
+    assert _normative_qualifiers_match_quote(qualifiers, quote) is expected
+
+
+def test_normative_extraction_instructions_include_optional_modality() -> None:
+    assert "OPTIONAL" in _NORMATIVE_SPEC_GUIDANCE
+    assert "OPTIONAL" in _NORMATIVE_SPEC_REPAIR_INSTRUCTION
 
 
 @pytest.mark.asyncio
