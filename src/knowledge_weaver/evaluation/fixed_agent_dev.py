@@ -1014,11 +1014,10 @@ def _implementation_descriptor(value: object) -> dict[str, str]:
     component_type = value if inspect.isclass(value) else type(value)
     implementation = f"{component_type.__module__}.{component_type.__qualname__}"
     try:
-        if isinstance(value, ModuleType):
-            source = inspect.getsource(value)
-        elif isinstance(value, type):
-            source = inspect.getsource(value)
-        elif isinstance(value, (MethodType, FunctionType, TracebackType, FrameType, CodeType)):
+        if isinstance(
+            value,
+            (ModuleType, type, MethodType, FunctionType, TracebackType, FrameType, CodeType),
+        ):
             source = inspect.getsource(value)
         else:
             raise TypeError("component instance source is resolved from its source file")
