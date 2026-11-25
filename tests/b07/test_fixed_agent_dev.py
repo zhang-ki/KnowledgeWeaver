@@ -11,12 +11,16 @@ import pytest
 from knowledge_weaver.core.budget import BudgetLedger
 from knowledge_weaver.evaluation import fixed_agent_dev
 from knowledge_weaver.evaluation.fixed_agent_dev import (
+    DevOnlyTextReranker,
+    DevOnlyTextRerankerFactory,
     FixedAgentDevCheck,
     FixedAgentDevPreflightError,
     LocalDevChannelFactory,
     LocalDevRerankerFactory,
+    LoopbackB07ChannelConstructor,
     build_fixed_agent_dev_assembly,
     preflight_fixed_agent_dev,
+    run_fixed_agent_dev_query,
 )
 from knowledge_weaver.evaluation.local_generation import DevLocalOpenAIChatProfile
 from knowledge_weaver.graph.retriever import GraphRetriever
@@ -25,7 +29,7 @@ from knowledge_weaver.indexing.bm25 import Bm25Index
 from knowledge_weaver.indexing.dense import QdrantDenseIndex
 from knowledge_weaver.indexing.graph_store import PostgresGraphStore
 from knowledge_weaver.indexing.symbol import EntityIndex, SymbolIndex
-from knowledge_weaver.models import Budget
+from knowledge_weaver.models import Budget, QueryContext, RetrievalHit
 from knowledge_weaver.providers.embedding import LocalQwenEmbeddingProvider
 from knowledge_weaver.providers.fake import FakeProvider
 from knowledge_weaver.providers.profiles import LocalQwenProfile
@@ -245,6 +249,34 @@ def test_builder_constructs_budget_bound_ports_without_invoking_providers(tmp_pa
     assert len(assembly.component_config_sha256) == 64
 
 
+def test_loopback_constructor_builds_the_actual_b04_channel_types(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dense_module, "AsyncQdrantClient", _NoNetworkQdrantClient)
+    store, _channel_factory, _graph = _components(tmp_path, "constructor", monkeypatch)
+    constructor = LoopbackB07ChannelConstructor(
+        knowledge_store=store,
+        index_root=tmp_path,
+        qdrant_url="http://127.0.0.1:56333",
+        collection_prefix="b07dev_constructor",
+        embedding_profile=LocalQwenProfile(
+            endpoint_url="http://127.0.0.1:56336/v1/embeddings",
+            model="qwen3-embedding-0.6b",
+            dimensions=1024,
+        ),
+        _qdrant_api_key="unit-test-only",
+    )
+    ledger = BudgetLedger(Budget(deadline_utc=datetime.now(UTC) + timedelta(seconds=30)))
+
+    channels = constructor(ledger)
+
+    assert set(channels) == {"bm25", "dense", "symbol", "entity"}
+    assert isinstance(channels["bm25"], Bm25Retriever)
+    assert isinstance(channels["dense"], DenseRetriever)
+    assert isinstance(channels["symbol"], SymbolRetriever)
+    assert isinstance(channels["entity"], EntityRetriever)
+    assert channels["dense"].index.provider.budget is ledger
+    assert "unit-test-only" not in str(fixed_agent_dev._safe_config(constructor))
+
+
 def test_builder_fails_closed_before_any_query_when_local_reranker_is_absent(tmp_path, monkeypatch) -> None:
     store, channel_factory, graph = _components(tmp_path, "blocked", monkeypatch)
     with pytest.raises(FixedAgentDevPreflightError) as caught:
@@ -258,3 +290,88 @@ def test_builder_fails_closed_before_any_query_when_local_reranker_is_absent(tmp
         )
 
     assert any("only CloudReranker" in item for item in caught.value.report.blockers)
+
+
+@pytest.mark.asyncio
+async def test_dev_only_text_reranker_scores_hydrated_text_and_uses_stable_order() -> None:
+    target_id = "b80f776d-38f2-5379-99a7-fac8dead54ee"
+    other_id = "6dfc640b-ac07-5637-9985-139dbfc159b5"
+
+    class _HydratingStore:
+        async def get_chunks(self, ids, _context):
+            assert set(ids) == {target_id, other_id}
+            return [
+                SimpleNamespace(
+                    id=other_id,
+                    text='"""Self authored synthetic B07 persistence fixture."""',
+                ),
+                SimpleNamespace(
+                    id=target_id,
+                    text='def acceptance_codename() -> str:\n    return "LARKSPUR"',
+                ),
+            ]
+
+    budget = BudgetLedger(Budget(deadline_utc=datetime.now(UTC) + timedelta(seconds=30)))
+    reranker = DevOnlyTextReranker(
+        _HydratingStore(), budget, DevOnlyTextRerankerFactory().config
+    )
+    context = QueryContext(
+        corpus_id="9fe42200-d034-4989-9c08-cd755ad1c262",
+        generation_id="30152134-f2d0-4395-bc0a-420a1b9439c2",
+        request_id="d06e22ce-679c-4a4e-a38d-f0e9d7d6a8e4",
+        deadline_utc=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    hits = [
+        RetrievalHit(chunk_id=other_id, evidence_ids=[], score=0.5, channel="hybrid", rank=1),
+        RetrievalHit(chunk_id=target_id, evidence_ids=[], score=0.4, channel="hybrid", rank=2),
+    ]
+
+    ranked = await reranker.rerank(
+        "What does acceptance_codename return?", hits, context, limit=10
+    )
+
+    assert [hit.chunk_id for hit in ranked] == [target_id, other_id]
+    assert ranked[0].rerank_score == pytest.approx(0.6)
+    assert [hit.rank for hit in ranked] == [1, 2]
+    assert reranker.budget is budget
+
+
+def test_dev_only_text_assembly_cannot_create_a_formal_route_adapter(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        fixed_agent_dev,
+        "_probe_endpoint",
+        lambda component, host, port: FixedAgentDevCheck(component, True, "test loopback"),
+    )
+    store, channel_factory, graph = _components(tmp_path, "dev-text", monkeypatch)
+    assembly = build_fixed_agent_dev_assembly(
+        knowledge_store=store,
+        channel_factory=channel_factory,
+        graph_retriever=graph,
+        reranker_factory=DevOnlyTextRerankerFactory(),
+        generation_profile=_profile(),
+        local_services=_local_services(),
+    )
+
+    reranker = assembly.agent_service._make_reranker(
+        BudgetLedger(Budget(deadline_utc=datetime.now(UTC) + timedelta(seconds=30)))
+    )
+    assert assembly.dev_only is True
+    assert assembly.route_adapter is None
+    assert assembly.component_manifest["separate_reranker"]["dev_only"] is True
+    assert assembly.component_manifest["separate_reranker"]["formal_eligible"] is False
+    assert assembly.component_manifest["evidence_verifier"]["timeout_seconds"] == 90.0
+    assert assembly.component_manifest["evidence_verifier"]["max_output_tokens"] == 512
+    assert isinstance(reranker, DevOnlyTextReranker)
+
+
+@pytest.mark.asyncio
+async def test_dev_query_runner_rejects_gold_bearing_case_object_before_provider_call() -> None:
+    assembly = SimpleNamespace(dev_only=True, route_adapter=None)
+    with pytest.raises(TypeError, match="only BlindBenchmarkInput"):
+        await run_fixed_agent_dev_query(
+            assembly,  # type: ignore[arg-type]
+            SimpleNamespace(query_id="q", question="synthetic", language="en"),  # type: ignore[arg-type]
+            generation=None,  # type: ignore[arg-type]
+            context=None,  # type: ignore[arg-type]
+            budget=None,  # type: ignore[arg-type]
+        )
