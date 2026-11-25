@@ -87,9 +87,14 @@ class CacheStateReceipt(BaseModel):
 
 
 class CacheStateParticipant(Protocol):
-    component_id: str
-    implementation_sha256: str
-    config_sha256: str
+    @property
+    def component_id(self) -> str: ...
+
+    @property
+    def implementation_sha256(self) -> str: ...
+
+    @property
+    def config_sha256(self) -> str: ...
 
     async def reset_cache(self) -> bool: ...
 
@@ -200,16 +205,19 @@ class CacheStateController:
                 participant.implementation_sha256,
                 participant.config_sha256,
             )
+            failure_type: str | None = None
             try:
                 if current_fingerprint != frozen_fingerprint:
                     verified = False
                     failure_type = "ConfigurationChanged"
                 elif requested_state == "cold":
                     verified = await participant.reset_cache()
-                    failure_type = None if verified else "StateVerificationFailed"
+                    if not verified:
+                        failure_type = "StateVerificationFailed"
                 else:
                     verified = await participant.warm_cache(context)
-                    failure_type = None if verified else "StateVerificationFailed"
+                    if not verified:
+                        failure_type = "StateVerificationFailed"
             except Exception as exc:  # noqa: BLE001 - retain only the exception type in the receipt.
                 verified = False
                 failure_type = type(exc).__name__

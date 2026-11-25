@@ -20,7 +20,15 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from types import MappingProxyType
+from types import (
+    CodeType,
+    FrameType,
+    FunctionType,
+    MappingProxyType,
+    MethodType,
+    ModuleType,
+    TracebackType,
+)
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -803,7 +811,12 @@ def _validate_channels(
         if not isinstance(index, _CHANNEL_INDEX_TYPES[name]):
             return f"{name} index does not use the required local B04 implementation"
 
-    dense_index = channels["dense"].index
+    dense_channel = channels["dense"]
+    if not isinstance(dense_channel, DenseRetriever):
+        return "dense does not use the required DenseRetriever adapter"
+    dense_index = dense_channel.index
+    if not isinstance(dense_index, QdrantDenseIndex):
+        return "DenseRetriever does not use the required QdrantDenseIndex"
     provider = dense_index.provider
     if not isinstance(provider, LocalQwenEmbeddingProvider):
         return "Dense must use LocalQwenEmbeddingProvider; cloud/fake embedding is not accepted"
@@ -1001,7 +1014,14 @@ def _implementation_descriptor(value: object) -> dict[str, str]:
     component_type = value if inspect.isclass(value) else type(value)
     implementation = f"{component_type.__module__}.{component_type.__qualname__}"
     try:
-        source = inspect.getsource(component_type if inspect.isclass(value) else value)
+        if isinstance(value, ModuleType):
+            source = inspect.getsource(value)
+        elif isinstance(value, type):
+            source = inspect.getsource(value)
+        elif isinstance(value, (MethodType, FunctionType, TracebackType, FrameType, CodeType)):
+            source = inspect.getsource(value)
+        else:
+            raise TypeError("component instance source is resolved from its source file")
     except (OSError, TypeError):
         try:
             source_file = inspect.getsourcefile(component_type)

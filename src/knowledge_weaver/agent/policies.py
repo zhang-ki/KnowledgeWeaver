@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from typing import Any, ClassVar, Protocol
 
 from knowledge_weaver.core.errors import ErrorCode, KnowledgeWeaverError
@@ -42,7 +42,7 @@ _LLM_ROUTER_SCHEMA: dict[str, Any] = {
 
 
 class Generate(Protocol):
-    async def __call__(self, request: LLMRequest) -> LLMResult: ...
+    def __call__(self, request: LLMRequest) -> Awaitable[LLMResult]: ...
 
 
 def _fingerprint(name: str, config: Mapping[str, Any] | None = None) -> str:
@@ -238,7 +238,7 @@ class FixedAgentPolicy(_StatePolicy):
 
         facets = {item.id: item for item in state.subquestions}
 
-        def phase(action: Action) -> tuple[int, tuple[str, ...]]:
+        def phase(action: Action) -> tuple[int, tuple[str | int | bool, ...]]:
             if action.tool is ActionTool.hybrid:
                 facet = facets.get(action.facet_id or "")
                 expanded = facet is not None and action.query != facet.text

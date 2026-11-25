@@ -188,7 +188,7 @@ def duplicate_risk(state: InvestigationState, action: Action) -> float:
     return 1.0
 
 
-def stable_action_key(action: Action) -> tuple[object, ...]:
+def stable_action_key(action: Action) -> tuple[str | int | bool, ...]:
     return (
         action.tool.value,
         action.facet_id or "",

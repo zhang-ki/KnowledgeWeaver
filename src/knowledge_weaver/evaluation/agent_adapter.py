@@ -92,6 +92,11 @@ class AgentSuiteRouteAdapter:
         if type(query) is not BlindBenchmarkInput:
             raise TypeError("Agent B07 adapter accepts only BlindBenchmarkInput")
         behavior = agent_behavior_profile(self.route_id)
+        if (plan.system_id, plan.ablation_id) != (
+            behavior.system_id,
+            behavior.ablation_id,
+        ):
+            raise ValueError("Agent suite identity differs from its frozen behavior profile")
         observed = (suite.system_id, suite.ablation_id, suite.budget_id, suite.seed)
         expected = (plan.system_id, plan.ablation_id, plan.budget_id, plan.seed)
         if observed != expected or suite.suite_id != plan.suite_id:
@@ -155,8 +160,8 @@ class AgentSuiteRouteAdapter:
         )
         profile = AgentExecutionProfile(
             suite_id=plan.suite_id,
-            system_id=plan.system_id,
-            ablation_id=plan.ablation_id,
+            system_id=behavior.system_id,
+            ablation_id=behavior.ablation_id,
             route_id=plan.route_id,
             config_sha256=plan.route_config_sha256,
             execution_config_sha256=plan.execution_config_sha256,

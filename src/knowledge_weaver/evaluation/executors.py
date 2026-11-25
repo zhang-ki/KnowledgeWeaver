@@ -412,7 +412,10 @@ class PublicPortBenchmarkExecutor:
                     cache_state_receipt=cache_receipt,
                     execution_output=output,
                 )
-            result = await binding.adapter.retrieve(
+            retriever = binding.adapter
+            if not isinstance(retriever, Retriever):
+                raise TypeError("frozen route adapter does not satisfy the public Retriever port")
+            result = await retriever.retrieve(
                 RetrievalQuery(text=query.question, context=context, top_k=20)
             )
             tool_calls = result.usage.tool_calls

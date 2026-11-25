@@ -6,16 +6,21 @@ import hashlib
 import json
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 
 from knowledge_weaver.models import PolicyKind
+
+AgentSystemId = Literal["fixed_agent", "rule", "llm_router", "segr"]
+AgentAblationId = Literal[
+    "A01", "A02", "A03", "A04", "A05", "A06", "A07", "A08", "A09", "A10"
+]
 
 
 @dataclass(frozen=True, slots=True)
 class AgentBehaviorProfile:
     route_id: str
-    system_id: str
-    ablation_id: str | None
+    system_id: AgentSystemId
+    ablation_id: AgentAblationId | None
     policy: PolicyKind
     feature_overrides: tuple[tuple[str, bool | float], ...]
     strategy_config: tuple[tuple[str, str | int | float | bool], ...] = ()
@@ -24,7 +29,7 @@ class AgentBehaviorProfile:
 
     @property
     def config_sha256(self) -> str:
-        payload = {
+        payload: dict[str, Any] = {
             "contract": "b06-agent-execution-profile-v1",
             "route_id": self.route_id,
             "system_id": self.system_id,

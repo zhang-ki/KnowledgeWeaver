@@ -73,7 +73,14 @@ from .features import (
     independent_source_gap,
     stable_action_key,
 )
-from .policies import FixedAgentPolicy, FixedPolicy, LLMRoutingPolicy, RulePolicy, SegrPolicy
+from .policies import (
+    FixedAgentPolicy,
+    FixedPolicy,
+    Generate,
+    LLMRoutingPolicy,
+    RulePolicy,
+    SegrPolicy,
+)
 from .verifier import StructuredEvidenceVerifier
 from .weights import ACTION_FAMILIES, SegrPolicyWeights, load_policy_weights
 
@@ -742,7 +749,7 @@ class _BudgetedGeneration:
 
     def for_purpose(
         self, purpose: Literal["router", "verifier", "answer", "agent"]
-    ) -> Callable[[LLMRequest], Awaitable[LLMResult]]:
+    ) -> Generate:
         async def generate(request: LLMRequest) -> LLMResult:
             return await self.generate(request, purpose=purpose)
 
