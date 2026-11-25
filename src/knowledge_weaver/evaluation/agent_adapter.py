@@ -18,6 +18,7 @@ from knowledge_weaver.evaluation.protocol import EvaluationProtocol
 from knowledge_weaver.evaluation.runs import BlindBenchmarkInput
 from knowledge_weaver.evaluation.scheduling import ExperimentSuite
 from knowledge_weaver.models import (
+    ActionTool,
     AgentExecutionProfile,
     AgentExecutionResult,
     Budget,
@@ -30,6 +31,22 @@ from knowledge_weaver.retrieval.cache_state import CacheStateReceipt
 
 if TYPE_CHECKING:
     from knowledge_weaver.evaluation.suite_registry import SuiteExecutionPlan
+
+
+def _validate_fixed_agent_trace(result: AgentExecutionResult) -> None:
+    sources = tuple(step.source for step in result.retrieval_steps)
+    allowed = {
+        (),
+        (ActionTool.hybrid,),
+        (ActionTool.hybrid, ActionTool.graph),
+        (ActionTool.hybrid, ActionTool.graph, ActionTool.hybrid),
+        (ActionTool.hybrid, ActionTool.graph, ActionTool.rerank),
+        (ActionTool.hybrid, ActionTool.graph, ActionTool.hybrid, ActionTool.rerank),
+    }
+    if sources not in allowed:
+        raise ValueError(
+            "fixed_agent trace order must be hybrid, graph, optional expanded hybrid, then rerank"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +175,8 @@ class AgentSuiteRouteAdapter:
             or result.answer.context != context
         ):
             raise ValueError("AgentService trace result differs from the frozen request binding")
+        if self.route_id == "agent.fixed":
+            _validate_fixed_agent_trace(result)
         return result
 
 

@@ -18,6 +18,7 @@ class AgentBehaviorProfile:
     ablation_id: str | None
     policy: PolicyKind
     feature_overrides: tuple[tuple[str, bool | float], ...]
+    strategy_config: tuple[tuple[str, str | int | float | bool], ...] = ()
     supported: bool = True
     unsupported_reason: str | None = None
 
@@ -31,6 +32,8 @@ class AgentBehaviorProfile:
             "policy": self.policy.value,
             "feature_overrides": dict(self.feature_overrides),
         }
+        if self.strategy_config:
+            payload["strategy_config"] = dict(self.strategy_config)
         encoded = json.dumps(
             payload,
             ensure_ascii=False,
@@ -49,11 +52,17 @@ _profiles = {
         system_id="fixed_agent",
         ablation_id=None,
         policy=PolicyKind.fixed,
-        feature_overrides=(),
-        supported=False,
-        unsupported_reason=(
-            "the frozen fixed_agent contract requires fixed hybrid, graph, expansion, and rerank; "
-            "B06 FixedPolicy currently orders individual retrieval tools"
+        feature_overrides=(
+            ("enable_dynamic_stop", False),
+            ("enable_sufficiency_stop", False),
+        ),
+        strategy_config=(
+            ("action_sequence", "hybrid>graph>expanded_hybrid>rerank"),
+            ("hybrid_fusion", "rrf_without_rerank"),
+            ("top_k", 10),
+            ("graph_hops", 2),
+            ("expansion_terms_max", 3),
+            ("soft_stopping", False),
         ),
     ),
     "agent.rule": AgentBehaviorProfile(

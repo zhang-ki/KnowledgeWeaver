@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -31,9 +32,10 @@ from knowledge_weaver.retrieval.cache_state import CacheStateOperation, CacheSta
 
 
 class _AgentServiceSpy:
-    def __init__(self) -> None:
+    def __init__(self, trace_sources: tuple[ActionTool, ...] = (ActionTool.bm25,)) -> None:
         self.requests = []
         self.profiles = []
+        self.trace_sources = trace_sources
 
     async def investigate(self, request):
         raise AssertionError("B07 trace adapter must use the additive trace port")
@@ -57,16 +59,22 @@ class _AgentServiceSpy:
             unanswered=["No supported answer in the isolated fixture."],
             usage=usage,
         )
-        step = AgentExecutionTraceStep(
-            sequence=1,
-            step=1,
-            action_id=deterministic_id("b07_trace_action", request.context.request_id),
-            source=ActionTool.bm25,
-            query_sha256="a" * 64,
-            context=request.context,
-            status="failed",
-            usage=Usage(tool_calls=1, count_kind=CountKind.unavailable),
-            error_code="ProviderUnavailable",
+        steps = tuple(
+            AgentExecutionTraceStep(
+                sequence=sequence,
+                step=sequence,
+                action_id=deterministic_id(
+                    "b07_trace_action",
+                    {"request_id": request.context.request_id, "sequence": sequence},
+                ),
+                source=source,
+                query_sha256="a" * 64,
+                context=request.context,
+                status="failed",
+                usage=Usage(tool_calls=1, count_kind=CountKind.unavailable),
+                error_code="ProviderUnavailable",
+            )
+            for sequence, source in enumerate(self.trace_sources, start=1)
         )
         return AgentExecutionResult(
             answer=answer,
@@ -87,7 +95,7 @@ class _AgentServiceSpy:
                     ),
                 ),
             ),
-            retrieval_steps=(step,),
+            retrieval_steps=steps,
             aggregate_usage=usage,
             validated_citation_ids=(),
         )
@@ -214,6 +222,55 @@ async def test_agent_adapter_passes_only_blind_input_and_persists_trace_result()
     assert output.agent_execution.retrieval_steps[0].error_code == "ProviderUnavailable"
     assert provider_usage.input_tokens == 10
     assert model_revision == "fixture-agent@r1"
+
+
+@pytest.mark.asyncio
+async def test_fixed_agent_adapter_rejects_out_of_order_public_trace() -> None:
+    (
+        protocol,
+        _generation,
+        verified,
+        query,
+        suite,
+        _adapter,
+        plan,
+        context,
+        budget,
+        receipt,
+    ) = _case_inputs()
+    adapter = AgentSuiteRouteAdapter(
+        _AgentServiceSpy(
+            trace_sources=(ActionTool.hybrid, ActionTool.rerank, ActionTool.graph)
+        ),
+        "agent.fixed",
+    )
+    suite = replace(
+        suite,
+        suite_id="system/fixed_agent/standard/seed-17",
+        system_id="fixed_agent",
+    )
+    plan = replace(
+        plan,
+        suite_id=suite.suite_id,
+        system_id="fixed_agent",
+        route_id="agent.fixed",
+        route_config_sha256=adapter.config_sha256,
+    )
+    receipt = receipt.model_copy(update={"route_id": "agent.fixed"})
+
+    with pytest.raises(ValueError, match="fixed_agent trace order"):
+        await adapter.execute(
+            query,
+            suite,
+            plan,
+            protocol,
+            generation=verified,
+            context=context,
+            budget=budget,
+            generation_config_sha256="c" * 64,
+            cache_state="cold",
+            cache_state_receipt=receipt,
+        )
 
 
 @pytest.mark.asyncio

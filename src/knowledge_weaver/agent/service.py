@@ -62,6 +62,7 @@ from knowledge_weaver.ports import (
     RetrievalPolicy,
     Retriever,
 )
+from knowledge_weaver.retrieval.hybrid import HybridRetriever
 
 from .evidence import EvidenceEntry, EvidenceLedger
 from .execution_profiles import agent_behavior_profile
@@ -72,7 +73,7 @@ from .features import (
     independent_source_gap,
     stable_action_key,
 )
-from .policies import FixedPolicy, LLMRoutingPolicy, RulePolicy, SegrPolicy
+from .policies import FixedAgentPolicy, FixedPolicy, LLMRoutingPolicy, RulePolicy, SegrPolicy
 from .verifier import StructuredEvidenceVerifier
 from .weights import ACTION_FAMILIES, SegrPolicyWeights, load_policy_weights
 
@@ -101,6 +102,7 @@ _DEFAULT_COSTS: dict[str, tuple[int, int]] = {
     "symbol": (128, 2_500),
     "entity": (256, 3_500),
     "graph": (512, 5_000),
+    "hybrid": (1_024, 19_000),
     "rerank": (5_120, 15_000),
 }
 
@@ -313,7 +315,19 @@ def _build_candidates(
     used_tool_calls: int,
     used_tokens: int,
     reranker_available: bool,
+    fixed_agent: bool = False,
 ) -> tuple[list[Action], bool]:
+    if fixed_agent:
+        return _build_fixed_agent_candidate(
+            state,
+            ledger,
+            tools,
+            weights,
+            budget,
+            used_tool_calls,
+            used_tokens,
+            reranker_available,
+        )
     remaining_tokens = max(0, budget.max_total_tokens - used_tokens)
     tool_slots = max(0, budget.max_tool_calls - used_tool_calls)
     if tool_slots <= 0:
@@ -445,6 +459,129 @@ def _build_candidates(
     if len(actions) > 30:
         actions = actions[:30]
     return actions, pruned
+
+
+def _build_fixed_agent_candidate(
+    state: InvestigationState,
+    ledger: EvidenceLedger,
+    tools: RetrieverMap,
+    weights: SegrPolicyWeights | None,
+    budget: Budget,
+    used_tool_calls: int,
+    used_tokens: int,
+    reranker_available: bool,
+) -> tuple[list[Action], bool]:
+    remaining_tokens = max(0, budget.max_total_tokens - used_tokens)
+    tool_slots = max(0, budget.max_tool_calls - used_tool_calls)
+    if tool_slots <= 0:
+        return [], True
+
+    facet = _find_focus_facet(state)
+    raw_attempts = state.policy_memory.get("attempts", [])
+    attempts = (
+        [item for item in raw_attempts if isinstance(item, Mapping)]
+        if isinstance(raw_attempts, list)
+        else []
+    )
+
+    def attempted(tool: ActionTool, query_kind: str | None = None) -> bool:
+        return any(
+            row.get("tool") == tool.value
+            and (query_kind is None or row.get("query_kind") == query_kind)
+            for row in attempts
+        )
+
+    candidate: Action | None = None
+    if not attempted(ActionTool.hybrid, "base"):
+        tool = ActionTool.hybrid
+        query = facet.text
+        candidate = Action(
+            id=deterministic_id(
+                "agent_action",
+                {
+                    "tool": tool.value,
+                    "facet_id": facet.id,
+                    "query": query,
+                    "query_kind": "base",
+                    "top_k": 10,
+                    "hops": None,
+                },
+            ),
+            tool=tool,
+            facet_id=facet.id,
+            query=query,
+            top_k=10,
+        )
+    elif not attempted(ActionTool.graph, "base"):
+        tool = ActionTool.graph
+        candidate = Action(
+            id=deterministic_id(
+                "agent_action",
+                {
+                    "tool": tool.value,
+                    "facet_id": facet.id,
+                    "query": facet.text,
+                    "query_kind": "base",
+                    "top_k": 10,
+                    "hops": 2,
+                },
+            ),
+            tool=tool,
+            facet_id=facet.id,
+            query=facet.text,
+            top_k=10,
+            hops=2,
+        )
+    elif not attempted(ActionTool.hybrid, "expanded"):
+        expanded = _expanded_query(state, facet, ledger)
+        if expanded:
+            tool = ActionTool.hybrid
+            candidate = Action(
+                id=deterministic_id(
+                    "agent_action",
+                    {
+                        "tool": tool.value,
+                        "facet_id": facet.id,
+                        "query": expanded,
+                        "query_kind": "expanded",
+                        "top_k": 10,
+                        "hops": None,
+                    },
+                ),
+                tool=tool,
+                facet_id=facet.id,
+                query=expanded,
+                top_k=10,
+            )
+
+    if candidate is None:
+        if attempted(ActionTool.rerank) or not ledger.hits or not reranker_available:
+            return [], False
+        tool = ActionTool.rerank
+        candidate = Action(
+            id=deterministic_id(
+                "agent_action",
+                {"tool": tool.value, "facet_id": facet.id, "query": facet.text, "top_k": 10},
+            ),
+            tool=tool,
+            facet_id=facet.id,
+            query=facet.text,
+            top_k=10,
+        )
+
+    estimated_tokens, estimated_ms = _action_cost(
+        candidate.tool.value,
+        candidate.query,
+        candidate.top_k,
+        weights,
+    )
+    if estimated_tokens > remaining_tokens:
+        return [], True
+    return [
+        candidate.model_copy(
+            update={"estimated_tokens": estimated_tokens, "estimated_ms": estimated_ms}
+        )
+    ], False
 
 
 def _merge_support_rows(
@@ -713,13 +850,24 @@ class AgentServiceImpl(AgentService):
     @staticmethod
     def _validate_retriever_map(retrievers: RetrieverMap) -> None:
         required = {"bm25", "dense", "symbol", "entity", "graph"}
+        allowed = required | {"hybrid"}
         missing = required - set(retrievers)
-        extra = set(retrievers) - required
+        extra = set(retrievers) - allowed
         if missing or extra:
             raise KnowledgeWeaverError(
                 ErrorCode.INVALID_INPUT,
-                "B06 requires exactly the five frozen retrieval tools",
+                "B06 requires the five frozen retrieval tools and only an optional hybrid route",
                 details={"missing": sorted(missing), "extra": sorted(extra)},
+            )
+        hybrid = retrievers.get("hybrid")
+        if hybrid is not None and (
+            not isinstance(hybrid, HybridRetriever)
+            or set(hybrid.channels) != {"bm25", "dense", "symbol", "entity"}
+            or hybrid.reranker is not None
+        ):
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "B06 hybrid action requires the frozen four-channel RRF route without reranking",
             )
 
     def get_trace(self, investigation_id: str) -> list[dict[str, Any]]:
@@ -878,8 +1026,21 @@ class AgentServiceImpl(AgentService):
 
         retrieval_steps: list[AgentExecutionTraceStep] = []
         tools = self._make_tools(ledger)
-        generator = self._make_generator(ledger, effective_budget, deadline, external_token_count)
         reranker = self._make_reranker(ledger)
+        fixed_agent = trace_profile is not None and trace_profile.route_id == "agent.fixed"
+        if fixed_agent and "hybrid" not in tools:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "fixed_agent requires the configured B04 hybrid RRF route",
+                request_id=request.context.request_id,
+            )
+        if fixed_agent and reranker is None:
+            raise KnowledgeWeaverError(
+                ErrorCode.INVALID_INPUT,
+                "fixed_agent requires the configured final reranker",
+                request_id=request.context.request_id,
+            )
+        generator = self._make_generator(ledger, effective_budget, deadline, external_token_count)
         self._assert_budget_ownership(tools, ledger)
         self._assert_budget_ownership({"reranker": reranker} if reranker else {}, ledger)
         verifier: EvidenceVerifier = (
@@ -888,7 +1049,7 @@ class AgentServiceImpl(AgentService):
             else StructuredEvidenceVerifier(generator.for_purpose("verifier"))
         )
         weights = self._request_weights(request)
-        policy = self._make_policy(request, flags, weights)
+        policy = self._make_policy(request, flags, weights, trace_profile)
         stop_reason: StopReason | None = None
         steps = 0
 
@@ -925,6 +1086,7 @@ class AgentServiceImpl(AgentService):
                     snapshot.tool_calls,
                     snapshot.total_tokens + external_tokens,
                     reranker is not None,
+                    fixed_agent=fixed_agent,
                 )
                 state = state.model_copy(update={"candidates": candidates})
                 if not candidates:
@@ -999,6 +1161,7 @@ class AgentServiceImpl(AgentService):
                             effective_budget,
                             deadline,
                             state,
+                            allow_graph_seed_lookup=fixed_agent,
                         )
                         if action.tool is ActionTool.entity and result.hits:
                             memory = _policy_memory(state)
@@ -1458,8 +1621,11 @@ class AgentServiceImpl(AgentService):
         request: InvestigationRequest,
         flags: Mapping[str, Any],
         weights: SegrPolicyWeights | None,
+        trace_profile: AgentExecutionProfile | None = None,
     ) -> RetrievalPolicy:
         if request.policy is PolicyKind.fixed:
+            if trace_profile is not None and trace_profile.route_id == "agent.fixed":
+                return FixedAgentPolicy()
             return FixedPolicy()
         if request.policy is PolicyKind.rule:
             return RulePolicy(enable_source_features=flags["enable_source_features"])
@@ -1484,13 +1650,19 @@ class AgentServiceImpl(AgentService):
         budget: Budget,
         deadline: datetime,
         state: InvestigationState,
+        *,
+        allow_graph_seed_lookup: bool = False,
     ) -> RetrievalResult:
         remaining = (deadline - datetime.now(UTC)).total_seconds()
         if remaining <= 0:
             raise DeadlineExceeded()
         graph_options = None
         if action.tool is ActionTool.graph:
-            if not state.policy_memory.get("seed_available") and not state.paths:
+            if (
+                not state.policy_memory.get("seed_available")
+                and not state.paths
+                and not allow_graph_seed_lookup
+            ):
                 raise KnowledgeWeaverError(
                     ErrorCode.MISSING_REFERENCE,
                     "graph action requires a resolved entity seed",

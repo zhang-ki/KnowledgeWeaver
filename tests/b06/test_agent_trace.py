@@ -273,12 +273,17 @@ def test_supported_agent_profiles_have_distinct_routes_and_config_hashes() -> No
     from knowledge_weaver.agent.execution_profiles import SUPPORTED_AGENT_ROUTE_IDS
 
     profiles = [agent_behavior_profile(route_id) for route_id in SUPPORTED_AGENT_ROUTE_IDS]
-    assert len(profiles) == 13
+    assert len(profiles) == 14
     assert len({item.route_id for item in profiles}) == len(profiles)
     assert len({item.config_sha256 for item in profiles}) == len(profiles)
+    fixed = agent_behavior_profile("agent.fixed")
+    assert fixed.supported is True
+    assert fixed.system_id == "fixed_agent"
+    assert dict(fixed.strategy_config)["action_sequence"] == (
+        "hybrid>graph>expanded_hybrid>rerank"
+    )
     assert agent_behavior_profile("agent.segr.ablation.A01").policy is PolicyKind.fixed
     assert agent_behavior_profile("agent.segr.ablation.A08").request_features() == {
         "enable_source_features": False
     }
-    with pytest.raises(ValueError, match="fixed hybrid"):
-        agent_behavior_profile("agent.fixed")
+    assert "agent.fixed" in SUPPORTED_AGENT_ROUTE_IDS

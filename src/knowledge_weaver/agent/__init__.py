@@ -7,7 +7,7 @@ from .execution_profiles import (
     AgentBehaviorProfile,
     agent_behavior_profile,
 )
-from .policies import FixedPolicy, LLMRoutingPolicy, RulePolicy, SegrPolicy
+from .policies import FixedAgentPolicy, FixedPolicy, LLMRoutingPolicy, RulePolicy, SegrPolicy
 from .service import FEATURE_DEFAULTS, AgentServiceImpl
 from .verifier import StructuredEvidenceVerifier
 from .weights import FEATURE_ORDER, SegrPolicyWeights, load_policy_weights
@@ -21,6 +21,7 @@ __all__ = [
     "AgentServiceImpl",
     "EvidenceEntry",
     "EvidenceLedger",
+    "FixedAgentPolicy",
     "FixedPolicy",
     "LLMRoutingPolicy",
     "RulePolicy",

@@ -130,6 +130,7 @@ class GraphDirection(str, Enum):
 class ActionTool(str, Enum):
     bm25 = "bm25"
     dense = "dense"
+    hybrid = "hybrid"
     symbol = "symbol"
     entity = "entity"
     graph = "graph"

@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented in the isolated B07 worktree on 2026-11-25; awaiting integration review. The B06 trace blocker is cleared only for the 13 exact route bindings listed below. The formal suite gate remains blocked by B04 cache-state coverage, and the frozen fixed_agent route remains unsupported by this B06 policy implementation.
+Implemented in the isolated B07 worktree on 2026-11-25; awaiting integration review. The B06 trace blocker is cleared only for the 14 exact route bindings listed below. The formal suite gate remains blocked by B04 cache-state coverage. The initial fixed_agent limitation is superseded by [CR-B07-FIXED-AGENT-ROUTE-v1](CR-B07-FIXED-AGENT-ROUTE-v1-20261125.md).
 
 ## Pre-implementation gap
 
@@ -35,13 +35,12 @@ AgentService.investigate(request) remains available with its existing Answer ret
 
 The immutable registry in src/knowledge_weaver/agent/execution_profiles.py binds each route to a unique canonical configuration SHA over the route, system, ablation, policy, and feature overrides:
 
+- agent.fixed uses the dedicated fixed hybrid/graph/expansion/rerank policy defined in CR-B07-FIXED-AGENT-ROUTE-v1.
 - agent.rule uses the rule policy.
 - agent.llm_router uses the LLM router policy.
 - agent.segr uses SEGR and requires the frozen policy weights SHA.
 - agent.segr.ablation.A01 uses fixed ordering with dynamic stopping disabled.
 - A02 disables graph retrieval; A03 disables relation semantic verification; A04 disables expansion; A05 disables reranking; A06 disables sufficiency stopping; A07 disables dynamic and sufficiency stopping; A08 disables source features; A09 disables learned gain; A10 sets the cost coefficient to zero. Each route is bound to SEGR and requires the frozen policy weights SHA.
-
-The frozen suite's agent.fixed identity is intentionally unsupported. It requires fixed hybrid retrieval, graph retrieval, expansion, and reranking, while the current B06 FixedPolicy orders individual retrieval tools. Mapping it to A01 or another policy would silently change the frozen system definition.
 
 ## Cache and registry gate
 
@@ -63,8 +62,8 @@ Only GraphRetriever's process-local snapshot cache is currently controllable. No
 
 ## Focused acceptance evidence
 
-- tests/b06/test_agent_trace.py covers exact tool order, actual per-step hits, retained failed attempts, cross-Generation rejection before answer generation, profile/config/weights/provider-config mismatch before retrieval, and distinct frozen profile identities.
+- tests/b06/test_agent_trace.py and tests/b06/test_agent_fixed_policy.py cover exact tool order, actual per-step hits, retained failed attempts, cross-Generation rejection before answer generation, profile/config/weights/provider-config mismatch before retrieval, and distinct frozen profile identities including fixed_agent.
 - tests/b07/test_agent_trace_executor.py covers blind request construction, exact trace and usage retention, missing cache receipt, and wrong Generation binding without entering the service.
-- tests/b07/test_suite_registry.py covers all 13 exact route adapters, preservation of B04 blocking, and the fixed_agent mismatch.
+- tests/b07/test_suite_registry.py covers all 14 exact route adapters and preservation of B04 blocking for fixed_agent as well as the other routes.
 - Targeted B06/B07 regressions passed: 42 tests in the trace/service/registry/Dense-executor group and 35 tests in final-pipeline/Generation-binding regressions. Ruff and compileall passed; git diff --check is recorded in the delivery log.
 - No formal Test suite, paid/external provider call, database operation, or dependency synchronization was performed for this change.

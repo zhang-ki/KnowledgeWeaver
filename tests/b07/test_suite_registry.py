@@ -141,10 +141,10 @@ def test_route_binding_rejects_mismatched_implementation_and_bad_config_hash() -
 def test_agent_trace_routes_are_unique_and_keep_b04_blocker() -> None:
     protocol, _dataset, schedule = _registry_inputs()
     adapters = build_agent_suite_adapters(_AgentServiceStub())
-    assert "agent.fixed" not in adapters
-    assert len(adapters) == 13
-    assert len({adapter.config_sha256 for adapter in adapters.values()}) == 13
-    assert len({id(adapter) for adapter in adapters.values()}) == 13
+    assert "agent.fixed" in adapters
+    assert len(adapters) == 14
+    assert len({adapter.config_sha256 for adapter in adapters.values()}) == 14
+    assert len({id(adapter) for adapter in adapters.values()}) == 14
     assert all(isinstance(adapter, AgentSuiteRouteAdapter) for adapter in adapters.values())
     registry = build_suite_registry(
         schedule,
@@ -170,5 +170,7 @@ def test_agent_trace_routes_are_unique_and_keep_b04_blocker() -> None:
     assert any("CACHE_CONTROL_PORT" in item for item in rule.blockers)
     assert not any("B06_TRACE_PORT" in item for item in segr.blockers)
     assert not any("B06_TRACE_PORT" in item for item in ablation.blockers)
-    assert any("B06_TRACE_PORT" in item for item in fixed.blockers)
+    assert not any("B06_TRACE_PORT" in item for item in fixed.blockers)
+    assert any("CACHE_CONTROL_PORT" in item for item in fixed.blockers)
     assert rule.executable is False
+    assert fixed.executable is False
