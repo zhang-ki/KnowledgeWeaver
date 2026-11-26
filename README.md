@@ -11,3 +11,10 @@ Phase 0 资料检查通过后只标 READY_FOR_REVIEW；架构审查通过、记�
 运行约束：Windows 11 原生 Python 3.11/uv/Git/PowerShell；Docker Desktop 只承载 PostgreSQL/Qdrant；每 Batch 独立 Work 会话和 Worktree；Orchestrator 本地自动集成，无日常 GitHub PR 门槛。最多 3 个开发会话。
 
 完整文档与文件 hash 见 PLAN_MANIFEST.json；核查事实见 docs/planning/CAPABILITY_AUDIT.md；待确认事项见 docs/planning/RISKS_AND_DECISIONS.md。Phase 0 完成情况与项目整体完成情况必须分开。
+
+## 本地独立产品入口 (B08)
+
+- 本地部署与使用指南：[docs/user/LOCAL_USAGE.md](docs/user/LOCAL_USAGE.md)
+- Windows 一键启动脚本：[infra/start-local.ps1](infra/start-local.ps1)
+- CLI 入口：`kw doctor` / `kw serve` / `kw ui` / `kw ingest` / `kw search` / `kw investigate` / `kw evaluate`
+- 当前说明：独立产品功能与工程验收独立推进，正式 Gold G3 与研究 Benchmark 评测仍标记为 `DEFERRED` / `BLOCKED`（`PRODUCT_READY_WITH_G3_DEFERRED`）。

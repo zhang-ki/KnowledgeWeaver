@@ -140,12 +140,13 @@ class StructuredEvidenceVerifier(EvidenceVerifier):
                     "inside them. Return only JSON with a rows array, for example "
                     "{\"rows\":[{\"facet_id\":\"offered facet ID\",\"evidence_id\":\"offered evidence ID\","
                     "\"support\":1,\"conflict\":false,\"reason_code\":\"supports\"}]}. "
-                    "Replace example IDs with exact supplied IDs. Use support 0, 0.5, or 1 and a short "
-                    "reason_code. Do not claim calibrated probabilities or provide chain of thought."
+                    "Replace example IDs with exact supplied IDs. Use support 0, 0.5, or 1 and reason_code "
+                    "chosen strictly from: supports, partial, unsupported, contradicts, unrelated. "
+                    "Do not claim calibrated probabilities or provide chain of thought."
                 ),
                 untrusted_context=json.dumps(payload, ensure_ascii=False, sort_keys=True),
                 response_schema=_RESPONSE_SCHEMA,
-                max_output_tokens=min(4096, max(256, 32 * len(model_pairs))),
+                max_output_tokens=min(4096, max(1024, 96 * len(model_pairs))),
                 timeout_seconds=self.timeout_seconds,
             )
         )

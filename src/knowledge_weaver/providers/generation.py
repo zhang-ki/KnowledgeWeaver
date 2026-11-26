@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from knowledge_weaver.core.budget import BudgetLedger, BudgetReservation
 from knowledge_weaver.core.config import RemoteUseApproval, RuntimeSettings
@@ -49,10 +50,16 @@ class CloudGenerationProvider:
             header_name=self.profile.auth_header,
             scheme=self.profile.auth_scheme,
         )
+        system_content = request.system_instruction
+        if self.profile.json_mode == "json_object" and request.response_schema:
+            system_content = (
+                f"{system_content}\n\nRequired JSON Schema (include all required fields and valid enum values): "
+                f"{json.dumps(request.response_schema, ensure_ascii=False, separators=(',', ':'))}"
+            )
         payload: dict[str, Any] = {
             self.profile.model_field: self.profile.model,
             self.profile.messages_field: [
-                {"role": "system", "content": request.system_instruction},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": request.untrusted_context},
             ],
             self.profile.max_tokens_field: request.max_output_tokens,
@@ -69,7 +76,16 @@ class CloudGenerationProvider:
                 },
             }
 
-        input_estimate = estimate_tokens(request.system_instruction + request.untrusted_context)
+        host = (urlsplit(self.profile.endpoint_url).hostname or "").casefold()
+        disable_thinking = (
+            self.profile.disable_thinking
+            if self.profile.disable_thinking is not None
+            else host.endswith(".aliyuncs.com")
+        )
+        if disable_thinking:
+            payload["enable_thinking"] = False
+
+        input_estimate = estimate_tokens(system_content + request.untrusted_context)
 
         async def reserve() -> BudgetReservation:
             return await self.budget.reserve_llm_call(
@@ -118,13 +134,23 @@ class CloudGenerationProvider:
             finish_reason = (
                 choice.get("finish_reason") if isinstance(choice, dict) else None
             )
+            message = choice.get("message") if isinstance(choice, dict) else None
+            reasoning_exhausted = bool(
+                finish_reason == "length"
+                and isinstance(message, dict)
+                and not str(message.get("content") or "").strip()
+                and str(message.get("reasoning_content") or "").strip()
+            )
+            diagnostic: dict[str, Any] = {
+                "failure_stage": "content_json_parse",
+                "finish_reason": finish_reason,
+                "content_truncated": finish_reason == "length",
+            }
+            if reasoning_exhausted:
+                diagnostic["reasoning_exhausted"] = True
             raise StructuredResponseInvalid(
                 "provider response content was not valid JSON",
-                diagnostic={
-                    "failure_stage": "content_json_parse",
-                    "finish_reason": finish_reason,
-                    "content_truncated": finish_reason == "length",
-                },
+                diagnostic=diagnostic,
             ) from None
         except (KeyError, IndexError, TypeError):
             await reservation.finish(None)

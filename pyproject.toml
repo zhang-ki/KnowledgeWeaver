@@ -13,6 +13,9 @@ dependencies = [
     "pydantic>=2.11,<3",
 ]
 
+[project.scripts]
+kw = "knowledge_weaver.cli:main"
+
 [project.optional-dependencies]
 b01-ingestion = [
     "docling>=2,<3",

@@ -64,6 +64,7 @@ class OpenAIChatProfile(_Profile):
     max_tokens_field: str = "max_tokens"
     response_format_field: str = "response_format"
     json_mode: Literal["none", "json_object", "json_schema"] = "json_object"
+    disable_thinking: bool | None = None
     max_attempts: int = Field(default=3, ge=1, le=3)
     retry_backoff_seconds: float = Field(default=0.25, ge=0.0, le=10.0)
     timeout_seconds: float = Field(default=15.0, gt=0.0, le=120.0)
@@ -86,10 +87,17 @@ class OpenAIChatProfile(_Profile):
         base_url, model, key = _required(
             env, "KW_LLM_BASE_URL", "KW_LLM_MODEL", "KW_LLM_API_KEY"
         )
+        raw_think = env.get("KW_LLM_DISABLE_THINKING", "").strip().casefold()
+        disable_thinking: bool | None = None
+        if raw_think in {"true", "1"}:
+            disable_thinking = True
+        elif raw_think in {"false", "0"}:
+            disable_thinking = False
         return cls(
             endpoint_url=_endpoint_with_path(base_url, "chat/completions"),
             model=model,
             api_key=SecretStr(key),
+            disable_thinking=disable_thinking,
         )
 
 

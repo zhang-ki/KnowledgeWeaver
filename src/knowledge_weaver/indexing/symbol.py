@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 from collections import defaultdict
 from pathlib import Path
@@ -31,6 +32,7 @@ class SymbolIndex:
         if not path.exists():
             return []
         symbol = _norm(query.symbol or query.text)
+        query_tokens = set(re.findall(r"[a-z0-9_.]+", symbol)) if symbol else set()
         allowed = None if query.context.source_ids is None else set(query.context.source_ids)
         scores: dict[str, float] = defaultdict(float)
         for row in json.loads(path.read_text(encoding="utf-8")):
@@ -39,8 +41,12 @@ class SymbolIndex:
             name = _norm(row["name"])
             if name == symbol:
                 scores[row["chunk_id"]] = max(scores[row["chunk_id"]], 2.0)
-            elif name.startswith(symbol):
+            elif symbol and name.endswith(f".{symbol}"):
+                scores[row["chunk_id"]] = max(scores[row["chunk_id"]], 1.5)
+            elif symbol and name.startswith(symbol):
                 scores[row["chunk_id"]] = max(scores[row["chunk_id"]], 1.0 / (1 + len(name) - len(symbol)))
+            elif query_tokens and any(name == tok or name.endswith(f".{tok}") for tok in query_tokens):
+                scores[row["chunk_id"]] = max(scores[row["chunk_id"]], 1.2)
         ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:query.top_k]
         return [IndexCandidate(chunk_id=key, rank=i, raw_score=score, score_direction=ScoreDirection.higher) for i, (key, score) in enumerate(ordered, 1)]
 
@@ -64,6 +70,7 @@ class EntityIndex:
             return []
         requested = set(query.entity_ids)
         needle = _norm(query.text)
+        needle_tokens = set(re.findall(r"[a-z0-9_.]+", needle)) if needle else set()
         allowed = None if query.context.source_ids is None else set(query.context.source_ids)
         scores: dict[str, float] = defaultdict(float)
         for row in json.loads(path.read_text(encoding="utf-8")):
@@ -73,6 +80,12 @@ class EntityIndex:
                 continue
             names = [_norm(row["canonical_name"]), *(_norm(alias) for alias in row["aliases"])]
             if any(name == needle for name in names):
+                scores[row["chunk_id"]] = max(scores[row["chunk_id"]], 2.0)
+            elif needle_tokens and any(
+                name in needle_tokens or any(name.endswith(f".{tok}") for tok in needle_tokens)
+                for name in names
+                if name
+            ):
                 scores[row["chunk_id"]] = max(scores[row["chunk_id"]], 1.0)
         ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:query.top_k]
         return [IndexCandidate(chunk_id=key, rank=i, raw_score=score, score_direction=ScoreDirection.higher) for i, (key, score) in enumerate(ordered, 1)]

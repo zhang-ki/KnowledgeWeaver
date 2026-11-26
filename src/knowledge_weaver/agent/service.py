@@ -1254,6 +1254,7 @@ class AgentServiceImpl(AgentService):
                             }
                         )
                         matrix = None
+                        verification_error: str | None = None
                         verification_ids = list(new_ids[:40])
                         if action.tool is ActionTool.graph and result.paths:
                             # A graph action can add path structure over evidence
@@ -1309,6 +1310,11 @@ class AgentServiceImpl(AgentService):
                             except asyncio.CancelledError:
                                 raise
                             except Exception as exc:  # noqa: BLE001 - unavailable verification is conservative.
+                                verification_error = (
+                                    f"{exc.code.value}: {exc.envelope.message}"
+                                    if isinstance(exc, KnowledgeWeaverError)
+                                    else f"Evidence verification failed: {type(exc).__name__}"
+                                )
                                 state = state.model_copy(
                                     update={
                                         "policy_memory": {
@@ -1390,6 +1396,7 @@ class AgentServiceImpl(AgentService):
                         new_evidence_ids=new_ids,
                         support_matrix=matrix,
                         reward=reward,
+                        error=verification_error,
                         usage=action_usage,
                     )
                     state = policy.observe(state, observation)
@@ -1954,6 +1961,7 @@ class AgentServiceImpl(AgentService):
                         "\"evidence_ids\":[\"offered evidence ID\"],\"relation_ids\":[]}],\"unanswered\":[]} "
                         "or, when insufficient, {\"status\":\"insufficient\",\"claims\":[],"
                         "\"unanswered\":[\"facet text\"]}. Replace example text and IDs with exact supplied values. "
+                        "Every claim object MUST include \"text\", \"evidence_ids\", and \"relation_ids\" (use [] when none apply). "
                         "Do not provide chain of thought."
                         f"{language_instruction}"
                     ),

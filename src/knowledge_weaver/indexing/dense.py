@@ -46,8 +46,20 @@ class QdrantDenseIndex:
                 "mode_pair": ["document", "query"],
             }
             return self._metadata[(corpus_id, generation_id)]
-        batch = await self.provider.embed(texts, "document")
-        if len(batch.vectors) != len(rows):
+        batch = await self.provider.embed(texts[:16], "document")
+        all_vectors = list(batch.vectors)
+        for start in range(16, len(texts), 16):
+            sub_texts = texts[start : start + 16]
+            sub_batch = await self.provider.embed(sub_texts, "document")
+            if len(sub_batch.vectors) != len(sub_texts):
+                raise ValueError("embedding count does not match chunks")
+            if (
+                sub_batch.dimension != batch.dimension
+                or sub_batch.configuration_fingerprint != batch.configuration_fingerprint
+            ):
+                raise ValueError("embedding configuration changed mid-publish")
+            all_vectors.extend(sub_batch.vectors)
+        if len(all_vectors) != len(rows):
             raise ValueError("embedding count does not match chunks")
         if not batch.configuration_fingerprint:
             raise ValueError("document embedding configuration fingerprint is required")
@@ -61,7 +73,7 @@ class QdrantDenseIndex:
         if vector_config is None or vector_config.size != batch.dimension:
             raise ValueError("Qdrant collection dimension mismatch")
         points = []
-        for row, vector in zip(rows, batch.vectors, strict=True):
+        for row, vector in zip(rows, all_vectors, strict=True):
             point_id = str(uuid.uuid5(uuid.UUID(generation_id), json.dumps([row["chunk_id"], batch.fingerprint], separators=(",", ":"))))
             points.append(models.PointStruct(id=point_id, vector=vector, payload={
                 "corpus_id": corpus_id,
